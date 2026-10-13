@@ -1,0 +1,63 @@
+import { all, one, run } from '../db.ts';
+import { publish } from '../events.ts';
+import { getSettings } from '../settings.ts';
+import { activeRunId, editLabels, isAllowedAuthor, labelsOf, repoRef, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
+import { label, moveTo, parseLabels } from '../workflow/labels.ts';
+import { finishMerged, stopAfterClosedPr } from './merge.ts';
+import { stopRun } from './runner.ts';
+
+/** Pulls changed tickets for one repo, then checks pull requests waiting for your review. */
+export async function syncRepo(repo: RepoRow) {
+  const ref = repoRef(repo);
+  // Overlap the window a little: `since` compares update times, and duplicates are harmless upserts.
+  const started = new Date(Date.now() - 60_000).toISOString();
+  const changed = await sourceFor(repo).listChanged(ref, repo.synced_at);
+  for (const t of changed) {
+    if (!isAllowedAuthor(t.author)) continue;
+    const existing = one<TicketRow>('SELECT * FROM tickets WHERE repo_id = ? AND number = ?', repo.id, t.number);
+    // Removing workshop/failed is how you ask Workshop to try again.
+    const retry = existing && labelsOf(existing).includes(label.failed) && !t.labels.includes(label.failed);
+    run(
+      `INSERT INTO tickets (repo_id, number, node_id, title, body, url, author, state, labels, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (repo_id, number) DO UPDATE SET node_id = excluded.node_id, title = excluded.title, body = excluded.body,
+         url = excluded.url, state = excluded.state, labels = excluded.labels, updated_at = excluded.updated_at
+         ${retry ? ', failures = 0' : ''}`,
+      repo.id,
+      t.number,
+      t.nodeId ?? null,
+      t.title,
+      t.body,
+      t.url,
+      t.author,
+      t.state,
+      JSON.stringify(t.labels),
+      t.updatedAt,
+    );
+    const active = existing && t.state === 'closed' ? activeRunId(existing.id) : null;
+    if (active) await stopRun(active, 'The ticket was closed.', false);
+  }
+  await syncReviews(repo);
+  run('UPDATE repos SET synced_at = ? WHERE id = ?', started, repo.id);
+  if (changed.length) publish('tickets');
+}
+
+/** Reviews land on the pull request, not the issue, so every PR waiting on you is checked each sync. */
+async function syncReviews(repo: RepoRow) {
+  const vcs = vcsFor(repo);
+  const ref = repoRef(repo);
+  const authors = getSettings().authors;
+  const tickets = all<TicketRow>("SELECT * FROM tickets WHERE repo_id = ? AND state = 'open' AND pr_number IS NOT NULL", repo.id);
+  for (const t of tickets) {
+    const state = parseLabels(labelsOf(t));
+    if (state.stage !== 'pr-review' || state.needsInfo) continue;
+    const pr = await vcs.pullRequestState(ref, t.pr_number!, authors);
+    run('UPDATE tickets SET pr_status = ? WHERE id = ?', pr.state === 'open' ? (pr.decision ?? 'review') : pr.state, t.id);
+    let move: ReturnType<typeof moveTo> | null = null;
+    if (pr.state === 'merged') await finishMerged(t);
+    else if (pr.state === 'closed') await stopAfterClosedPr(t);
+    else if (pr.decision === 'approved') move = moveTo(labelsOf(t), 'merge');
+    else if (pr.decision === 'changes_requested') move = moveTo(labelsOf(t), 'reclassify');
+    if (move) await editLabels(t, move.add, move.remove);
+  }
+}

@@ -1,0 +1,133 @@
+import type { RepoView, TicketView } from './api-types.ts';
+import { all, one, run } from './db.ts';
+import { publish } from './events.ts';
+import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
+import type { RepoRef } from './providers/types.ts';
+import { getSettings } from './settings.ts';
+import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
+
+export interface RepoRow {
+  id: number;
+  vcs_connection_id: number;
+  ticket_connection_id: number | null;
+  full_name: string;
+  default_branch: string;
+  private: number;
+  url: string;
+  enabled: number;
+  image: string | null;
+  synced_at: string | null;
+}
+
+export interface TicketRow {
+  id: number;
+  repo_id: number;
+  number: number;
+  node_id: string | null;
+  title: string;
+  body: string;
+  url: string;
+  author: string;
+  state: 'open' | 'closed';
+  labels: string;
+  branch: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  pr_status: string | null;
+  failures: number;
+  updated_at: string;
+}
+
+export const MAX_ATTEMPTS = 2;
+
+export const repoRef = (r: RepoRow): RepoRef => ({ fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url });
+
+export const getRepo = (id: number) => one<RepoRow>('SELECT * FROM repos WHERE id = ?', id);
+export const getTicket = (id: number) => one<TicketRow>('SELECT * FROM tickets WHERE id = ?', id);
+export const labelsOf = (t: TicketRow): string[] => JSON.parse(t.labels);
+export const branchOf = (t: TicketRow) => t.branch ?? branchFor(t.number, t.title);
+/** The design doc lives beside the branch name, so renaming the issue doesn't move it. */
+export const docPathOf = (t: TicketRow) => `docs/workshop/${branchOf(t).replace(/^workshop\//, '')}.md`;
+
+export function repoView(r: RepoRow): RepoView {
+  return { id: r.id, connectionId: r.vcs_connection_id, fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url, enabled: Boolean(r.enabled), image: r.image };
+}
+
+export function vcsFor(repo: RepoRow) {
+  const conn = getConnection(repo.vcs_connection_id);
+  if (!conn) throw new Error(`${repo.full_name}: its code host connection was removed.`);
+  return vcsOf(conn);
+}
+
+export function sourceFor(repo: RepoRow) {
+  const conn = getConnection(repo.ticket_connection_id);
+  if (!conn) throw new Error(`${repo.full_name} has no ticket source. Add GitHub Issues under Connections.`);
+  return ticketsOf(conn);
+}
+
+export function isAllowedAuthor(login: string) {
+  return getSettings().authors.some((a) => a.toLowerCase() === login.toLowerCase());
+}
+
+export function activeRunId(ticketId: number) {
+  return one<{ id: string }>("SELECT id FROM runs WHERE ticket_id = ? AND status IN ('starting', 'running', 'publishing', 'paused')", ticketId)?.id ?? null;
+}
+
+export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
+  const labels = labelsOf(t);
+  const state = parseLabels(labels);
+  const next = state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : describeStep(nextStep(state, t.state === 'open'));
+  return {
+    id: t.id,
+    repo: repo.full_name,
+    number: t.number,
+    title: t.title,
+    url: t.url,
+    author: t.author,
+    state: t.state,
+    labels,
+    size: state.size,
+    stage: state.stage,
+    needsInfo: state.needsInfo,
+    skipped: state.skip,
+    failed: state.failed,
+    next,
+    branch: t.branch,
+    prNumber: t.pr_number,
+    prUrl: t.pr_url,
+    prStatus: t.pr_status,
+    activeRunId: activeRunId(t.id),
+    updatedAt: t.updated_at,
+  };
+}
+
+export function listTicketViews(includeClosed = false): TicketView[] {
+  const rows = all<TicketRow & { r_id: number }>(
+    `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE r.enabled = 1 ${includeClosed ? '' : "AND t.state = 'open'"} ORDER BY t.updated_at DESC`,
+  );
+  const repos = new Map(all<RepoRow>('SELECT * FROM repos').map((r) => [r.id, r]));
+  return rows.map((t) => ticketView(t, repos.get(t.repo_id)!));
+}
+
+/** Applies label edits on the ticket source, then mirrors them locally. */
+export async function editLabels(t: TicketRow, add: string[], remove: string[]) {
+  const current = labelsOf(t);
+  add = add.filter((l) => !current.includes(l));
+  remove = remove.filter((l) => current.includes(l) && !add.includes(l));
+  if (!add.length && !remove.length) return;
+  const repo = getRepo(t.repo_id)!;
+  await sourceFor(repo).setLabels(repoRef(repo), t.number, add, remove);
+  const next = [...current.filter((l) => !remove.includes(l)), ...add];
+  run('UPDATE tickets SET labels = ? WHERE id = ?', JSON.stringify(next), t.id);
+  t.labels = JSON.stringify(next);
+  publish('tickets');
+}
+
+/** Best-effort marker on GitHub so you can see from the issue that an agent is working on it. */
+export async function markRunning(t: TicketRow, on: boolean) {
+  try {
+    await editLabels(t, on ? [label.running] : [], on ? [] : [label.running]);
+  } catch (err) {
+    console.warn(`Couldn't update ${label.running} on #${t.number}: ${(err as Error).message}`);
+  }
+}

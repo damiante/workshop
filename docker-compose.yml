@@ -1,0 +1,43 @@
+# Workshop: paste into a Portainer stack (or run `docker compose up -d`), set the two
+# secrets below, and deploy. Then open http://<host>:8080, sign in with WORKSHOP_PASSWORD
+# and add Workshop to an authenticator app. Do the first sign-in straight away: until an
+# authenticator is enrolled, the password alone is enough to enrol one.
+#
+# Put it behind a TLS reverse proxy before exposing it to the internet (see README.md).
+
+services:
+  workshop:
+    # Published by .github/workflows/build.yml on every push to main.
+    image: ghcr.io/damiante/workshop:latest
+    # Alternative: build from source on the host instead of pulling an image:
+    # build: .
+    container_name: workshop
+    restart: unless-stopped
+    ports:
+      - "8080:3000"
+    environment:
+      # Required: the sign-in password, at least 12 characters.
+      WORKSHOP_PASSWORD: "change-me-to-a-long-random-password"
+      # Required: encrypts the credentials Workshop stores (GitHub App key, Claude token,
+      # SSH keys). Keep a copy: if it changes, saved credentials can't be read.
+      # Generate one with: openssl rand -base64 32
+      WORKSHOP_SECRET_KEY: "change-me-to-the-output-of-openssl-rand"
+      # Default time zone for operating hours (you can change it later in Settings).
+      TZ: "Australia/Melbourne"
+      # Lost your authenticator? Set this to "1", restart, sign in to enrol a new one,
+      # then remove it again.
+      # WORKSHOP_RESET_TOTP: "1"
+    volumes:
+      # The database and run logs.
+      - workshop_data:/data
+      # Optional: let Workshop run agents on THIS machine's Docker (then add a
+      # "Local socket" agent host in Workshop). This gives Workshop root-equivalent
+      # access to the machine. Also uncomment group_add (and security_opt on SELinux).
+      # - /var/run/docker.sock:/var/run/docker.sock
+    # group_add:
+    #   - "999"           # the socket's group id on the host: stat -c %g /var/run/docker.sock
+    # security_opt:
+    #   - label=disable   # SELinux hosts (Fedora, RHEL) only: allows access to the host socket
+
+volumes:
+  workshop_data:
