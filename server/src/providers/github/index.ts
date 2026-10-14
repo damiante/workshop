@@ -205,7 +205,14 @@ export class GitHubApp implements VcsHost, TicketSource {
 
   async close(repo: RepoRef, number: number) {
     const kit = await this.kit(repo);
-    await kit.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', { ...split(repo), issue_number: number, state: 'closed', state_reason: 'completed' });
+    try {
+      await kit.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', { ...split(repo), issue_number: number, state: 'closed', state_reason: 'completed' });
+    } catch (err) {
+      // A merged PR's "Closes #n" can close the issue a moment before we do; GitHub rejects the second close.
+      if ((err as { status?: number }).status !== 422) throw err;
+      const { data } = await kit.request('GET /repos/{owner}/{repo}/issues/{issue_number}', { ...split(repo), issue_number: number });
+      if (data.state !== 'closed') throw err;
+    }
   }
 
   async ensureLabels(repo: RepoRef, labels: LabelDef[]) {
