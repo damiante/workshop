@@ -69,6 +69,9 @@ export interface TestResult {
   message: string;
 }
 
+/** Which of a repository's tickets Workshop works on: all open ones, or only those labelled workshop/nominated. */
+export type RepoSelection = 'all' | 'nominated';
+
 export interface RepoView {
   id: number;
   connectionId: number;
@@ -80,6 +83,7 @@ export interface RepoView {
   image: string | null;
   /** Higher goes first. Lower-priority repos wait until every open ticket here has been classified. */
   priority: number;
+  selection: RepoSelection;
 }
 
 export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'merge';
@@ -113,6 +117,15 @@ export interface ModelOption {
 export type Size = 'xs' | 's' | 'm' | 'l' | 'xl';
 export type Stage = 'design' | 'design-review' | 'implement' | 'pr-review' | 'merge' | 'reclassify';
 
+/** Fields of a ticket's state to change by hand; fields left out stay as they are. */
+export interface TicketStatePatch {
+  stage?: Stage | null;
+  size?: Size | null;
+  needsInfo?: boolean;
+  skip?: boolean;
+  failed?: boolean;
+}
+
 /** How you've pushed a ticket by hand: one stage, or on until Workshop would wait for you. */
 export type Push = 'stage' | 'lifecycle';
 
@@ -130,6 +143,8 @@ export interface TicketView {
   needsInfo: boolean;
   skipped: boolean;
   failed: boolean;
+  /** Null when the repository works on its whole backlog, otherwise whether this ticket has the nominated label. */
+  nominated: boolean | null;
   /** What Workshop will do next, in words, or null when it's waiting on you or finished. */
   next: string | null;
   branch: string | null;
@@ -189,6 +204,8 @@ export interface HostView {
   id: number;
   name: string;
   status: ConnectionStatus;
+  /** False when switched off for new agents; running agents carry on. */
+  available: boolean;
   slots: number;
   busy: number;
   specs: string | null;

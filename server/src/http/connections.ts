@@ -266,7 +266,13 @@ connectionsRouter.post('/repos/refresh', async (_req, res) => {
 connectionsRouter.put('/repos/:id', async (req, res) => {
   const repo = one<RepoRow>('SELECT * FROM repos WHERE id = ?', Number(req.params.id));
   check(repo, 'Repository not found.', 404);
-  const { enabled, image, priority } = req.body ?? {};
+  const { enabled, image, priority, selection } = req.body ?? {};
+  if (selection !== undefined) {
+    check(selection === 'all' || selection === 'nominated', 'Choose "all" or "nominated".');
+    // Repositories turned on before nominating existed don't have the label yet.
+    if (selection === 'nominated' && repo.enabled && enabled !== false) await sourceFor(repo).ensureLabels(repoRef(repo), LABEL_DEFS);
+    run('UPDATE repos SET selection = ? WHERE id = ?', selection, repo.id);
+  }
   if (image !== undefined) {
     check(image === null || image === '' || (typeof image === 'string' && /^[\w.\-/:@]+$/.test(image)), 'The image must be a Docker image reference.');
     run('UPDATE repos SET image = ? WHERE id = ?', image || null, repo.id);
@@ -285,5 +291,10 @@ connectionsRouter.put('/repos/:id', async (req, res) => {
     run('UPDATE repos SET enabled = 0 WHERE id = ?', repo.id);
   }
   publish('repos');
+  if (selection !== undefined) {
+    publish('tickets');
+    publish('runs');
+    if (selection === 'nominated') kick();
+  }
   res.json(repoView(one<RepoRow>('SELECT * FROM repos WHERE id = ?', repo.id)!));
 });

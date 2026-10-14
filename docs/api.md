@@ -33,6 +33,10 @@ curl -X POST $WORKSHOP/api/tickets/12/launch -H "Authorization: Bearer $TOKEN"
 curl -X POST $WORKSHOP/api/tickets/12/push -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"scope":"lifecycle"}'
 
+# Switch an agent host off for new agents (it stays connected; running agents carry on)
+curl -X PUT $WORKSHOP/api/hosts/3 -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"available":false}'
+
 # Stop a run
 curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 ```
@@ -51,6 +55,8 @@ curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 Either push also ends where Workshop would wait for you anyway: your pull request review, a question (`workshop/needs-info`), `workshop/skip`, `workshop/failed`, or the ticket closing. A push only lifts the mode gate: dependencies, model settings, the Claude allowance, the API cap, free agent hosts and one agent per ticket still apply, and pushed tickets go to the front of the queue. An approved pull request is merged while Workshop is paused only if its ticket was pushed.
 
 `DELETE /api/tickets/:id/push` cancels a push. It doesn't stop an agent that's already running (use `POST /api/runs/:id/stop` for that).
+
+`PUT /api/tickets/:id/nominated` with `{"nominated": true}` or `false` adds or removes the `workshop/nominated` label on a ticket in a repository that only works on nominated tickets. It answers with the ticket; 409 if the repository works on its whole backlog.
 
 A push is refused with 409 and the reason when the ticket is closed, failed, skipped, waiting on a question or waiting for your review, or (for `stage`) already has an agent working on that stage. A ticket that doesn't exist, belongs to a disabled repository or was opened by someone outside the author allowlist is 404, and a missing or invalid scope is 400.
 
