@@ -210,6 +210,14 @@ describe('OpenAPI', () => {
     expect(Object.keys(res.body).sort()).toEqual(props.sort());
   });
 
+  it('describes the ticket state request body', () => {
+    const op = OPENAPI.paths['/tickets/{id}/state'].put as { requestBody: { content: Record<string, { schema: unknown }> } };
+    expect(Object.values(op.requestBody.content)[0].schema).toEqual({ $ref: '#/components/schemas/TicketStatePatch' });
+    const patch = OPENAPI.components.schemas.TicketStatePatch as { properties: object; required: string[] };
+    expect(Object.keys(patch.properties).sort()).toEqual(['failed', 'needsInfo', 'size', 'skip', 'stage']);
+    expect(patch.required).toEqual([]);
+  });
+
   it('/agents matches its schema fields', async () => {
     const res = await request(app).get('/api/agents').set('cookie', cookie);
     const props = Object.keys((OPENAPI.components.schemas.AgentClassView as { properties: object }).properties);
