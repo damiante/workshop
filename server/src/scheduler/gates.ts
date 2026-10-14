@@ -85,6 +85,19 @@ export function dependencyBlock(refs: string[]): string | null {
   return refs.length ? `Depends on ${joinRefs(refs)}` : null;
 }
 
+/** A ticket the Classifier still has to look at: no stage yet, and nothing it waits on. */
+export function isUnclassified(labels: string[], open: boolean, blockers: string[]): boolean {
+  if (blockers.length) return false;
+  const step = nextStep(parseLabels(labels), open);
+  return step?.kind === 'agent' && step.agent === 'classifier' && step.mode === 'normal';
+}
+
+/** Why unclassified tickets in higher-priority repos hold a ticket back, or null. */
+export function priorityBlock(priority: number, waiting: { repo: string; priority: number }[]): string | null {
+  const names = [...new Set(waiting.filter((w) => w.priority > priority).map((w) => w.repo))];
+  return names.length ? `Waiting for ${joinRefs(names)} to be classified first` : null;
+}
+
 /** Finish work in flight before starting new work. */
 export function stepPriority(step: Step): number {
   if (step.kind === 'merge') return 0;

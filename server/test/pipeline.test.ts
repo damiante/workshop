@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StepSpec } from '../src/providers/types.ts';
 
 // The providers are replaced with fakes; everything else (DB, runner, transitions) is real.
@@ -507,5 +507,64 @@ describe('manual pushes', () => {
 
   it('launches nothing for a paused Workshop with no pushes', () => {
     expect(buildQueue().every((c) => c.blockedBy)).toBe(true);
+  });
+});
+
+describe('repository priority', () => {
+  const held = () => buildQueue().find((c) => c.ticket.id === 1)?.blockedBy;
+  let api: number;
+  const apiTicket = (labels: string[], over: { author?: string } = {}) =>
+    Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 9, 'Api', '', 'u', ?, 'open', ?, '2026-10-13T00:00:00Z')", api, over.author ?? 'me', JSON.stringify(labels)).lastInsertRowid);
+
+  beforeEach(() => {
+    saveSettings({ mode: 'always' });
+    const app = one<{ vcs_connection_id: number; ticket_connection_id: number }>('SELECT * FROM repos WHERE id = 1')!;
+    api = Number(run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled, priority) VALUES (?, ?, 'me/api', 'main', 'u', 1, 1)", app.vcs_connection_id, app.ticket_connection_id).lastInsertRowid);
+  });
+  afterEach(() => {
+    run('DELETE FROM tickets WHERE repo_id = ?', api);
+    run('DELETE FROM repos WHERE id = ?', api);
+  });
+
+  it('holds a lower-priority repo while a higher one has unclassified tickets', () => {
+    const t = apiTicket([]);
+    expect(held()).toBe('Waiting for me/api to be classified first');
+    const q = buildQueue();
+    expect(q[0].ticket.id).toBe(t);
+    expect(q[0].blockedBy ?? '').not.toMatch(/Waiting/);
+  });
+
+  it('releases it once those are classified, held or skipped, and still sorts the higher repo first', () => {
+    const t = apiTicket([label.size('s'), label.stage('design')]);
+    expect(held() ?? '').not.toMatch(/Waiting/);
+    expect(buildQueue()[0].ticket.id).toBe(t);
+    for (const [labels, blocked] of [[['workshop/skip'], '[]'], [[], '["#2"]']] as const) {
+      run('UPDATE tickets SET labels = ?, blocked_by = ? WHERE id = ?', JSON.stringify(labels), blocked, t);
+      expect(held() ?? '').not.toMatch(/Waiting/);
+    }
+  });
+
+  it('lets equal priorities proceed', () => {
+    run('UPDATE repos SET priority = 0 WHERE id = ?', api);
+    apiTicket([]);
+    expect(held() ?? '').not.toMatch(/Waiting/);
+  });
+
+  it('is skipped by a hand push and by launching now', () => {
+    apiTicket([]);
+    setPush(getTicket(1)!, 'stage');
+    expect(held() ?? '').not.toMatch(/Waiting/);
+    expect(buildQueue()[0].ticket.id).toBe(1);
+    setPush(getTicket(1)!, null);
+    const ignoring = buildQueue(undefined, Date.now(), { ignoreMode: true }).find((c) => c.ticket.id === 1);
+    expect(ignoring?.blockedBy ?? '').not.toMatch(/Waiting/);
+  });
+
+  it('ignores tickets by other authors and in disabled repos', () => {
+    const t = apiTicket([], { author: 'stranger' });
+    expect(held() ?? '').not.toMatch(/Waiting/);
+    run('UPDATE tickets SET author = ? WHERE id = ?', 'me', t);
+    run('UPDATE repos SET enabled = 0 WHERE id = ?', api);
+    expect(held() ?? '').not.toMatch(/Waiting/);
   });
 });

@@ -20,11 +20,11 @@ import {
   vcsOf,
   type Connection,
 } from '../providers/index.ts';
-import { probeAllowance, syncSoon } from '../scheduler/loop.ts';
+import { kick, probeAllowance, syncSoon } from '../scheduler/loop.ts';
 import { getSettings, getValue, saveSettings, setValue } from '../settings.ts';
 import { repoRef, repoView, sourceFor, type RepoRow } from '../tickets.ts';
 import { LABEL_DEFS } from '../workflow/labels.ts';
-import { check, HttpError } from './util.ts';
+import { check, HttpError, int } from './util.ts';
 
 const visible = (f: FieldDef, values: Record<string, unknown>, existing?: Connection) =>
   !f.showIf || f.showIf.equals.includes(String(values[f.showIf.key] ?? existing?.config[f.showIf.key] ?? ''));
@@ -266,10 +266,14 @@ connectionsRouter.post('/repos/refresh', async (_req, res) => {
 connectionsRouter.put('/repos/:id', async (req, res) => {
   const repo = one<RepoRow>('SELECT * FROM repos WHERE id = ?', Number(req.params.id));
   check(repo, 'Repository not found.', 404);
-  const { enabled, image } = req.body ?? {};
+  const { enabled, image, priority } = req.body ?? {};
   if (image !== undefined) {
     check(image === null || image === '' || (typeof image === 'string' && /^[\w.\-/:@]+$/.test(image)), 'The image must be a Docker image reference.');
     run('UPDATE repos SET image = ? WHERE id = ?', image || null, repo.id);
+  }
+  if (priority !== undefined) {
+    run('UPDATE repos SET priority = ? WHERE id = ?', int(priority, 'Priority', -100, 100), repo.id);
+    kick();
   }
   if (enabled === true) {
     const ticketConnection = repo.ticket_connection_id ?? listConnections('tickets').find((c) => Number(c.config.appConnectionId) === repo.vcs_connection_id)?.id;

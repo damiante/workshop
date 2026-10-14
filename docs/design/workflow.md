@@ -38,6 +38,8 @@ At most one stage label is present. `needs-info`, `skip` and `failed` sit alongs
 
 When several tickets are ready, work already under way goes first: merge, then implementation and re-classification, then design review, design, and new classifications. Oldest first within each group. Agents start one at a time, a scheduler tick apart, so allowance readings catch up between launches.
 
+**Repository priority.** Each repository has a priority (a whole number, default 0, higher first). A ticket in a lower-priority repo waits until every open ticket in higher-priority repos has been classified; a ticket the Classifier held for a dependency, or that is skipped, waiting on a question or failed, counts as classified. Repos with equal priority don't hold each other. Once that's satisfied, higher-priority repos' tickets still go first, ahead of the step order above. Hand pushes and **Start now** bypass the gate.
+
 ## Transitions
 
 `planTransition()` in `server/src/workflow/transitions.ts` turns an agent's result into label edits, a comment and actions:
