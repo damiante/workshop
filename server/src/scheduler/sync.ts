@@ -1,7 +1,7 @@
 import { all, one, run } from '../db.ts';
 import { publish } from '../events.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, editLabels, isAllowedAuthor, labelsOf, linkRef, repoRef, setBlockers, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, editLabels, getTicket, isAllowedAuthor, labelsOf, linkRef, repoRef, setBlockers, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
 import type { RemoteTicket } from '../providers/types.ts';
 import { label, moveTo, parseLabels } from '../workflow/labels.ts';
 import { finishMerged, stopAfterClosedPr } from './merge.ts';
@@ -62,7 +62,8 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]) {
   for (const t of targets.values()) {
     try {
       const links = await source.blockers(ref, t.number);
-      setBlockers(t, links.filter((l) => l.state === 'open').map((l) => linkRef(l, repo)));
+      // Re-read the row: a Classifier run may have set the hold while the request was in flight.
+      setBlockers(getTicket(t.id) ?? t, links.filter((l) => l.state === 'open').map((l) => linkRef(l, repo)));
     } catch (err) {
       console.warn(`Couldn't read the blockers of ${repo.full_name}#${t.number}: ${(err as Error).message}`);
     }
