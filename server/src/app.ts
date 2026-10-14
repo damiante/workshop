@@ -3,8 +3,9 @@ import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { config } from './config.ts';
 import { apiRouter } from './http/api.ts';
-import { authRouter, requireAuth, sameOrigin } from './http/auth.ts';
+import { authRouter, requireAuth, sameOrigin, sessionOnly } from './http/auth.ts';
 import { connectionsRouter } from './http/connections.ts';
+import { tokensRouter } from './http/tokens.ts';
 
 const CLIENT_DIR = path.resolve(import.meta.dirname, '../../client/dist');
 
@@ -33,7 +34,7 @@ export function createApp() {
   app.use(express.json({ limit: '1mb' }));
   app.use('/api', sameOrigin);
   app.use('/api/auth', authRouter);
-  app.use('/api', requireAuth, apiRouter, connectionsRouter);
+  app.use('/api', requireAuth, apiRouter, sessionOnly, tokensRouter, connectionsRouter);
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'Not found.' });
   });
