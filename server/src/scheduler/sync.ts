@@ -42,20 +42,26 @@ export async function syncRepo(repo: RepoRow) {
   if (changed.length) publish('tickets');
 }
 
-/** Reviews land on the pull request, not the issue, so every PR waiting on you is checked each sync. */
+/**
+ * Reviews land on the pull request, not the issue, so every PR waiting on you is checked each sync.
+ * Closed tickets are included: merging on GitHub closes the issue (through "Closes #n") before we look.
+ */
 async function syncReviews(repo: RepoRow) {
   const vcs = vcsFor(repo);
   const ref = repoRef(repo);
   const authors = getSettings().authors;
-  const tickets = all<TicketRow>("SELECT * FROM tickets WHERE repo_id = ? AND state = 'open' AND pr_number IS NOT NULL", repo.id);
+  const tickets = all<TicketRow>('SELECT * FROM tickets WHERE repo_id = ? AND pr_number IS NOT NULL', repo.id);
   for (const t of tickets) {
     const state = parseLabels(labelsOf(t));
-    if (state.stage !== 'pr-review' || state.needsInfo) continue;
+    if (state.stage !== 'pr-review' && state.stage !== 'merge') continue;
+    if (state.stage === 'pr-review' && state.needsInfo && t.state === 'open') continue;
     const pr = await vcs.pullRequestState(ref, t.pr_number!, authors);
     run('UPDATE tickets SET pr_status = ? WHERE id = ?', pr.state === 'open' ? (pr.decision ?? 'review') : pr.state, t.id);
     let move: ReturnType<typeof moveTo> | null = null;
     if (pr.state === 'merged') await finishMerged(t);
+    else if (t.state === 'closed') move = moveTo(labelsOf(t), null); // you closed the issue: stop quietly
     else if (pr.state === 'closed') await stopAfterClosedPr(t);
+    else if (state.stage === 'merge') continue; // still open and approved: the merge step handles it
     else if (pr.decision === 'approved') move = moveTo(labelsOf(t), 'merge');
     else if (pr.decision === 'changes_requested') move = moveTo(labelsOf(t), 'reclassify');
     if (move) await editLabels(t, move.add, move.remove);

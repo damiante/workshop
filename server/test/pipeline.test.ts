@@ -264,6 +264,23 @@ describe('sync', () => {
     expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('closed without merging'));
   });
 
+  it.each(['pr-review', 'merge'] as const)('tidies up when you merge the pull request yourself at %s, even though GitHub already closed the issue', async (stage) => {
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage(stage)]));
+    fake.tickets.listChanged = async () => [remote({ state: 'closed', labels: [label.size('s'), label.stage(stage)] })];
+    fake.vcs.pullRequestState = async () => pr({ state: 'merged' });
+    await syncRepo(repo());
+    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], expect.arrayContaining([label.stage(stage)]));
+    expect(one<{ pr_status: string }>('SELECT pr_status FROM tickets WHERE id = 1')?.pr_status).toBe('merged');
+  });
+
+  it('drops the stage when you close the issue without merging', async () => {
+    fake.tickets.listChanged = async () => [remote({ state: 'closed' })];
+    fake.vcs.pullRequestState = async () => pr({ decision: 'approved' });
+    await syncRepo(repo());
+    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], [label.stage('pr-review')]);
+    expect(fake.tickets.comment).not.toHaveBeenCalled();
+  });
+
   it('resets the failure count when you remove workshop/failed', async () => {
     run('UPDATE tickets SET failures = 2, labels = ? WHERE id = 1', JSON.stringify([label.stage('implement'), label.failed]));
     fake.tickets.listChanged = async () => [remote({ labels: [label.stage('implement')] })];

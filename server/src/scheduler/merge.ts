@@ -9,7 +9,7 @@ const setPrStatus = (t: TicketRow, status: string) => run('UPDATE tickets SET pr
 /** PR merged (by Workshop or by you): close the ticket and clear Workshop's stage labels. */
 export async function finishMerged(t: TicketRow) {
   const repo = getRepo(t.repo_id)!;
-  await sourceFor(repo).close(repoRef(repo), t.number);
+  if (t.state !== 'closed') await sourceFor(repo).close(repoRef(repo), t.number);
   await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running]);
   run("UPDATE tickets SET state = 'closed', pr_status = 'merged' WHERE id = ?", t.id);
 }

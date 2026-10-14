@@ -112,7 +112,7 @@ Then switch the top bar from **Paused** to **Scheduled** or **Always on**.
 
 - **Needs you** on the dashboard lists questions to answer, pull requests to review, and tickets that stopped after failures.
 - **Answer a question:** reply on the issue, then remove `workshop/needs-info`.
-- **Review:** approve the pull request on GitHub to merge it, or request changes. Plain comments don't count.
+- **Review:** approve the pull request on GitHub to merge it, or request changes. Plain comments don't count. You can also merge it yourself on GitHub; Workshop notices at its next check and tidies up the labels. Closing the issue stops work on it.
 - **A ticket that failed twice** gets `workshop/failed` and a comment with the error. Fix what's needed and remove the label to retry.
 - **Watch an agent:** click a running agent to see its live transcript (its messages, every command and file it touched, and its to-do list). **Stop** kills it and labels the ticket `workshop/failed` so it won't restart until you remove the label.
 - **Usage limits:** if an agent hits your limit mid-run, it's paused rather than failed, and resumes in the same session after the window resets.
