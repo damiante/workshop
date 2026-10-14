@@ -9,10 +9,10 @@ import { environmentOf, getConnection, listConnections, modelsOf, setConnectionS
 import { deleteLog, RUNNING_SQL, type RunRow } from '../runs.ts';
 import { check } from '../http/util.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPush, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
-import { allowanceBlock, apiCapBlock, dependencyBlock, localTime, modeBlock, pickHost, stepPriority, type HostLoad } from './gates.ts';
+import { allowanceBlock, apiCapBlock, dependencyBlock, localTime, modeBlock, pickHost, pushEnded, stepPriority, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 import { drive, isDriving, launch, onRunSettled, resume } from './runner.ts';
 import { syncRepo } from './sync.ts';
@@ -62,18 +62,15 @@ export async function tick() {
     await checkHosts();
     reattachRuns();
     await syncRepos();
+    settlePushes();
     const s = getSettings();
     const now = Date.now();
-    if (s.mode !== 'paused') {
-      await mergeApproved();
-      resumePaused(s, now);
-      const queue = buildQueue(s, now);
-      const next = queue.find((c) => !c.blockedBy);
-      if (next) {
-        startCandidate(next);
-      }
-      for (const c of queue) if (c.blockedBy === 'Checking allowance' && c.modelConnectionId) void probeAllowance(c.modelConnectionId).catch(() => {});
-    }
+    await mergeApproved(s.mode === 'paused');
+    resumePaused(s, now);
+    const queue = buildQueue(s, now);
+    const next = queue.find((c) => !c.blockedBy);
+    if (next) startCandidate(next);
+    for (const c of queue) if (c.blockedBy === 'Checking allowance' && c.modelConnectionId) void probeAllowance(c.modelConnectionId).catch(() => {});
     if (now - lastCleanup > 24 * 3600_000) {
       lastCleanup = now;
       await cleanup(s);
@@ -147,8 +144,18 @@ async function syncRepos() {
 
 const openTicketsSql = `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE r.enabled = 1 AND t.state = 'open'`;
 
-async function mergeApproved() {
+/** Clears hand pushes that are finished, or whose repository or author is no longer eligible. */
+export function settlePushes() {
+  for (const t of all<TicketRow>('SELECT * FROM tickets WHERE push IS NOT NULL')) {
+    const repo = getRepo(t.repo_id);
+    if (!repo?.enabled || !isAllowedAuthor(t.author) || pushEnded(t.push!, t.push_stage, labelsOf(t), t.state === 'open')) setPush(t, null);
+  }
+}
+
+/** With `pushedOnly` (Workshop is paused), only tickets you've pushed are merged. */
+export async function mergeApproved(pushedOnly: boolean) {
   for (const t of all<TicketRow>(openTicketsSql)) {
+    if (pushedOnly && !t.push) continue;
     if (!isAllowedAuthor(t.author) || nextStep(parseLabels(labelsOf(t)), true)?.kind !== 'merge' || activeRunId(t.id)) continue;
     if (blockersOf(t).length) continue; // an approved pull request waits for its blockers too
     try {
@@ -160,9 +167,10 @@ async function mergeApproved() {
 }
 
 function resumePaused(s: Settings, now: number) {
-  if (modeBlock(s, new Date(now))) return;
+  const modeReason = modeBlock(s, new Date(now));
   const hosts = hostLoads();
   for (const r of all<RunRow>("SELECT * FROM runs WHERE status = 'paused'")) {
+    if (modeReason && !getTicket(r.ticket_id)?.push) continue;
     if (r.resets_at && r.resets_at > now) continue;
     if (r.billing === 'subscription' && r.model_connection_id) {
       const block = allowanceBlock(allowanceOf(r.model_connection_id), s, now);
@@ -187,6 +195,7 @@ export interface Candidate {
   modelConnectionId: number | null;
   model: string | null;
   billing: Billing;
+  pushed: boolean;
 }
 
 function startCandidate(c: Candidate): string | null {
@@ -240,16 +249,16 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const cls = getAgent(agent);
     const conn = getConnection(cls.model_connection_id);
     const name = AGENT_INFO[agent].label;
-    let blockedBy = dependencyBlock(blockersOf(t)) ?? modeReason;
+    let blockedBy = dependencyBlock(blockersOf(t)) ?? (t.push ? null : modeReason);
     if (!blockedBy && (!cls.model || !conn)) blockedBy = `Choose a model for ${name} on the Agents page`;
     if (!blockedBy && !modelsOf(conn!).billing().includes(cls.billing)) {
       blockedBy = `${conn!.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`;
     }
     if (!blockedBy) blockedBy = cls.billing === 'api' ? apiCapBlock(spentToday, s) : allowanceBlock(allowanceOf(conn!.id), s, now);
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo: getRepo(t.repo_id)!, agent, mode, blockedBy, hostId, modelConnectionId: conn?.id ?? null, model: cls.model, billing: cls.billing, priority: stepPriority(step) });
+    out.push({ ticket: t, repo: getRepo(t.repo_id)!, agent, mode, blockedBy, hostId, modelConnectionId: conn?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), priority: stepPriority(step) });
   }
-  return out.sort((a, b) => a.priority - b.priority);
+  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || a.priority - b.priority);
 }
 
 export function queueView(): QueueItem[] {
@@ -259,6 +268,7 @@ export function queueView(): QueueItem[] {
     title: c.ticket.title,
     next: c.mode === 'delta' ? 'Re-classify requested changes' : AGENT_INFO[c.agent].label,
     blockedBy: c.blockedBy,
+    push: c.ticket.push,
   }));
 }
 

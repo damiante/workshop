@@ -111,6 +111,9 @@ export interface ModelOption {
 export type Size = 'xs' | 's' | 'm' | 'l' | 'xl';
 export type Stage = 'design' | 'design-review' | 'implement' | 'pr-review' | 'merge' | 'reclassify';
 
+/** How you've pushed a ticket by hand: one stage, or on until Workshop would wait for you. */
+export type Push = 'stage' | 'lifecycle';
+
 export interface TicketView {
   id: number;
   repo: string;
@@ -132,6 +135,8 @@ export interface TicketView {
   prUrl: string | null;
   prStatus: string | null;
   activeRunId: string | null;
+  /** Set while you've pushed this ticket by hand. */
+  push: Push | null;
   updatedAt: string;
 }
 
@@ -193,6 +198,7 @@ export interface QueueItem {
   title: string;
   next: string;
   blockedBy: string | null;
+  push: Push | null;
 }
 
 export interface AlertView {

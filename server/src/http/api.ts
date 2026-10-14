@@ -6,11 +6,11 @@ import { all, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
 import { getRun, logBus, readLog, runView, runViews } from '../runs.ts';
-import { withinHours } from '../scheduler/gates.ts';
+import { pushRefusal, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings } from '../settings.ts';
-import { listTicketViews } from '../tickets.ts';
+import { activeRunId, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketView } from '../tickets.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
 import { OPENAPI } from './openapi.ts';
 import { check, int, num } from './util.ts';
@@ -164,6 +164,30 @@ apiRouter.get('/tickets', (req, res) => {
 apiRouter.post('/tickets/:id/launch', (req, res) => {
   const id = launchNow(int(req.params.id, 'Ticket id', 1, Number.MAX_SAFE_INTEGER));
   res.status(202).json(runView(id));
+});
+
+function pushableTicket(id: string) {
+  const t = getTicket(Number(id));
+  const repo = t && getRepo(t.repo_id);
+  check(t && repo?.enabled && isAllowedAuthor(t.author), 'Ticket not found.', 404);
+  return { t: t!, repo: repo! };
+}
+
+apiRouter.post('/tickets/:id/push', (req, res) => {
+  const { t, repo } = pushableTicket(req.params.id);
+  const scope = req.body?.scope;
+  check(scope === 'stage' || scope === 'lifecycle', 'Choose "stage" or "lifecycle".');
+  const refusal = pushRefusal({ labels: labelsOf(t), open: t.state === 'open', running: Boolean(activeRunId(t.id)) }, scope);
+  check(!refusal, refusal ?? '', 409);
+  setPush(t, scope);
+  kick();
+  res.json(ticketView(t, repo));
+});
+
+apiRouter.delete('/tickets/:id/push', (req, res) => {
+  const { t, repo } = pushableTicket(req.params.id);
+  setPush(t, null);
+  res.json(ticketView(t, repo));
 });
 
 apiRouter.post('/sync', (_req, res) => {

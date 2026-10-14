@@ -18,7 +18,8 @@ const { initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
 const { getRun } = await import('../src/runs.ts');
 const { launch } = await import('../src/scheduler/runner.ts');
-const { buildQueue, launchNow } = await import('../src/scheduler/loop.ts');
+const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
+const { setPush, getTicket } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
@@ -76,7 +77,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]' WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.tickets = {
@@ -410,5 +411,101 @@ describe('sync', () => {
         run('DELETE FROM tickets WHERE number = 8');
       }
     });
+  });
+});
+
+describe('manual pushes', () => {
+  const ticket = () => getTicket(1)!;
+  const queued = () => buildQueue().find((c) => c.ticket.id === 1);
+  const setLabels = (...labels: string[]) => run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(labels));
+
+  beforeEach(() => saveSettings({ mode: 'paused' }));
+
+  it('holds an unpushed ticket while paused, and lifts only that gate for a pushed one', () => {
+    expect(queued()?.blockedBy).toBe('Workshop is paused');
+    expect(queued()?.pushed).toBe(false);
+    setPush(ticket(), 'stage');
+    expect(queued()?.blockedBy).not.toBe('Workshop is paused');
+    expect(queued()?.pushed).toBe(true);
+  });
+
+  it('sorts pushed tickets ahead of the rest', () => {
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 2, 'Other', '', 'u', 'me', 'open', ?, '2026-10-12T00:00:00Z')", JSON.stringify([label.stage('merge'), label.size('s')]));
+    run("UPDATE tickets SET pr_status = 'conflict' WHERE number = 2");
+    try {
+      saveSettings({ mode: 'always' });
+      expect(buildQueue()[0].ticket.number).toBe(2);
+      setPush(ticket(), 'lifecycle');
+      expect(buildQueue()[0].ticket.number).toBe(3);
+    } finally {
+      run('DELETE FROM tickets WHERE number = 2');
+    }
+  });
+
+  it('still holds a pushed ticket for its dependencies', () => {
+    run("UPDATE tickets SET blocked_by = '[\"#2\"]' WHERE id = 1");
+    setPush(ticket(), 'lifecycle');
+    expect(queued()?.blockedBy).toBe('Depends on #2');
+  });
+
+  it('a stage push ends after the stage completes, and the ticket is held again', async () => {
+    setLabels();
+    setPush(ticket(), 'stage');
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'accept', size: 'm', reason: 'Medium.' })] });
+    const r = await settle(go('classifier'));
+    expect(r.status).toBe('succeeded');
+    settlePushes();
+    expect(ticket().push).toBeNull();
+    expect(queued()?.blockedBy).toBe('Workshop is paused');
+  });
+
+  it('a lifecycle push carries on until the pull request needs review', () => {
+    setLabels();
+    setPush(ticket(), 'lifecycle');
+    setLabels(label.size('m'), label.stage('design'));
+    settlePushes();
+    expect(ticket().push).toBe('lifecycle');
+    expect(queued()?.blockedBy).not.toBe('Workshop is paused');
+    setLabels(label.size('m'), label.stage('implement'));
+    settlePushes();
+    expect(ticket().push).toBe('lifecycle');
+    setLabels(label.size('m'), label.stage('pr-review'));
+    settlePushes();
+    expect(ticket().push).toBeNull();
+  });
+
+  it('keeps a stage push after a first failure and ends it after the second', () => {
+    setPush(ticket(), 'stage');
+    settlePushes();
+    expect(ticket().push).toBe('stage'); // stage unchanged: the retry is still pushed
+    setLabels(label.size('s'), label.stage('implement'), label.failed);
+    settlePushes();
+    expect(ticket().push).toBeNull();
+  });
+
+  it('clears the push when the author is no longer allowed', () => {
+    setPush(ticket(), 'lifecycle');
+    saveSettings({ authors: ['someone-else'] });
+    try {
+      settlePushes();
+      expect(ticket().push).toBeNull();
+    } finally {
+      saveSettings({ authors: ['me'] });
+    }
+  });
+
+  it('merges a pushed approved ticket while paused, and leaves an unpushed one alone', async () => {
+    fake.vcs.pullRequestState = vi.fn(async () => ({ state: 'merged', mergeable: 'clean', decision: 'approved' }));
+    setLabels(label.size('s'), label.stage('merge'));
+    run('UPDATE tickets SET pr_number = 7 WHERE id = 1');
+    await mergeApproved(true);
+    expect(fake.vcs.pullRequestState).not.toHaveBeenCalled();
+    setPush(ticket(), 'stage');
+    await mergeApproved(true);
+    expect(fake.vcs.pullRequestState).toHaveBeenCalledTimes(1);
+  });
+
+  it('launches nothing for a paused Workshop with no pushes', () => {
+    expect(buildQueue().every((c) => c.blockedBy)).toBe(true);
   });
 });

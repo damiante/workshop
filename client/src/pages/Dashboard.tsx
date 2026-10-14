@@ -122,6 +122,7 @@ export function Dashboard() {
                     </span>
                     <span className="tag">{q.next}</span>
                   </div>
+                  {q.push && <span className="small muted">Pushed by you</span>}
                   {q.blockedBy && <span className="small muted">Waiting: {q.blockedBy}</span>}
                 </li>
               ))}

@@ -136,6 +136,10 @@ const MIGRATIONS = [
     last_used_at INTEGER
   );
   `,
+  `
+  ALTER TABLE tickets ADD COLUMN push TEXT;
+  ALTER TABLE tickets ADD COLUMN push_stage TEXT;
+  `,
 ];
 
 export let db: DatabaseSync;

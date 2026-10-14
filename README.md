@@ -106,7 +106,7 @@ Once the App is installed, the **Repositories** list shows every repository it c
 - **Operating hours and time zone**, used when the top bar is set to Scheduled. An end time before the start time runs overnight.
 - **Allowance limits** (5-hour and weekly percentages) and **API caps**. Claude warns at 90% of a window, and Workshop also holds new agents then, so limits above 90% have no effect.
 
-Then switch the top bar from **Paused** to **Scheduled** or **Always on**.
+Then switch the top bar from **Paused** to **Scheduled** or **Always on**. To move one ticket along while Workshop is paused, use **Run next stage** or **Run until it needs you** on its card on the Tickets page.
 
 Scripts can do the same, launch agents and read usage over HTTP with an API token from Settings: see [docs/api.md](docs/api.md).
 
