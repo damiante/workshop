@@ -104,7 +104,7 @@ Once the App is installed, the **Repositories** list shows every repository it c
 
 - **Ticket authors:** Workshop only works on issues opened by these GitHub users, and leaves other people's comments out of what agents read. Keep this to yourself on public repositories.
 - **Operating hours and time zone**, used when the top bar is set to Scheduled. An end time before the start time runs overnight.
-- **Allowance limits** (5-hour and weekly percentages) and **API caps**.
+- **Allowance limits** (5-hour and weekly percentages) and **API caps**. Claude warns at 90% of a window, and Workshop also holds new agents then, so limits above 90% have no effect.
 
 Then switch the top bar from **Paused** to **Scheduled** or **Always on**.
 

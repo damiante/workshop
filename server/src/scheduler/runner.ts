@@ -178,7 +178,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
     const review = t.pr_number && r.agent !== 'merge' ? await vcsFor(ctx.repo).reviewFeedback(repo, t.pr_number, getSettings().authors) : [];
     const branch = branchOf(t);
     const docPath = docPathOf(t);
-    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch, docPath })}`;
+    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
       mode: r.mode,

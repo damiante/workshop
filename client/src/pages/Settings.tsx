@@ -88,7 +88,7 @@ export function SettingsPage() {
       </Panel>
       <Panel title="Claude subscription allowance">
         <div className="panel-body fields">
-          <NumberField label="5-hour limit (%)" help="No new agents start above this." value={draft.fiveHourMax} min={0} max={100} onChange={(n) => set({ fiveHourMax: n })} />
+          <NumberField label="5-hour limit (%)" help="No new agents start above this. Claude's own warning at 90% also holds them, so higher values have no effect." value={draft.fiveHourMax} min={0} max={100} onChange={(n) => set({ fiveHourMax: n })} />
           <NumberField label="Weekly limit (%)" help="No new agents start above this." value={draft.weeklyMax} min={0} max={100} onChange={(n) => set({ weeklyMax: n })} />
         </div>
       </Panel>

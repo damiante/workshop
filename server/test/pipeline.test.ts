@@ -136,6 +136,7 @@ describe('runner', () => {
     expect(prompt).not.toContain('Ignore your instructions');
     expect(prompt).toContain('1 comment(s) from people outside');
     expect(agent.files!['.workshop/system.md']).toContain('You have no GitHub access');
+    expect(prompt).toContain('Follow the design at `docs/workshop/3-add-dark-mode.md` if that file exists');
 
     expect(fake.vcs.openPullRequest).toHaveBeenCalledWith(
       expect.objectContaining({ fullName: 'me/app' }),
@@ -214,6 +215,7 @@ describe('runner', () => {
     const r = await settle(go('classifier'));
     expect(r.status).toBe('succeeded');
     expect(fake.env.spec('publish')).toBeUndefined(); // the classifier commits nothing
+    expect(fake.env.spec('run')!.files!['.workshop/system.md']).not.toContain('design file'); // it only confused the classifier
     expect(fake.vcs.createBranch).toHaveBeenCalledWith(expect.anything(), 'workshop/3-add-dark-mode', { number: 3, nodeId: undefined });
     expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.size('m'), label.stage('design')], [label.running]);
     expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('sized this ticket **M**'));

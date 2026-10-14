@@ -48,7 +48,7 @@ export function agentViews(): AgentClassView[] {
       prompt: promptFor(row),
       defaultPrompt: DEFAULT_PROMPTS[name],
       customised: row.prompt !== null,
-      protocol: protocolText({ branch: 'workshop/<number>-<title>', base: '<default branch>', docPath: 'docs/workshop/<number>-<title>.md' }),
+      protocol: protocolText({ branch: 'workshop/<number>-<title>', base: '<default branch>' }),
       maxTurns: row.max_turns,
       timeoutMin: row.timeout_min,
     };

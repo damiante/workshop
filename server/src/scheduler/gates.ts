@@ -47,7 +47,7 @@ export const ALLOWANCE_MAX_AGE_MS = 10 * 60_000;
 
 /** Why the subscription allowance blocks a launch right now, or null. */
 export function allowanceBlock(a: AllowanceView | undefined, s: Settings, now: number): string | null {
-  if (a?.blockedUntil && a.blockedUntil > now) return `Claude reported a usage limit; resumes ${formatTime(a.blockedUntil, s.timezone, now)}`;
+  if (a?.blockedUntil && a.blockedUntil > now) return `Claude reported you're at or near a usage limit; resumes ${formatTime(a.blockedUntil, s.timezone, now)}`;
   if (!a?.sampledAt || now - a.sampledAt > ALLOWANCE_MAX_AGE_MS) return 'Checking allowance';
   const resets = (w: UsageWindow | null) => (w?.resetsAt ? `, resets ${formatTime(w.resetsAt, s.timezone, now)}` : '');
   const five = used(a.fiveHour, now);
