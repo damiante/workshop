@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, modeBlock, pickHost, stepPriority, withinHours } from '../src/scheduler/gates.ts';
+import { allowanceBlock, dependencyBlock, modeBlock, pickHost, stepPriority, withinHours } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -90,5 +90,14 @@ describe('scheduling helpers', () => {
     expect(stepPriority({ kind: 'merge' })).toBeLessThan(stepPriority({ kind: 'agent', agent: 'implement', mode: 'normal' }));
     expect(stepPriority({ kind: 'agent', agent: 'implement', mode: 'normal' })).toBeLessThan(stepPriority({ kind: 'agent', agent: 'design', mode: 'normal' }));
     expect(stepPriority({ kind: 'agent', agent: 'design', mode: 'normal' })).toBeLessThan(stepPriority({ kind: 'agent', agent: 'classifier', mode: 'normal' }));
+  });
+});
+
+describe('dependency gate', () => {
+  it('holds a ticket while it has open blockers, and releases it when none are left', () => {
+    expect(dependencyBlock(['#2'])).toBe('Depends on #2');
+    expect(dependencyBlock(['#2', 'other/repo#5'])).toBe('Depends on #2 and other/repo#5');
+    expect(dependencyBlock(['#2', '#5', '#7'])).toBe('Depends on #2, #5 and #7');
+    expect(dependencyBlock([])).toBeNull();
   });
 });

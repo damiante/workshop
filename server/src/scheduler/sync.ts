@@ -1,7 +1,8 @@
 import { all, one, run } from '../db.ts';
 import { publish } from '../events.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, editLabels, isAllowedAuthor, labelsOf, repoRef, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, editLabels, getTicket, isAllowedAuthor, labelsOf, linkRef, repoRef, setBlockers, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
+import type { RemoteTicket } from '../providers/types.ts';
 import { label, moveTo, parseLabels } from '../workflow/labels.ts';
 import { finishMerged, stopAfterClosedPr } from './merge.ts';
 import { stopRun } from './runner.ts';
@@ -37,9 +38,36 @@ export async function syncRepo(repo: RepoRow) {
     const active = existing && t.state === 'closed' ? activeRunId(existing.id) : null;
     if (active) await stopRun(active, 'The ticket was closed.', false);
   }
+  await syncBlockers(repo, changed);
   await syncReviews(repo);
   run('UPDATE repos SET synced_at = ? WHERE id = ?', started, repo.id);
   if (changed.length) publish('tickets');
+}
+
+/**
+ * Open blockers decide whether a ticket is held. The list's count only says which tickets not yet held
+ * need a look; held tickets are always re-read, because closing a blocker may not touch their update time.
+ * A failure for one ticket keeps its stored hold and mustn't stop the rest of the sync.
+ */
+async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]) {
+  const source = sourceFor(repo);
+  const ref = repoRef(repo);
+  const targets = new Map<number, TicketRow>();
+  for (const t of changed) {
+    if (t.state !== 'open' || !t.openBlockers) continue;
+    const row = one<TicketRow>('SELECT * FROM tickets WHERE repo_id = ? AND number = ?', repo.id, t.number);
+    if (row) targets.set(row.number, row);
+  }
+  for (const row of all<TicketRow>("SELECT * FROM tickets WHERE repo_id = ? AND state = 'open' AND blocked_by != '[]'", repo.id)) targets.set(row.number, row);
+  for (const t of targets.values()) {
+    try {
+      const links = await source.blockers(ref, t.number);
+      // Re-read the row: a Classifier run may have set the hold while the request was in flight.
+      setBlockers(getTicket(t.id) ?? t, links.filter((l) => l.state === 'open').map((l) => linkRef(l, repo)));
+    } catch (err) {
+      console.warn(`Couldn't read the blockers of ${repo.full_name}#${t.number}: ${(err as Error).message}`);
+    }
+  }
 }
 
 /**

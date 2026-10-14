@@ -22,6 +22,7 @@ export const DEFAULT_PROMPTS: Record<AgentName, string> = {
    - xl: several parts that could ship separately. Say so in your reason.
 3. Decline (decision "reject") when the ticket isn't actionable code work: a question or discussion, too little information to act on, technically infeasible, or a duplicate.
 4. If one specific answer from the owner would make it actionable, use "needs_info" with that question instead of declining.
+5. Use "blocked" when the ticket depends on another open ticket being finished first (for example it needs an API that ticket adds). List those ticket numbers in blocked_by. Don't use it for loose relations, or for a ticket the owner has said in a comment not to wait for.
 
 In delta mode, changes were requested on an existing pull request: size only the requested changes, relative to what is already on the branch.`,
 
@@ -79,15 +80,25 @@ export interface TaskContext {
   comments: { author: string; body: string; createdAt: string }[];
   omittedComments: number;
   review: { author: string; body: string; path?: string; line?: number }[];
+  /** The repository's other open tickets (Classifier only), most recently updated first. */
+  openTickets?: { number: number; title: string; body: string }[];
 }
+
+const MAX_OPEN_TICKETS = 30;
+const MAX_OPEN_BODY = 600;
 
 function taskLine(c: TaskContext): string {
   const reviewed = c.review.length > 0;
   switch (c.agent) {
-    case 'classifier':
-      return c.mode === 'delta'
-        ? `Changes were requested on the pull request for this ticket (see the review feedback above). Size only the requested changes, relative to what is already on branch \`${c.branch}\` (compare with \`git diff origin/${c.base}...HEAD\`).`
-        : 'Classify this ticket.';
+    case 'classifier': {
+      const base =
+        c.mode === 'delta'
+          ? `Changes were requested on the pull request for this ticket (see the review feedback above). Size only the requested changes, relative to what is already on branch \`${c.branch}\` (compare with \`git diff origin/${c.base}...HEAD\`).`
+          : 'Classify this ticket.';
+      return c.openTickets?.length
+        ? `${base} If this ticket can't be done until one of the other open tickets above is finished, return "blocked" with their numbers in blocked_by and the reason.`
+        : base;
+    }
     case 'design':
       return reviewed
         ? `Revise the design at \`${c.docPath}\` to cover the review feedback above, and commit it.`
@@ -125,6 +136,15 @@ export function taskPrompt(c: TaskContext): string {
   if (c.review.length) {
     parts.push('', '## Review feedback on the pull request');
     for (const r of c.review) parts.push(`- **@${r.author}**${r.path ? ` on \`${r.path}${r.line ? `:${r.line}` : ''}\`` : ''}: ${r.body.trim()}`);
+  }
+  if (c.agent === 'classifier' && c.openTickets?.length) {
+    parts.push('', '## Other open tickets in this repository');
+    for (const o of c.openTickets.slice(0, MAX_OPEN_TICKETS)) {
+      const body = o.body.trim();
+      parts.push('', `### #${o.number}: ${o.title}`, body.length > MAX_OPEN_BODY ? `${body.slice(0, MAX_OPEN_BODY)}…` : body);
+    }
+    const left = c.openTickets.length - MAX_OPEN_TICKETS;
+    if (left > 0) parts.push('', `_${left} more open ticket(s) left out._`);
   }
   parts.push('', '## Your task', taskLine(c));
   return parts.join('\n');

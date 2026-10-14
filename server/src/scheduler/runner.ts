@@ -4,7 +4,7 @@ import { getAgent, promptFor, type AgentRow } from '../agents.ts';
 import { clearAlert, raiseAlert } from '../alerts.ts';
 import { recordLimit, recordProbe } from '../allowance.ts';
 import { config } from '../config.ts';
-import { run } from '../db.ts';
+import { all, run } from '../db.ts';
 import { publish } from '../events.ts';
 import { hitUsageLimit, readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts';
 import type { DockerConfig } from '../providers/docker/index.ts';
@@ -20,9 +20,11 @@ import {
   getTicket,
   isAllowedAuthor,
   labelsOf,
+  linkRef,
   markRunning,
   MAX_ATTEMPTS,
   repoRef,
+  setBlockers,
   sourceFor,
   vcsFor,
   type RepoRow,
@@ -32,6 +34,7 @@ import { label, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO, protocolText, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
+import { joinRefs } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 
 // A run moves starting (prepare) → running (claude) → publishing (push + ticket updates) → succeeded.
@@ -178,6 +181,14 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
     const review = t.pr_number && r.agent !== 'merge' ? await vcsFor(ctx.repo).reviewFeedback(repo, t.pr_number, getSettings().authors) : [];
     const branch = branchOf(t);
     const docPath = docPathOf(t);
+    const openTickets =
+      r.agent === 'classifier'
+        ? all<{ number: number; title: string; body: string; author: string }>(
+            "SELECT number, title, body, author FROM tickets WHERE repo_id = ? AND state = 'open' AND id != ? ORDER BY updated_at DESC",
+            ctx.repo.id,
+            t.id,
+          ).filter((o) => isAllowedAuthor(o.author))
+        : undefined;
     files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
@@ -190,6 +201,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
       comments: included,
       omittedComments: comments.length - included.length,
       review,
+      openTickets,
     });
   }
   return { cmd: ['run'], env, files };
@@ -216,8 +228,18 @@ function describeError(res: NonNullable<ClaudeRun['result']>, agent: AgentRow): 
   }
 }
 
-const summarize = (r: AgentResult) =>
-  'decision' in r ? `${r.decision === 'accept' ? `Sized ${r.size?.toUpperCase()}` : r.decision === 'reject' ? 'Declined' : 'Asked questions'}: ${r.reason}` : r.summary;
+const summarize = (r: AgentResult) => {
+  if (!('decision' in r)) return r.summary;
+  const what =
+    r.decision === 'accept'
+      ? `Sized ${r.size?.toUpperCase()}`
+      : r.decision === 'reject'
+        ? 'Declined'
+        : r.decision === 'blocked'
+          ? `Waiting for ${joinRefs((r.blocked_by ?? []).map((n) => `#${n}`))}`
+          : 'Asked questions';
+  return `${what}: ${r.reason}`;
+};
 
 /** The claude step. Returns true when the run should go on to publishing. */
 async function runAgent(ctx: Ctx): Promise<boolean> {
@@ -337,6 +359,19 @@ async function publishRun(ctx: Ctx) {
       }
     });
     if (state.exitCode !== 0) throw new Error(`Pushing ${branch} failed (exit ${state.exitCode}). See the run log.`);
+  }
+  if (plan.addBlockers) {
+    const source = sourceFor(ctx.repo);
+    const open = [];
+    for (const n of plan.addBlockers.filter((n) => n !== t.number)) {
+      const link = await source.addBlocker(repo, t.number, n);
+      if (link.state === 'open') open.push(link);
+    }
+    // Nothing open would hold nothing, and the Classifier would run again straight away.
+    if (!open.length) {
+      throw new Error(`The Classifier said this ticket waits for ${joinRefs(plan.addBlockers.map((n) => `#${n}`))}, but none of those is an open issue in ${ctx.repo.full_name}.`);
+    }
+    setBlockers(t, open.map((l) => linkRef(l, ctx.repo)));
   }
   if (plan.createBranch) {
     await vcs.createBranch(repo, branch, { number: t.number, nodeId: t.node_id ?? undefined });

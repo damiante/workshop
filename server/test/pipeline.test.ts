@@ -18,6 +18,7 @@ const { initDb, one, run } = await import('../src/db.ts');
 const { createConnection } = await import('../src/providers/index.ts');
 const { getRun } = await import('../src/runs.ts');
 const { launch } = await import('../src/scheduler/runner.ts');
+const { buildQueue } = await import('../src/scheduler/loop.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
@@ -75,7 +76,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]' WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.tickets = {
@@ -86,6 +87,8 @@ beforeEach(() => {
     ],
     setLabels: vi.fn(async () => {}),
     comment: vi.fn(async () => {}),
+    blockers: vi.fn(async () => []),
+    addBlocker: vi.fn(async (_repo: unknown, _n: number, blocker: number) => ({ repo: 'me/app', number: blocker, state: 'open', url: '' })),
   };
   fake.vcs = {
     gitAccess: async (repo: { fullName: string }, write: boolean) => ({
@@ -222,6 +225,49 @@ describe('runner', () => {
   });
 });
 
+describe('dependencies', () => {
+  const classifyBlocked = (blocked_by: number[]) => {
+    run("UPDATE tickets SET labels = '[]', branch = NULL WHERE id = 1");
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'blocked', blocked_by, reason: 'Needs the API from #2.' })] });
+    return settle(go('classifier'));
+  };
+
+  it('a blocked classifier result links the blockers, comments, and leaves the ticket unsized with no branch', async () => {
+    const r = await classifyBlocked([2]);
+    expect(r).toMatchObject({ status: 'succeeded', summary: 'Waiting for #2: Needs the API from #2.' });
+    expect(fake.tickets.addBlocker).toHaveBeenCalledWith(expect.anything(), 3, 2);
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('wait for #2'));
+    expect(fake.tickets.setLabels).toHaveBeenCalledTimes(2); // workshop/running on, then off
+    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], [label.running]);
+    expect(fake.vcs.createBranch).not.toHaveBeenCalled();
+    expect(one<{ blocked_by: string; branch: string | null }>('SELECT blocked_by, branch FROM tickets WHERE id = 1')).toEqual({ blocked_by: '["#2"]', branch: null });
+    expect(buildQueue().find((c) => c.ticket.id === 1)?.blockedBy).toBe('Depends on #2');
+  });
+
+  it('fails readably when none of the named blockers is open', async () => {
+    fake.tickets.addBlocker = vi.fn(async (_r: unknown, _n: number, b: number) => ({ repo: 'me/app', number: b, state: 'closed', url: '' }));
+    const r = await classifyBlocked([2]);
+    expect(r.status).toBe('failed');
+    expect(r.error).toContain('none of those is an open issue in me/app');
+    expect(one<{ blocked_by: string }>('SELECT blocked_by FROM tickets WHERE id = 1')?.blocked_by).toBe('[]');
+    expect(fake.tickets.comment).not.toHaveBeenCalled();
+  });
+
+  it('gives the classifier the other open tickets from allowed authors only', async () => {
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 2, 'Expose the API', 'REST endpoints', 'u', 'me', 'open', '[]', '2026-10-13T00:00:00Z')");
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 9, 'Stranger idea', 'secret text', 'u', 'stranger', 'open', '[]', '2026-10-13T00:00:00Z')");
+    try {
+      await classifyBlocked([2]);
+      const prompt = fake.env.spec('run')!.files!['.workshop/prompt.md'];
+      expect(prompt).toContain('### #2: Expose the API');
+      expect(prompt).not.toContain('Stranger idea');
+      expect(prompt).not.toContain('### #3:');
+    } finally {
+      run('DELETE FROM tickets WHERE number IN (2, 9)');
+    }
+  });
+});
+
 describe('sync', () => {
   const remote = (over: object = {}) => ({
     number: 3,
@@ -286,5 +332,56 @@ describe('sync', () => {
     fake.tickets.listChanged = async () => [remote({ labels: [label.stage('implement')] })];
     await syncRepo(repo());
     expect(one<{ failures: number }>('SELECT failures FROM tickets WHERE id = 1')?.failures).toBe(0);
+  });
+  describe('dependencies', () => {
+    const open = (n: number) => ({ repo: 'me/app', number: n, state: 'open', url: '' });
+    const held = () => one<{ blocked_by: string }>('SELECT blocked_by FROM tickets WHERE id = 1')?.blocked_by;
+    beforeEach(() => {
+      run("UPDATE tickets SET labels = '[]', pr_number = NULL WHERE id = 1");
+      fake.vcs.pullRequestState = async () => pr({});
+    });
+
+    it('holds a ticket that reports open blockers', async () => {
+      fake.tickets.listChanged = async () => [remote({ labels: [], openBlockers: 1 })];
+      fake.tickets.blockers = vi.fn(async () => [open(2)]);
+      await syncRepo(repo());
+      expect(held()).toBe('["#2"]');
+      expect(buildQueue().find((c) => c.ticket.id === 1)?.blockedBy).toBe('Depends on #2');
+    });
+
+    it('releases a held ticket when its blocker closes, even though the ticket did not change', async () => {
+      run(`UPDATE tickets SET blocked_by = '["#2"]' WHERE id = 1`);
+      fake.tickets.listChanged = async () => [];
+      fake.tickets.blockers = vi.fn(async () => [{ ...open(2), state: 'closed' }]);
+      await syncRepo(repo());
+      expect(held()).toBe('[]');
+      expect(buildQueue().find((c) => c.ticket.id === 1)?.blockedBy ?? '').not.toMatch(/Depends/);
+    });
+
+    it('keeps the hold when the list has no blocker count', async () => {
+      run(`UPDATE tickets SET blocked_by = '["#2"]' WHERE id = 1`);
+      fake.tickets.listChanged = async () => [remote({ labels: [] })];
+      fake.tickets.blockers = vi.fn(async () => [open(2)]);
+      await syncRepo(repo());
+      expect(held()).toBe('["#2"]');
+    });
+
+    it('keeps one unreadable ticket held without failing the sync', async () => {
+      run(`UPDATE tickets SET blocked_by = '["#2"]' WHERE id = 1`);
+      run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (1, 8, 'Other', '', 'u', 'me', 'open', '[]', '[\"#2\"]', '2026-10-13T00:00:00Z')");
+      try {
+        fake.tickets.listChanged = async () => [];
+        fake.tickets.blockers = vi.fn(async (_r: unknown, n: number) => {
+          if (n === 3) throw new Error('Not Found');
+          return [{ ...open(2), state: 'closed' }];
+        });
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await expect(syncRepo(repo())).resolves.toBeUndefined();
+        expect(held()).toBe('["#2"]');
+        expect(one<{ blocked_by: string }>('SELECT blocked_by FROM tickets WHERE number = 8')?.blocked_by).toBe('[]');
+      } finally {
+        run('DELETE FROM tickets WHERE number = 8');
+      }
+    });
   });
 });

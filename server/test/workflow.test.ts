@@ -77,6 +77,15 @@ describe('planTransition', () => {
     expect(plan.createBranch).toBe(false);
   });
 
+  it.each(['normal', 'delta'] as const)('classify blocked (%s): links the blockers and changes no labels or branch', (mode) => {
+    const labels = mode === 'delta' ? [label.size('s'), label.stage('reclassify')] : [];
+    const plan = planTransition(ctx({ labels, mode }), { decision: 'blocked', blocked_by: [2], reason: 'Needs the API.' });
+    expect(plan).toMatchObject({ add: [], remove: [], addBlockers: [2] });
+    expect(plan.createBranch).toBeUndefined();
+    expect(plan.comment).toContain('wait for #2');
+    expect(plan.comment).toContain('Needs the API.');
+  });
+
   it('classify reject: skip label and reason comment', () => {
     const plan = planTransition(ctx(), { decision: 'reject', reason: 'This is a question.' });
     expect(plan.add).toEqual([label.skip]);
@@ -132,7 +141,43 @@ describe('parseResult', () => {
   });
 });
 
+describe('parseResult blocked', () => {
+  it('requires a list of positive ticket numbers', () => {
+    expect(parseResult('classifier', { decision: 'blocked', blocked_by: [2], reason: 'x' })).toMatchObject({ decision: 'blocked', blocked_by: [2] });
+    for (const blocked_by of [undefined, [], ['2'], [0], [1.5]]) {
+      expect(parseResult('classifier', { decision: 'blocked', blocked_by, reason: 'x' })).toMatch(/blocked requires blocked_by/);
+    }
+  });
+});
+
 describe('taskPrompt', () => {
+  const base = {
+    mode: 'normal' as const,
+    repo: 'me/app',
+    base: 'main',
+    branch: 'workshop/3-x',
+    docPath: 'd.md',
+    ticket: { number: 3, title: 'X', body: 'Do X', url: 'u', labels: [], size: null },
+    comments: [],
+    omittedComments: 0,
+    review: [],
+  };
+
+  it('lists the other open tickets for the classifier only, trimmed and counted', () => {
+    const openTickets = Array.from({ length: 32 }, (_, i) => ({ number: i + 10, title: `T${i}`, body: i === 0 ? 'y'.repeat(700) : 'short' }));
+    const prompt = taskPrompt({ ...base, agent: 'classifier', openTickets });
+    expect(prompt).toContain('## Other open tickets in this repository');
+    expect(prompt).toContain('### #10: T0');
+    expect(prompt).toContain(`${'y'.repeat(600)}…`);
+    expect(prompt).not.toContain('y'.repeat(601));
+    expect(prompt).toContain('### #39: T29');
+    expect(prompt).not.toContain('### #40:');
+    expect(prompt).toContain('_2 more open ticket(s) left out._');
+    expect(prompt).toContain('return "blocked"');
+    expect(taskPrompt({ ...base, agent: 'design', openTickets })).not.toContain('Other open tickets');
+    expect(taskPrompt({ ...base, agent: 'classifier' })).not.toContain('Other open tickets');
+  });
+
   it('includes the ticket, comments, omissions, review feedback and the task', () => {
     const prompt = taskPrompt({
       agent: 'implement',

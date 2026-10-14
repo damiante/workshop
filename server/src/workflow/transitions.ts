@@ -1,4 +1,5 @@
 import type { AgentName } from '../api-types.ts';
+import { joinRefs } from '../scheduler/gates.ts';
 import { label, moveTo, setSize, stageAfterClassify, stageAfterDesign, type TicketState } from './labels.ts';
 import type { AgentResult, ClassifierResult, WorkResult } from './schemas.ts';
 
@@ -7,6 +8,8 @@ export interface Plan {
   add: string[];
   remove: string[];
   comment?: string;
+  /** Ticket numbers to link as blocking this ticket. */
+  addBlockers?: number[];
   createBranch?: boolean;
   /** Push the agent's commits. */
   publish?: boolean;
@@ -64,6 +67,15 @@ export function planTransition(ctx: PlanContext, result: AgentResult): Plan {
 
 function planClassifier(ctx: PlanContext, r: ClassifierResult): Plan {
   if (r.decision === 'needs_info') return { add: [label.needsInfo], remove: [], comment: questionsComment(ctx, r.questions) };
+  if (r.decision === 'blocked') {
+    const refs = joinRefs(r.blocked_by!.map((n) => `#${n}`));
+    return {
+      add: [],
+      remove: [],
+      addBlockers: r.blocked_by,
+      comment: `Workshop will wait for ${refs} before working on this ticket: ${r.reason}\n\nIt carries on once they're closed. If it shouldn't wait, remove the link under Relationships and say so in a comment.`,
+    };
+  }
   if (r.decision === 'reject') {
     return {
       add: [label.skip],
