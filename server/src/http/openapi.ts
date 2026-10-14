@@ -111,7 +111,7 @@ const schemas: Record<string, Schema> = {
     },
     [],
   ),
-  HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), slots: int, busy: int, specs: nullable(str) }),
+  HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), available: bool, slots: int, busy: int, specs: nullable(str) }),
   QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str) }),
   AlertView: object({
     id: int,
@@ -205,6 +205,15 @@ const paths: Record<string, Record<string, Op>> = {
   '/agents': { get: { summary: 'Agent classes and their model settings and prompts.', ok: array(ref('AgentClassView')) } },
   '/agents/{name}': {
     put: { summary: 'Changes one agent class. Send only the fields to change.', params: ['name'], body: { type: 'object' }, ok: ref('AgentClassView'), errors: [400, 403, 404] },
+  },
+  '/hosts/{id}': {
+    put: {
+      summary: 'Switches an agent host on or off for new agents. A host that is off stays connected and its running agents carry on.',
+      params: ['id'],
+      body: object({ available: bool }),
+      ok: ref('HostView'),
+      errors: [400, 403, 404],
+    },
   },
   '/models': { get: { summary: 'Models each Claude connection offers.', ok: array(ref('ModelOption')) } },
   '/tickets': { get: { summary: 'Tickets Workshop knows about.', query: { closed: 'Send 1 to include closed tickets.' }, ok: array(ref('TicketView')) } },

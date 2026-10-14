@@ -262,6 +262,28 @@ describe('pushing a ticket by hand', () => {
   });
 });
 
+describe('agent host availability', () => {
+  it('switches a host off and on, and reports it in the overview', async () => {
+    const { run, one } = await import('../src/db.ts');
+    run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('environment', 'docker', 'Box', '{\"slots\":2}', '', 'ok', 0, 0)");
+    const id = one<{ id: number }>("SELECT id FROM connections WHERE name = 'Box'")!.id;
+    const put = (body: object, c: string | null = cookie) => request(app).put(`/api/hosts/${id}`).set('cookie', c ?? '').send(body);
+
+    const hosts = async () => (await request(app).get('/api/overview').set('cookie', cookie)).body.hosts;
+    expect(await hosts()).toMatchObject([{ id, available: true, slots: 2 }]);
+
+    const off = await put({ available: false });
+    expect(off.status).toBe(200);
+    expect(off.body).toMatchObject({ id, available: false, status: 'ok', slots: 2 });
+    expect(await hosts()).toMatchObject([{ id, available: false }]);
+    expect((await put({ available: true })).body.available).toBe(true);
+
+    expect((await put({ available: 'no' })).status).toBe(400);
+    expect((await request(app).put('/api/hosts/9999').set('cookie', cookie).send({ available: false })).status).toBe(404);
+    expect((await request(app).put('/api/hosts/1').set('cookie', cookie).send({ available: false })).status).toBe(404);
+  });
+});
+
 describe("changing a ticket's status", () => {
   const put = (id: number | string, body: object) => request(app).put(`/api/tickets/${id}/state`).set('cookie', cookie).send(body);
   const labelsIn = (id: number) => JSON.parse(one<{ labels: string }>('SELECT labels FROM tickets WHERE id = ?', id)!.labels) as string[];

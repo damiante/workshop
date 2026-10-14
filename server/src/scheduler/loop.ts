@@ -91,14 +91,14 @@ export function hostLoads(): (HostLoad & { name: string; specs: string | null })
     all<{ environment_id: number; n: number }>(`SELECT environment_id, COUNT(*) AS n FROM runs WHERE ${RUNNING_SQL} GROUP BY environment_id`).map((r) => [r.environment_id, r.n]),
   );
   return listConnections('environment').map((c) => {
-    const cfg = c.config as { slots?: number; specs?: string };
-    return { id: c.id, name: c.name, healthy: c.status === 'ok', slots: Number(cfg.slots ?? 1), busy: busy.get(c.id) ?? 0, specs: cfg.specs ?? null };
+    const cfg = c.config as { slots?: number; specs?: string; available?: boolean };
+    return { id: c.id, name: c.name, healthy: c.status === 'ok', available: cfg.available !== false, slots: Number(cfg.slots ?? 1), busy: busy.get(c.id) ?? 0, specs: cfg.specs ?? null };
   });
 }
 
 export function hostViews(): HostView[] {
   const status = new Map(listConnections('environment').map((c) => [c.id, c.status]));
-  return hostLoads().map((h) => ({ id: h.id, name: h.name, status: status.get(h.id)!, slots: h.slots, busy: h.busy, specs: h.specs }));
+  return hostLoads().map((h) => ({ id: h.id, name: h.name, status: status.get(h.id)!, available: h.available, slots: h.slots, busy: h.busy, specs: h.specs }));
 }
 
 async function checkHosts() {

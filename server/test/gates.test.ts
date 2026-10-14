@@ -81,9 +81,11 @@ describe('allowance gate', () => {
 describe('scheduling helpers', () => {
   it('picks the healthy host with the most free slots', () => {
     expect(pickHost([])).toBeNull();
-    expect(pickHost([{ id: 1, healthy: true, slots: 1, busy: 1 }])).toBeNull();
-    expect(pickHost([{ id: 1, healthy: false, slots: 4, busy: 0 }, { id: 2, healthy: true, slots: 2, busy: 1 }])).toBe(2);
-    expect(pickHost([{ id: 1, healthy: true, slots: 2, busy: 1 }, { id: 2, healthy: true, slots: 3, busy: 0 }])).toBe(2);
+    expect(pickHost([{ id: 1, healthy: true, available: true, slots: 1, busy: 1 }])).toBeNull();
+    expect(pickHost([{ id: 1, healthy: false, available: true, slots: 4, busy: 0 }, { id: 2, healthy: true, available: true, slots: 2, busy: 1 }])).toBe(2);
+    expect(pickHost([{ id: 1, healthy: true, available: true, slots: 2, busy: 1 }, { id: 2, healthy: true, available: true, slots: 3, busy: 0 }])).toBe(2);
+    expect(pickHost([{ id: 1, healthy: true, available: false, slots: 4, busy: 0 }])).toBeNull();
+    expect(pickHost([{ id: 1, healthy: true, available: false, slots: 4, busy: 0 }, { id: 2, healthy: true, available: true, slots: 1, busy: 0 }])).toBe(2);
   });
 
   it('finishes work in flight first', () => {
