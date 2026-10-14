@@ -75,6 +75,16 @@ export function pickHost(hosts: HostLoad[]): number | null {
   return free[0]?.id ?? null;
 }
 
+/** "#2", "#2 and #5", "#2, #5 and #7". */
+export function joinRefs(refs: string[]): string {
+  return refs.length < 2 ? refs.join('') : `${refs.slice(0, -1).join(', ')} and ${refs[refs.length - 1]}`;
+}
+
+/** Why open blocking tickets hold a ticket back, or null. */
+export function dependencyBlock(refs: string[]): string | null {
+  return refs.length ? `Depends on ${joinRefs(refs)}` : null;
+}
+
 /** Finish work in flight before starting new work. */
 export function stepPriority(step: Step): number {
   if (step.kind === 'merge') return 0;

@@ -2,8 +2,9 @@ import type { RepoView, TicketView } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import { publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
-import type { RepoRef } from './providers/types.ts';
+import type { RepoRef, TicketLink } from './providers/types.ts';
 import { getSettings } from './settings.ts';
+import { dependencyBlock } from './scheduler/gates.ts';
 import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
 
 export interface RepoRow {
@@ -35,6 +36,7 @@ export interface TicketRow {
   pr_url: string | null;
   pr_status: string | null;
   failures: number;
+  blocked_by: string;
   updated_at: string;
 }
 
@@ -45,9 +47,21 @@ export const repoRef = (r: RepoRow): RepoRef => ({ fullName: r.full_name, defaul
 export const getRepo = (id: number) => one<RepoRow>('SELECT * FROM repos WHERE id = ?', id);
 export const getTicket = (id: number) => one<TicketRow>('SELECT * FROM tickets WHERE id = ?', id);
 export const labelsOf = (t: TicketRow): string[] => JSON.parse(t.labels);
+/** Open tickets this one waits for, as display refs such as "#2" or "other/repo#5". */
+export const blockersOf = (t: TicketRow): string[] => JSON.parse(t.blocked_by);
 export const branchOf = (t: TicketRow) => t.branch ?? branchFor(t.number, t.title);
 /** The design doc lives beside the branch name, so renaming the issue doesn't move it. */
 export const docPathOf = (t: TicketRow) => `docs/workshop/${branchOf(t).replace(/^workshop\//, '')}.md`;
+
+export const linkRef = (link: TicketLink, repo: RepoRow) => (link.repo.toLowerCase() === repo.full_name.toLowerCase() ? `#${link.number}` : `${link.repo}#${link.number}`);
+
+export function setBlockers(t: TicketRow, refs: string[]) {
+  const value = JSON.stringify(refs);
+  if (value === t.blocked_by) return;
+  run('UPDATE tickets SET blocked_by = ? WHERE id = ?', value, t.id);
+  t.blocked_by = value;
+  publish('tickets');
+}
 
 export function repoView(r: RepoRow): RepoView {
   return { id: r.id, connectionId: r.vcs_connection_id, fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url, enabled: Boolean(r.enabled), image: r.image };
@@ -76,7 +90,8 @@ export function activeRunId(ticketId: number) {
 export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
   const labels = labelsOf(t);
   const state = parseLabels(labels);
-  const next = state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : describeStep(nextStep(state, t.state === 'open'));
+  const step = nextStep(state, t.state === 'open');
+  const next = state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : (step && dependencyBlock(blockersOf(t))) || describeStep(step);
   return {
     id: t.id,
     repo: repo.full_name,

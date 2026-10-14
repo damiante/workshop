@@ -25,6 +25,16 @@ export interface RemoteTicket {
   labels: string[];
   url: string;
   updatedAt: string;
+  /** How many open tickets block this one. Undefined means the source didn't say. */
+  openBlockers?: number;
+}
+
+/** Another ticket this one is linked to. `repo` is the full name. */
+export interface TicketLink {
+  repo: string;
+  number: number;
+  state: 'open' | 'closed';
+  url: string;
 }
 
 export interface TicketComment {
@@ -44,6 +54,10 @@ export interface TicketSource {
   comment(repo: RepoRef, number: number, body: string): Promise<void>;
   close(repo: RepoRef, number: number): Promise<void>;
   ensureLabels(repo: RepoRef, labels: LabelDef[]): Promise<void>;
+  /** The tickets this one is blocked by, open and closed. */
+  blockers(repo: RepoRef, number: number): Promise<TicketLink[]>;
+  /** Marks `blocker` (a ticket in the same repo) as blocking `number`. Idempotent. Returns the blocker. */
+  addBlocker(repo: RepoRef, number: number, blocker: number): Promise<TicketLink>;
 }
 
 export interface GitAccess {

@@ -8,10 +8,10 @@ import { readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts'
 import { environmentOf, getConnection, listConnections, modelsOf, setConnectionStatus } from '../providers/index.ts';
 import { deleteLog, RUNNING_SQL, type RunRow } from '../runs.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, getRepo, isAllowedAuthor, labelsOf, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, blockersOf, getRepo, isAllowedAuthor, labelsOf, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
-import { allowanceBlock, apiCapBlock, localTime, modeBlock, pickHost, stepPriority, type HostLoad } from './gates.ts';
+import { allowanceBlock, apiCapBlock, dependencyBlock, localTime, modeBlock, pickHost, stepPriority, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 import { drive, isDriving, launch, onRunSettled, resume } from './runner.ts';
 import { syncRepo } from './sync.ts';
@@ -158,6 +158,7 @@ const openTicketsSql = `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_
 async function mergeApproved() {
   for (const t of all<TicketRow>(openTicketsSql)) {
     if (!isAllowedAuthor(t.author) || nextStep(parseLabels(labelsOf(t)), true)?.kind !== 'merge' || activeRunId(t.id)) continue;
+    if (blockersOf(t).length) continue; // an approved pull request waits for its blockers too
     try {
       await advanceMerge(t);
     } catch (err) {
@@ -218,7 +219,7 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now()): Candi
     const cls = getAgent(agent);
     const conn = getConnection(cls.model_connection_id);
     const name = AGENT_INFO[agent].label;
-    let blockedBy = modeReason;
+    let blockedBy = dependencyBlock(blockersOf(t)) ?? modeReason;
     if (!blockedBy && (!cls.model || !conn)) blockedBy = `Choose a model for ${name} on the Agents page`;
     if (!blockedBy && !modelsOf(conn!).billing().includes(cls.billing)) {
       blockedBy = `${conn!.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`;

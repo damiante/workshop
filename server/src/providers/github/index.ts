@@ -9,6 +9,7 @@ import type {
   RepoRef,
   ReviewFeedback,
   TicketComment,
+  TicketLink,
   TicketSource,
   VcsHost,
 } from '../types.ts';
@@ -85,6 +86,20 @@ const split = (repo: RepoRef) => {
 };
 
 const status = (err: unknown) => (err as { status?: number }).status;
+
+interface IssueLike {
+  number: number;
+  state: string;
+  html_url: string;
+  repository_url?: string;
+  pull_request?: unknown;
+}
+
+/** The repo comes from `repository_url` (…/repos/owner/name), or from the issue's page URL. */
+function toLink(i: IssueLike): TicketLink {
+  const parts = (i.repository_url ? i.repository_url.split('/').slice(-2) : new URL(i.html_url).pathname.split('/').slice(1, 3)).join('/');
+  return { repo: parts, number: i.number, state: i.state === 'closed' ? 'closed' : 'open', url: i.html_url };
+}
 
 const MERGEABILITY: Record<string, Mergeability> = {
   clean: 'clean',
@@ -177,7 +192,34 @@ export class GitHubApp implements VcsHost, TicketSource {
         labels: i.labels.map((l) => (typeof l === 'string' ? l : l.name ?? '')).filter(Boolean),
         url: i.html_url,
         updatedAt: i.updated_at,
+        openBlockers: (i as { issue_dependencies_summary?: { blocked_by?: number } }).issue_dependencies_summary?.blocked_by ?? 0,
       }));
+  }
+
+  async blockers(repo: RepoRef, number: number): Promise<TicketLink[]> {
+    const kit = await this.kit(repo);
+    const list = (await kit.paginate('GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by', {
+      ...split(repo),
+      issue_number: number,
+      per_page: 100,
+    })) as IssueLike[];
+    return list.map(toLink);
+  }
+
+  async addBlocker(repo: RepoRef, number: number, blocker: number): Promise<TicketLink> {
+    const kit = await this.kit(repo);
+    const notIssue = new Error(`#${blocker} isn't an issue in ${repo.fullName}.`);
+    const data = await kit
+      .request('GET /repos/{owner}/{repo}/issues/{issue_number}', { ...split(repo), issue_number: blocker })
+      .then((r) => r.data as IssueLike & { id: number })
+      .catch((err) => {
+        throw status(err) === 404 ? notIssue : err;
+      });
+    if (data.pull_request) throw notIssue;
+    const existing = (await this.blockers(repo, number)).find((l) => l.number === blocker && l.repo.toLowerCase() === repo.fullName.toLowerCase());
+    if (existing) return existing;
+    await kit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by', { ...split(repo), issue_number: number, issue_id: data.id });
+    return toLink({ ...data, repository_url: undefined });
   }
 
   async comments(repo: RepoRef, number: number): Promise<TicketComment[]> {

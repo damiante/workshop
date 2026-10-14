@@ -2,10 +2,11 @@ import type { AgentName, Size } from '../api-types.ts';
 import { SIZES } from './labels.ts';
 
 export interface ClassifierResult {
-  decision: 'accept' | 'reject' | 'needs_info';
+  decision: 'accept' | 'reject' | 'needs_info' | 'blocked';
   size?: Size;
   reason: string;
   questions?: string[];
+  blocked_by?: number[];
 }
 
 export interface WorkResult {
@@ -22,10 +23,11 @@ const questions = { type: 'array', items: { type: 'string' }, description: 'Spec
 const CLASSIFIER_SCHEMA = {
   type: 'object',
   properties: {
-    decision: { type: 'string', enum: ['accept', 'reject', 'needs_info'] },
+    decision: { type: 'string', enum: ['accept', 'reject', 'needs_info', 'blocked'] },
     size: { type: 'string', enum: SIZES, description: 'Required when decision is accept.' },
     reason: { type: 'string', description: 'One or two sentences explaining the decision and size.' },
     questions,
+    blocked_by: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'Numbers of the open tickets listed in the task that must be finished first (blocked only).' },
   },
   required: ['decision', 'reason'],
   additionalProperties: false,
@@ -55,7 +57,11 @@ export function parseResult(agent: AgentName, value: unknown): AgentResult | str
   const needsQuestions = v.decision === 'needs_info' || v.outcome === 'needs_info';
   if (needsQuestions && !(v.questions as string[] | undefined)?.length) return 'needs_info requires at least one question.';
   if (agent === 'classifier') {
-    if (!['accept', 'reject', 'needs_info'].includes(v.decision as string)) return 'decision must be accept, reject or needs_info.';
+    if (!['accept', 'reject', 'needs_info', 'blocked'].includes(v.decision as string)) return 'decision must be accept, reject, needs_info or blocked.';
+    if (v.decision === 'blocked') {
+      const b = v.blocked_by;
+      if (!Array.isArray(b) || !b.length || !b.every((n) => Number.isInteger(n) && n > 0)) return 'blocked requires blocked_by: the numbers of the tickets this one waits for.';
+    }
     if (typeof v.reason !== 'string') return 'reason is required.';
     if (v.decision === 'accept' && !SIZES.includes(v.size as Size)) return 'size (xs–xl) is required to accept a ticket.';
     return v as unknown as ClassifierResult;

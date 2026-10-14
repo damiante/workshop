@@ -125,6 +125,7 @@ const MIGRATIONS = [
     blocked_until INTEGER
   );
   `,
+  `ALTER TABLE tickets ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 export let db: DatabaseSync;

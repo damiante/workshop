@@ -20,7 +20,7 @@ Design notes: [docs/design/architecture.md](docs/design/architecture.md) and [do
 
 Every few minutes Workshop reads open issues opened by you (or anyone else you list as a ticket author) in the repositories you've turned on. Each issue moves through these stages:
 
-1. **Classify.** The Classifier sizes the issue XS to XL, or declines it with a reason. Workshop creates a branch linked to the issue.
+1. **Classify.** The Classifier sizes the issue XS to XL, or declines it with a reason. Workshop creates a branch linked to the issue. A ticket waits while GitHub shows it as blocked by an open issue, and the Classifier can add that link itself when a ticket needs another one first.
 2. **Design** (M, L and XL only). The Design agent writes a design doc on the branch.
 3. **Design review** (L and XL only). The Design adversary attacks the design and revises it.
 4. **Implement.** The Implementation agent writes the change and tests, and Workshop opens a pull request and asks for your review. On L and XL tickets the agent also runs an adversarial self-review before finishing.

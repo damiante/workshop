@@ -47,6 +47,7 @@ When several tickets are ready, work already under way goes first: merge, then i
 | Classifier | accept, XS or S | size, `stage:implement` | Create the branch `workshop/<n>-<slug>`, linked to the issue; comment the size and reason |
 | Classifier | accept, M, L or XL | size, `stage:design` | Same |
 | Classifier (delta) | accept | size of the *requested changes*, then routed the same way | No new branch |
+| Classifier | blocked | no label change | Add the blocked-by links on GitHub; comment the reason. The ticket stays unsized with no branch, and is classified again once its blockers close |
 | Classifier | reject | `skip`, stage removed | Comment the reason |
 | Design | done | `stage:implement` (M) or `stage:design-review` (L/XL) | Push the design doc; comment a link and summary |
 | Design adversary | done | `stage:implement` | Push the revised doc; comment a summary |
@@ -62,6 +63,7 @@ The design document lives at `docs/workshop/<n>-<slug>.md` on the ticket's branc
 Each sync checks every pull request waiting on you. Only a formal review counts (Approve or Request changes, not a plain comment), and only one made **on the current head commit** by a ticket author. Pushing new work asks for a fresh decision.
 
 - **Approved:** `stage:merge`.
+- **Dependencies:** a ticket that GitHub shows as blocked by an open issue starts no agent at any stage, and an approved pull request isn't merged through the API. The queue says "Depends on #2". Every sync re-reads the blockers of held tickets, because closing a blocker may not change the blocked ticket's update time.
 - **Changes requested:** `stage:reclassify`. The Classifier sizes just the requested changes, then the usual route runs on the same branch. Agents receive your review comments, with file and line. The Implementation agent comments on the existing pull request instead of opening a new one, and your review is requested again.
 - **Pull request closed without merging:** Workshop stops. It adds `workshop/skip` and comments; removing the label starts again from classification.
 - **Merged by you:** the ticket is closed and its stage cleared.
@@ -99,7 +101,7 @@ Every run is `claude -p` in `/work/repo` on the ticket's branch, with:
   - how to ask a question.
 - **Task** (stdin): the ticket title, body and labels, then the comments (only from ticket authors and Workshop's bot), then any review feedback, then a one-line task for this stage.
 - **Result:** a JSON schema per agent.
-  - Classifier: `{decision: accept|reject|needs_info, size?, reason, questions?}`.
+  - Classifier: `{decision: accept|reject|needs_info|blocked, size?, reason, questions?, blocked_by?}`.
   - Others: `{outcome: done|needs_info|failed, summary, questions?, tests?}`.
 - **Limits:** max turns and a time limit per agent; for API billing, `--max-budget-usd`.
 
