@@ -1,7 +1,8 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import type { Settings } from '../../../server/src/api-types.ts';
+import type { ApiTokenView, NewApiToken, Settings } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Panel } from '../components/ui.tsx';
+import { ago } from '../format.ts';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ZONES = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
@@ -13,6 +14,96 @@ function NumberField({ label, help, value, min, max, step = 1, onChange }: { lab
       <input type="number" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} required />
       {help && <span className="help">{help}</span>}
     </label>
+  );
+}
+
+function ApiTokens() {
+  const { data, error } = useApi<ApiTokenView[]>('/tokens', ['tokens']);
+  const [name, setName] = useState('');
+  const [readOnly, setReadOnly] = useState(false);
+  const [created, setCreated] = useState<string | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  const create = async (e: FormEvent) => {
+    e.preventDefault();
+    setProblem(null);
+    try {
+      const made = await api<NewApiToken>('/tokens', { method: 'POST', body: { name, scope: readOnly ? 'read' : 'write' } });
+      setCreated(made.token);
+      setName('');
+    } catch (err) {
+      setProblem((err as Error).message);
+    }
+  };
+  const revoke = async (t: ApiTokenView) => {
+    if (!confirm(`Revoke "${t.name}"? Anything using it stops working.`)) return;
+    setProblem(null);
+    try {
+      await api(`/tokens/${t.id}`, { method: 'DELETE' });
+    } catch (err) {
+      setProblem((err as Error).message);
+    }
+  };
+
+  return (
+    <Panel title="API tokens">
+      <div className="panel-body stack">
+        <p className="small muted">Scripts can use Workshop's API with a token. See docs/api.md.</p>
+        <ErrorNote error={error} />
+        {data && data.length > 0 && (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Access</th>
+                  <th>Created</th>
+                  <th>Last used</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {data.map((t) => (
+                  <tr key={t.id}>
+                    <td>{t.name}</td>
+                    <td>{t.scope === 'read' ? 'Read only' : 'Full'}</td>
+                    <td>{ago(t.createdAt)}</td>
+                    <td>{t.lastUsedAt ? ago(t.lastUsedAt) : 'Never'}</td>
+                    <td>
+                      <button type="button" className="danger" onClick={() => void revoke(t)}>
+                        Revoke
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {created && (
+          <div className="stack">
+            <div className="row">
+              <input readOnly value={created} aria-label="New API token" style={{ flex: 1 }} onFocus={(e) => e.target.select()} />
+              <button type="button" onClick={() => void navigator.clipboard?.writeText(created)}>
+                Copy
+              </button>
+            </div>
+            <span className="small muted">Copy this token now. Workshop won't show it again.</span>
+          </div>
+        )}
+        <div className="row">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Token name, e.g. home automation" aria-label="Token name" maxLength={60} />
+          <label className="row" style={{ gap: 4 }}>
+            <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} />
+            Read only
+          </label>
+          <button type="button" onClick={create}>
+            Create token
+          </button>
+        </div>
+        <ErrorNote error={problem} />
+      </div>
+    </Panel>
   );
 }
 
@@ -49,6 +140,7 @@ export function SettingsPage() {
   };
 
   return (
+    <div className="stack">
     <form className="stack" onSubmit={save}>
       <h1>Settings</h1>
       <Panel title="Operating hours">
@@ -118,5 +210,7 @@ export function SettingsPage() {
         {saved && <span className="small muted">Saved.</span>}
       </div>
     </form>
+    <ApiTokens />
+    </div>
   );
 }

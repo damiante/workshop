@@ -7,6 +7,7 @@ import { all, run } from '../db.ts';
 import { readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts';
 import { environmentOf, getConnection, listConnections, modelsOf, setConnectionStatus } from '../providers/index.ts';
 import { deleteLog, RUNNING_SQL, type RunRow } from '../runs.ts';
+import { check } from '../http/util.ts';
 import { getSettings } from '../settings.ts';
 import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
@@ -68,18 +69,7 @@ export async function tick() {
     resumePaused(s, now);
     const queue = buildQueue(s, now);
     const next = queue.find((c) => !c.blockedBy);
-    if (next) {
-      launch({
-        ticketId: next.ticket.id,
-        agent: next.agent,
-        mode: next.mode,
-        attempt: next.ticket.failures + 1,
-        environmentId: next.hostId!,
-        modelConnectionId: next.modelConnectionId!,
-        model: next.model!,
-        billing: next.billing,
-      });
-    }
+    if (next) startCandidate(next);
     for (const c of queue) if (c.blockedBy === 'Checking allowance' && c.modelConnectionId) void probeAllowance(c.modelConnectionId).catch(() => {});
     if (now - lastCleanup > 24 * 3600_000) {
       lastCleanup = now;
@@ -209,16 +199,45 @@ export interface Candidate {
   pushed: boolean;
 }
 
-function startOfDay(now: number, timeZone: string) {
+function startCandidate(c: Candidate): string | null {
+  return launch({
+    ticketId: c.ticket.id,
+    agent: c.agent,
+    mode: c.mode,
+    attempt: c.ticket.failures + 1,
+    environmentId: c.hostId!,
+    modelConnectionId: c.modelConnectionId!,
+    model: c.model!,
+    billing: c.billing,
+  });
+}
+
+/**
+ * Starts an agent on one ticket now, for an explicit request. The operation mode and hours are
+ * skipped (the request is the permission); every other gate still applies. Returns the run id.
+ */
+export function launchNow(ticketId: number): string {
+  check(getTicket(ticketId), 'Ticket not found.', 404);
+  const busy = 'An agent is already working on this ticket.';
+  check(!activeRunId(ticketId), busy, 409);
+  const c = buildQueue(getSettings(), Date.now(), { ignoreMode: true }).find((q) => q.ticket.id === ticketId);
+  check(c, "There's nothing for an agent to do on this ticket right now.", 409);
+  check(!c.blockedBy, `Can't start an agent yet: ${c.blockedBy}.`, 409);
+  const id = startCandidate(c);
+  check(id, busy, 409);
+  return id;
+}
+
+export function startOfDay(now: number, timeZone: string) {
   const { minutes } = localTime(new Date(now), timeZone);
   return now - minutes * 60_000 - (now % 60_000);
 }
 
 /** Every ticket Workshop could work on next, in order, each with the reason it's waiting (if any). */
-export function buildQueue(s: Settings = getSettings(), now = Date.now()): Candidate[] {
+export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: { ignoreMode?: boolean } = {}): Candidate[] {
   const hosts = hostLoads();
   const hostId = pickHost(hosts);
-  const modeReason = modeBlock(s, new Date(now));
+  const modeReason = opts.ignoreMode ? null : modeBlock(s, new Date(now));
   const spentToday = apiSpendSince(startOfDay(now, s.timezone));
   const out: (Candidate & { priority: number })[] = [];
   for (const t of all<TicketRow>(`${openTicketsSql} ORDER BY t.updated_at`)) {

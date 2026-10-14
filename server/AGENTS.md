@@ -25,7 +25,9 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/scheduler/sync.ts` | Pull changed tickets; check pull requests waiting for review |
 | `src/scheduler/merge.ts` | API-first merging, closed and merged pull requests |
 | `src/providers/` | `types.ts` (interfaces), `index.ts` (connections, encrypted secrets, cached instances), and `github/`, `docker/`, `anthropic/` |
-| `src/http/` | `auth.ts` (password + TOTP, sessions, lockout, Origin check), `api.ts`, `connections.ts`, `util.ts` |
+| `src/http/` | `auth.ts` (password + TOTP, sessions, API-token check, lockout, Origin check), `api.ts`, `connections.ts`, `util.ts` |
+| `src/http/tokens.ts` | Create, list and revoke API tokens (session only) |
+| `src/http/openapi.ts` | Hand-written OpenAPI document served at `/api/openapi.json` |
 
 ## Run lifecycle
 
@@ -46,6 +48,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - **Exactly one Claude credential per container** (`launchEnv`): with both set, Claude Code would bill the API key.
 - **Fail closed on allowance.** No fresh reading means no subscription launch.
 - **Validate at the boundary.** HTTP bodies go through `check`/`int`/`num`; connection forms through `splitValues` against the provider's `fields`; agent results through `parseResult`.
+- **Keep the API schema current.** Add every new `apiRouter` route to `openapi.ts` (a test enforces it), and update the schemas it uses when a response gains or loses a field (nothing enforces this for most views). When a change exposes new functionality an API consumer could reasonably use (a script, home automation), put it on `apiRouter` and in the schema, and describe it in `docs/api.md`. API tokens never reach connections or tokens (`sessionOnly`): a setting that only matters in the web UI, or that needs those secrets, can stay there.
 - **Untrusted text stays data.** Only allowlisted authors' issues are synced, and only their comments (plus Workshop's bot) reach prompts.
 
 ## Claude Code integration

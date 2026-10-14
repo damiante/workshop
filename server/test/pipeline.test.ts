@@ -11,14 +11,14 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
   modelsOf: () => fake.models,
 }));
 
-const { seedAgents } = await import('../src/agents.ts');
-const { allowanceOf } = await import('../src/allowance.ts');
+const { seedAgents, updateAgent } = await import('../src/agents.ts');
+const { allowanceOf, recordProbe } = await import('../src/allowance.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { initDb, one, run } = await import('../src/db.ts');
-const { createConnection } = await import('../src/providers/index.ts');
+const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
 const { getRun } = await import('../src/runs.ts');
 const { launch } = await import('../src/scheduler/runner.ts');
-const { buildQueue, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
+const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
 const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { saveSettings } = await import('../src/settings.ts');
@@ -265,6 +265,33 @@ describe('dependencies', () => {
       expect(prompt).not.toContain('### #3:');
     } finally {
       run('DELETE FROM tickets WHERE number IN (2, 9)');
+    }
+  });
+});
+
+describe('launchNow', () => {
+  const script = () => ({ prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'Done.', tests: 'ok' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+
+  it('starts a run while paused, once, and refuses a second', async () => {
+    saveSettings({ mode: 'paused' });
+    recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+    setConnectionStatus(ids.env, 'ok');
+    fake.env = new FakeEnv(script());
+    fake.models.models = () => [];
+    updateAgent('implement', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model });
+    const id = launchNow(1);
+    expect(getRun(id)).toMatchObject({ ticket_id: 1, agent: 'implement' });
+    expect(() => launchNow(1)).toThrow("An agent is already working on this ticket.");
+    expect((await settle(id)).status).toBe('succeeded');
+  });
+
+  it('refuses a ticket held by a dependency', () => {
+    run(`UPDATE tickets SET blocked_by = '["#2"]' WHERE id = 1`);
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 2, 'Blocker', '', 'u', 'me', 'open', '[]', '2026-10-13T00:00:00Z')");
+    try {
+      expect(() => launchNow(1)).toThrow("Can't start an agent yet: Depends on #2.");
+    } finally {
+      run('DELETE FROM tickets WHERE number = 2');
     }
   });
 });

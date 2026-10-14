@@ -1,5 +1,5 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
-import type { AuthState, LoginResponse } from '../api-types.ts';
+import type { AuthState, LoginResponse, TokenScope } from '../api-types.ts';
 import { config } from '../config.ts';
 import { newTotpSecret, randomToken, safeEqual, seal, sha256, unseal, verifyTotp } from '../crypto.ts';
 import { one, run } from '../db.ts';
@@ -42,11 +42,38 @@ function checkSession(req: Request, res: Response): boolean {
   return true;
 }
 
+function readBearer(req: Request): string | null {
+  const m = /^Bearer\s+(\S+)$/i.exec(req.get('authorization') ?? '');
+  return m ? m[1] : null;
+}
+
+/** Known API token → its id and scope. Refreshes `last_used_at` at most once a minute. */
+function checkToken(token: string): { id: number; scope: TokenScope } | null {
+  const row = one<{ id: number; scope: TokenScope; last_used_at: number | null }>('SELECT id, scope, last_used_at FROM api_tokens WHERE token_hash = ?', sha256(token));
+  if (!row) return null;
+  if (!row.last_used_at || Date.now() - row.last_used_at > 60_000) run('UPDATE api_tokens SET last_used_at = ? WHERE id = ?', Date.now(), row.id);
+  return { id: row.id, scope: row.scope };
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const bearer = readBearer(req);
+  if (bearer) {
+    const token = checkToken(bearer);
+    if (!token) return res.status(401).json({ error: 'That API token is wrong or was revoked.' });
+    if (token.scope === 'read' && req.method !== 'GET' && req.method !== 'HEAD') return res.status(403).json({ error: 'This API token is read-only.' });
+    res.locals.token = token;
+    return next();
+  }
   if (checkSession(req, res)) return next();
   // Browser navigations (e.g. GitHub redirecting back) go to the sign-in page instead of a JSON error.
   if (req.method === 'GET' && req.accepts(['json', 'html']) === 'html') return res.redirect('/');
   res.status(401).json({ error: 'Sign in to continue.' });
+}
+
+/** Keeps API tokens away from routes that hold credentials: connections and the tokens themselves. */
+export function sessionOnly(_req: Request, res: Response, next: NextFunction) {
+  if (res.locals.token) return res.status(403).json({ error: "API tokens can't manage connections or tokens. Sign in to Workshop to do that." });
+  next();
 }
 
 /** Refuses state-changing requests from other sites (defence in depth on top of SameSite cookies). */

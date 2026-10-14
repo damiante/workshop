@@ -108,6 +108,8 @@ Once the App is installed, the **Repositories** list shows every repository it c
 
 Then switch the top bar from **Paused** to **Scheduled** or **Always on**. To move one ticket along while Workshop is paused, use **Run next stage** or **Run until it needs you** on its card on the Tickets page.
 
+Scripts can do the same, launch agents and read usage over HTTP with an API token from Settings: see [docs/api.md](docs/api.md).
+
 ## Day to day
 
 - **Needs you** on the dashboard lists questions to answer, pull requests to review, and tickets that stopped after failures.

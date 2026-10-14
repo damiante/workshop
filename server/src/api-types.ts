@@ -1,6 +1,6 @@
 // Types shared with the client (imported type-only). Keep this file free of runtime imports.
 
-export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents';
+export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens';
 
 export type Mode = 'paused' | 'scheduled' | 'always';
 
@@ -227,6 +227,30 @@ export interface Overview {
   queue: QueueItem[];
   hosts: HostView[];
   alerts: AlertView[];
+}
+
+export interface Usage {
+  allowance: AllowanceView[];
+  thresholds: { fiveHour: number; weekly: number };
+  apiSpendTodayUsd: number;
+  apiRunCapUsd: number;
+  apiDailyCapUsd: number;
+}
+
+export type TokenScope = 'read' | 'write';
+
+export interface ApiTokenView {
+  id: number;
+  name: string;
+  scope: TokenScope;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+/** Returned once, when a token is created. */
+export interface NewApiToken {
+  token: string;
+  view: ApiTokenView;
 }
 
 export interface AuthState {
