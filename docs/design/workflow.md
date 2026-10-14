@@ -80,6 +80,17 @@ For a ticket in `stage:merge`, Workshop reads the pull request's mergeability:
 | blocked, still approved | Wait (required checks or reviews pending) |
 | blocked, approval dismissed | Back to `stage:pr-review` and request your review |
 
+## Pushing a ticket by hand
+
+Whatever the operation mode, you can push one ticket from its card on the Tickets page:
+
+- **Run next stage** runs the next step (classify, design, design review, implement, or merge) and stops when the stage label changes.
+- **Run until it needs you** keeps going stage after stage.
+
+Either push also ends where Workshop would wait for you anyway: your pull request review, a question (`needs-info`), `skip`, `failed`, or the ticket closing. So an approved pull request isn't merged while Workshop is paused until you push the ticket again. A failed first attempt is retried as usual; the push ends after the second failure.
+
+A push lifts only the mode gate. Dependencies, model settings, allowance, the API cap, free hosts and one agent per ticket still apply. Pushed tickets go to the front of the queue. **Cancel push** ends a push without stopping a running agent.
+
 ## Failures, pauses and stops
 
 - **A failed attempt** (error result, invalid result, timeout, out of memory, a lost container, a failed push) counts against the stage. After the second one: `workshop/failed`, a comment with the error, and an alert.

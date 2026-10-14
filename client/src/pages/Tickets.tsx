@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import type { TicketView } from '../../../server/src/api-types.ts';
+import type { Push, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Status } from '../components/ui.tsx';
 
@@ -35,6 +35,46 @@ function TicketStatus({ t }: { t: TicketView }) {
   return null;
 }
 
+function PushControls({ t }: { t: TicketView }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const send = (init: { method?: string; body?: unknown }) => {
+    setBusy(true);
+    setError(null);
+    api(`/tickets/${t.id}/push`, init)
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setBusy(false));
+  };
+  const push = (scope: Push) => send({ body: { scope } });
+  return (
+    <>
+      {t.push ? (
+        <div className="row small">
+          <span className="muted">Pushed: {t.push === 'stage' ? 'next stage only' : 'until it needs you'}</span>
+          <button onClick={() => send({ method: 'DELETE' })} disabled={busy}>
+            Cancel push
+          </button>
+        </div>
+      ) : (
+        t.next &&
+        t.stage !== 'pr-review' && (
+          <div className="row small">
+            {!t.activeRunId && (
+              <button onClick={() => push('stage')} disabled={busy}>
+                Run next stage
+              </button>
+            )}
+            <button onClick={() => push('lifecycle')} disabled={busy}>
+              Run until it needs you
+            </button>
+          </div>
+        )
+      )}
+      <ErrorNote error={error} />
+    </>
+  );
+}
+
 function Card({ t }: { t: TicketView }) {
   return (
     <article className="card">
@@ -55,6 +95,7 @@ function Card({ t }: { t: TicketView }) {
         </a>
       )}
       {t.next && !t.activeRunId && <span className="small muted">Next: {t.next}</span>}
+      <PushControls t={t} />
     </article>
   );
 }
