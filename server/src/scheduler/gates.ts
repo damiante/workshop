@@ -1,5 +1,10 @@
-import type { AllowanceView, Push, Settings, UsageWindow } from '../api-types.ts';
-import { nextStep, parseLabels, type Step } from '../workflow/labels.ts';
+import type { AllowanceView, Push, RepoSelection, Settings, UsageWindow } from '../api-types.ts';
+import { label, nextStep, parseLabels, type Step } from '../workflow/labels.ts';
+
+/** Whether Workshop may work on a ticket: always for a whole-backlog repository, otherwise only when nominated. */
+export function inScope(selection: RepoSelection, labels: string[]): boolean {
+  return selection === 'all' || labels.includes(label.nominated);
+}
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 

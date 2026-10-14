@@ -1,10 +1,10 @@
-import type { Push, RepoView, TicketView } from './api-types.ts';
+import type { Push, RepoSelection, RepoView, TicketView } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import { publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
 import type { RepoRef, TicketLink } from './providers/types.ts';
 import { getSettings } from './settings.ts';
-import { dependencyBlock } from './scheduler/gates.ts';
+import { dependencyBlock, inScope } from './scheduler/gates.ts';
 import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
 
 export interface RepoRow {
@@ -18,6 +18,7 @@ export interface RepoRow {
   enabled: number;
   image: string | null;
   synced_at: string | null;
+  selection: RepoSelection;
 }
 
 export interface TicketRow {
@@ -49,6 +50,7 @@ export const repoRef = (r: RepoRow): RepoRef => ({ fullName: r.full_name, defaul
 export const getRepo = (id: number) => one<RepoRow>('SELECT * FROM repos WHERE id = ?', id);
 export const getTicket = (id: number) => one<TicketRow>('SELECT * FROM tickets WHERE id = ?', id);
 export const labelsOf = (t: TicketRow): string[] => JSON.parse(t.labels);
+export const ticketInScope = (t: TicketRow, repo: RepoRow) => inScope(repo.selection, labelsOf(t));
 /** Open tickets this one waits for, as display refs such as "#2" or "other/repo#5". */
 export const blockersOf = (t: TicketRow): string[] => JSON.parse(t.blocked_by);
 export const branchOf = (t: TicketRow) => t.branch ?? branchFor(t.number, t.title);
@@ -78,7 +80,7 @@ export function setBlockers(t: TicketRow, refs: string[]) {
 }
 
 export function repoView(r: RepoRow): RepoView {
-  return { id: r.id, connectionId: r.vcs_connection_id, fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url, enabled: Boolean(r.enabled), image: r.image };
+  return { id: r.id, connectionId: r.vcs_connection_id, fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url, enabled: Boolean(r.enabled), image: r.image, selection: r.selection };
 }
 
 export function vcsFor(repo: RepoRow) {
@@ -105,7 +107,9 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
   const labels = labelsOf(t);
   const state = parseLabels(labels);
   const step = nextStep(state, t.state === 'open');
-  const next = state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : (step && dependencyBlock(blockersOf(t))) || describeStep(step);
+  const next = step && !inScope(repo.selection, labels)
+    ? 'Not nominated'
+    : state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : (step && dependencyBlock(blockersOf(t))) || describeStep(step);
   return {
     id: t.id,
     repo: repo.full_name,
@@ -120,6 +124,7 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
     needsInfo: state.needsInfo,
     skipped: state.skip,
     failed: state.failed,
+    nominated: repo.selection === 'nominated' ? labels.includes(label.nominated) : null,
     next,
     branch: t.branch,
     prNumber: t.pr_number,
