@@ -268,33 +268,45 @@ function GitHubSetup({ onExisting }: { onExisting: () => void }) {
 
 function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, body: object) => void }) {
   const [image, setImage] = useState(repo.image ?? '');
+  const [priority, setPriority] = useState(String(repo.priority));
   return (
     <li className="spread">
       <label className="row">
         <input type="checkbox" checked={repo.enabled} onChange={(e) => onChange(repo.id, { enabled: e.target.checked })} />
         <span>{repo.fullName}</span>
         {repo.private && <span className="tag">Private</span>}
+        {repo.priority !== 0 && <span className="tag">Priority {repo.priority}</span>}
       </label>
       {repo.enabled && (
-        <label className="row small">
-          <span className="muted">Tickets to work on</span>
-          <select value={repo.selection} onChange={(e) => onChange(repo.id, { selection: e.target.value })}>
-            <option value="all">All open tickets</option>
-            <option value="nominated">Only nominated tickets</option>
-          </select>
-        </label>
-      )}
-      {repo.enabled && (
-        <form
-          className="row"
-          onSubmit={(e) => {
-            e.preventDefault();
-            onChange(repo.id, { image });
-          }}
-        >
-          <input className="mono small" style={{ width: 300 }} aria-label={`Agent image for ${repo.fullName}`} placeholder="Agent image (default)" value={image} onChange={(e) => setImage(e.target.value)} />
-          <button>Save image</button>
-        </form>
+        <div className="row">
+          <label className="row small">
+            <span className="muted">Tickets to work on</span>
+            <select value={repo.selection} onChange={(e) => onChange(repo.id, { selection: e.target.value })}>
+              <option value="all">All open tickets</option>
+              <option value="nominated">Only nominated tickets</option>
+            </select>
+          </label>
+          <form
+            className="row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onChange(repo.id, { priority: Number(priority) });
+            }}
+          >
+            <input type="number" step={1} min={-100} max={100} className="small" style={{ width: 80 }} aria-label={`Priority for ${repo.fullName}`} value={priority} onChange={(e) => setPriority(e.target.value)} />
+            <button>Save priority</button>
+          </form>
+          <form
+            className="row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onChange(repo.id, { image });
+            }}
+          >
+            <input className="mono small" style={{ width: 300 }} aria-label={`Agent image for ${repo.fullName}`} placeholder="Agent image (default)" value={image} onChange={(e) => setImage(e.target.value)} />
+            <button>Save image</button>
+          </form>
+        </div>
       )}
     </li>
   );
@@ -333,7 +345,7 @@ function Repos() {
       }
     >
       <div className="panel-body stack">
-        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on.</p>
+        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. Repositories with a higher priority go first: a lower one waits until every open ticket in the higher ones has been classified. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on.</p>
         <input type="search" placeholder="Search repositories" aria-label="Search repositories" value={query} onChange={(e) => setQuery(e.target.value)} />
         <ErrorNote error={actionError ?? error} />
       </div>

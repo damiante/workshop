@@ -17,6 +17,7 @@ export interface RepoRow {
   url: string;
   enabled: number;
   image: string | null;
+  priority: number;
   synced_at: string | null;
   selection: RepoSelection;
 }
@@ -80,7 +81,7 @@ export function setBlockers(t: TicketRow, refs: string[]) {
 }
 
 export function repoView(r: RepoRow): RepoView {
-  return { id: r.id, connectionId: r.vcs_connection_id, fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url, enabled: Boolean(r.enabled), image: r.image, selection: r.selection };
+  return { id: r.id, connectionId: r.vcs_connection_id, fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url, enabled: Boolean(r.enabled), image: r.image, priority: r.priority, selection: r.selection };
 }
 
 export function vcsFor(repo: RepoRow) {

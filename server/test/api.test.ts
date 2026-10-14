@@ -185,6 +185,21 @@ describe('usage and launch', () => {
   });
 });
 
+describe('repository priority', () => {
+  it('is set through the repo settings and validated', async () => {
+    const id = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (1, 'me/prio', 'main', 'u', 1)").lastInsertRowid);
+    const put = (priority: unknown) => request(app).put(`/api/repos/${id}`).set('cookie', cookie).send({ priority });
+    const ok = await put(3);
+    expect(ok.status).toBe(200);
+    expect(ok.body.priority).toBe(3);
+    for (const bad of [1.5, 500]) {
+      const res = await put(bad);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Priority must be a whole number from -100 to 100.');
+    }
+  });
+});
+
 describe('OpenAPI', () => {
   const routes = (apiRouter.stack as unknown as { route?: { path: string; methods: Record<string, boolean> } }[])
     .filter((l) => l.route)

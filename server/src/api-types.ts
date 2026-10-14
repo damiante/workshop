@@ -81,6 +81,8 @@ export interface RepoView {
   url: string;
   enabled: boolean;
   image: string | null;
+  /** Higher goes first. Lower-priority repos wait until every open ticket here has been classified. */
+  priority: number;
   selection: RepoSelection;
 }
 
