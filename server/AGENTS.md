@@ -48,7 +48,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - **Exactly one Claude credential per container** (`launchEnv`): with both set, Claude Code would bill the API key.
 - **Fail closed on allowance.** No fresh reading means no subscription launch.
 - **Validate at the boundary.** HTTP bodies go through `check`/`int`/`num`; connection forms through `splitValues` against the provider's `fields`; agent results through `parseResult`.
-- **Add every new `apiRouter` route to `openapi.ts`** (a test enforces it). API tokens never reach connections or tokens (`sessionOnly`).
+- **Keep the API schema current.** Add every new `apiRouter` route to `openapi.ts` (a test enforces it), and update the schemas it uses when a response gains or loses a field (nothing enforces this for most views). When a change exposes new functionality an API consumer could reasonably use (a script, home automation), put it on `apiRouter` and in the schema, and describe it in `docs/api.md`. API tokens never reach connections or tokens (`sessionOnly`): a setting that only matters in the web UI, or that needs those secrets, can stay there.
 - **Untrusted text stays data.** Only allowlisted authors' issues are synced, and only their comments (plus Workshop's bot) reach prompts.
 
 ## Claude Code integration

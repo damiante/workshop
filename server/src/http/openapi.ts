@@ -98,6 +98,7 @@ const schemas: Record<string, Schema> = {
     prStatus: nullable(str),
     activeRunId: nullable(str),
     push: nullable(enumOf('stage', 'lifecycle')),
+    nominated: nullable(bool),
     updatedAt: str,
   }),
   TicketStatePatch: object(
@@ -233,6 +234,15 @@ const paths: Record<string, Record<string, Op>> = {
       body: ref('TicketStatePatch'),
       ok: ref('TicketView'),
       errors: [400, 403, 404, 409, 502],
+    },
+  },
+  '/tickets/{id}/nominated': {
+    put: {
+      summary: 'Nominates or un-nominates a ticket in a repository that only works on nominated tickets. Send { "nominated": true | false }.',
+      params: ['id'],
+      body: { type: 'object' },
+      ok: ref('TicketView'),
+      errors: [400, 403, 404, 409],
     },
   },
   '/sync': { post: { summary: 'Asks Workshop to sync tickets from GitHub soon.', status: '202', errors: [403] } },

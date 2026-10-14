@@ -98,7 +98,7 @@ The connection check runs a tiny Claude Code session on an agent host (about 700
 
 ### 4. Repositories
 
-Once the App is installed, the **Repositories** list shows every repository it can see. Tick the ones Workshop should work on. Turning a repository on creates its `workshop/` labels.
+Once the App is installed, the **Repositories** list shows every repository it can see. Tick the ones Workshop should work on. Turning a repository on creates its `workshop/` labels. A repository can work on all its open tickets or only those you nominate by adding the `workshop/nominated` label (or pressing **Nominate** on the Tickets page).
 
 ### 5. Settings
 

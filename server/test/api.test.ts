@@ -328,3 +328,21 @@ describe("changing a ticket's status", () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe('nominating tickets', () => {
+  it('validates the setting and refuses tickets that are not nominated', async () => {
+    const { run, one } = await import('../src/db.ts');
+    const id = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
+    run("UPDATE tickets SET labels = '[\"workshop/stage:implement\"]' WHERE id = ?", id);
+    const nominate = (body: object) => request(app).put(`/api/tickets/${id}/nominated`).set('cookie', cookie).send(body);
+
+    expect((await request(app).put('/api/repos/1').set('cookie', cookie).send({ selection: 'bad' })).status).toBe(400);
+    expect((await nominate({ nominated: 'yes' })).status).toBe(400);
+    expect((await nominate({ nominated: true })).status).toBe(409);
+
+    run("UPDATE repos SET selection = 'nominated' WHERE id = 1");
+    const refused = await request(app).post(`/api/tickets/${id}/push`).set('cookie', cookie).send({ scope: 'stage' });
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toMatch(/Nominate this ticket first/);
+  });
+});

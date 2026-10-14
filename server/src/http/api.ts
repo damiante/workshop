@@ -10,7 +10,7 @@ import { pushRefusal, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings } from '../settings.ts';
-import { activeRunId, getRepo, getTicket, editLabels, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketView } from '../tickets.ts';
+import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
 import { OPENAPI } from './openapi.ts';
@@ -176,12 +176,23 @@ function pushableTicket(id: string) {
 
 apiRouter.post('/tickets/:id/push', (req, res) => {
   const { t, repo } = pushableTicket(req.params.id);
+  check(ticketInScope(t, repo), "This repository only works on nominated tickets. Nominate this ticket first.", 409);
   const scope = req.body?.scope;
   check(scope === 'stage' || scope === 'lifecycle', 'Choose "stage" or "lifecycle".');
   const refusal = pushRefusal({ labels: labelsOf(t), open: t.state === 'open', running: Boolean(activeRunId(t.id)) }, scope);
   check(!refusal, refusal ?? '', 409);
   setPush(t, scope);
   kick();
+  res.json(ticketView(t, repo));
+});
+
+apiRouter.put('/tickets/:id/nominated', async (req, res) => {
+  const { t, repo } = pushableTicket(req.params.id);
+  const nominated = req.body?.nominated;
+  check(typeof nominated === 'boolean', 'Say whether to nominate the ticket.');
+  check(repo.selection === 'nominated', "This repository works on its whole backlog, so tickets don't need nominating.", 409);
+  await editLabels(t, nominated ? [label.nominated] : [], nominated ? [] : [label.nominated]);
+  if (nominated) kick();
   res.json(ticketView(t, repo));
 });
 

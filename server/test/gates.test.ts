@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, dependencyBlock, modeBlock, pickHost, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
+import { allowanceBlock, dependencyBlock, inScope, modeBlock, pickHost, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -141,5 +141,13 @@ describe('hand pushes', () => {
     const running = { labels: l('workshop/stage:implement'), open: true, running: true };
     expect(pushRefusal(running, 'lifecycle')).toBeNull();
     expect(pushRefusal(running, 'stage')).toBe('An agent is already working on this stage.');
+  });
+});
+
+describe('nominated tickets', () => {
+  it('works on everything for a whole-backlog repository, and only labelled tickets otherwise', () => {
+    expect(inScope('all', [])).toBe(true);
+    expect(inScope('nominated', [])).toBe(false);
+    expect(inScope('nominated', ['workshop/nominated'])).toBe(true);
   });
 });

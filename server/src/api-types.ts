@@ -69,6 +69,9 @@ export interface TestResult {
   message: string;
 }
 
+/** Which of a repository's tickets Workshop works on: all open ones, or only those labelled workshop/nominated. */
+export type RepoSelection = 'all' | 'nominated';
+
 export interface RepoView {
   id: number;
   connectionId: number;
@@ -78,6 +81,7 @@ export interface RepoView {
   url: string;
   enabled: boolean;
   image: string | null;
+  selection: RepoSelection;
 }
 
 export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'merge';
@@ -137,6 +141,8 @@ export interface TicketView {
   needsInfo: boolean;
   skipped: boolean;
   failed: boolean;
+  /** Null when the repository works on its whole backlog, otherwise whether this ticket has the nominated label. */
+  nominated: boolean | null;
   /** What Workshop will do next, in words, or null when it's waiting on you or finished. */
   next: string | null;
   branch: string | null;
