@@ -1,17 +1,18 @@
 import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
-import { allowanceViews } from '../allowance.ts';
-import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, Overview, Settings } from '../api-types.ts';
+import { allowanceViews, apiSpendSince } from '../allowance.ts';
+import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, Overview, Settings, Usage } from '../api-types.ts';
 import { all, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
 import { getRun, logBus, readLog, runView, runViews } from '../runs.ts';
 import { withinHours } from '../scheduler/gates.ts';
-import { hostViews, kick, queueView, syncSoon } from '../scheduler/loop.ts';
+import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings } from '../settings.ts';
 import { listTicketViews } from '../tickets.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
+import { OPENAPI } from './openapi.ts';
 import { check, int, num } from './util.ts';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -49,6 +50,22 @@ apiRouter.get('/overview', (_req, res) => {
     alerts: alertViews('ack_at IS NULL', 20),
   };
   res.json(overview);
+});
+
+apiRouter.get('/usage', (_req, res) => {
+  const s = getSettings();
+  const usage: Usage = {
+    allowance: allowanceViews(),
+    thresholds: { fiveHour: s.fiveHourMax, weekly: s.weeklyMax },
+    apiSpendTodayUsd: apiSpendSince(startOfDay(Date.now(), s.timezone)),
+    apiRunCapUsd: s.apiRunCapUsd,
+    apiDailyCapUsd: s.apiDailyCapUsd,
+  };
+  res.json(usage);
+});
+
+apiRouter.get('/openapi.json', (_req, res) => {
+  res.json(OPENAPI);
 });
 
 apiRouter.get('/settings', (_req, res) => {
@@ -142,6 +159,11 @@ apiRouter.get('/models', (_req, res) => {
 
 apiRouter.get('/tickets', (req, res) => {
   res.json(listTicketViews(req.query.closed === '1'));
+});
+
+apiRouter.post('/tickets/:id/launch', (req, res) => {
+  const id = launchNow(int(req.params.id, 'Ticket id', 1, Number.MAX_SAFE_INTEGER));
+  res.status(202).json(runView(id));
 });
 
 apiRouter.post('/sync', (_req, res) => {

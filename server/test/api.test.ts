@@ -3,7 +3,10 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { seedAgents } from '../src/agents.ts';
 import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
-import { initDb } from '../src/db.ts';
+import { initDb, one, run } from '../src/db.ts';
+import { createConnection } from '../src/providers/index.ts';
+import { apiRouter } from '../src/http/api.ts';
+import { OPENAPI } from '../src/http/openapi.ts';
 
 const PASSWORD = 'correct horse battery'; // see vitest.config.ts
 const app = (() => {
@@ -74,6 +77,136 @@ describe('authenticated API', () => {
     const res = await request(app).post('/api/connections').set('cookie', cookie).send({ provider: 'docker', values: { mode: 'ssh', host: 'box' } });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/SSH user is required/);
+  });
+});
+
+describe('API tokens', () => {
+  let write = '';
+  let read = '';
+  let writeId = 0;
+  const create = (body: object) => request(app).post('/api/tokens').set('cookie', cookie).send(body);
+
+  it('shows a new token once and never lists it', async () => {
+    const made = await create({ name: ' Home ', scope: 'write' });
+    expect(made.status).toBe(201);
+    expect(made.body.token).toMatch(/^wks_/);
+    expect(made.body.view).toMatchObject({ name: 'Home', scope: 'write', lastUsedAt: null });
+    write = made.body.token;
+    writeId = made.body.view.id;
+    read = (await create({ name: 'Dash', scope: 'read' })).body.token;
+    const list = await request(app).get('/api/tokens').set('cookie', cookie);
+    expect(list.body.map((t: { name: string }) => t.name)).toEqual(['Dash', 'Home']);
+    expect(JSON.stringify(list.body)).not.toContain(write);
+  });
+
+  it('validates name and scope', async () => {
+    expect((await create({ name: '', scope: 'read' })).status).toBe(400);
+    expect((await create({ name: 'x'.repeat(61), scope: 'read' })).status).toBe(400);
+    const bad = await create({ name: 'ok', scope: 'admin' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('Scope must be read or write.');
+  });
+
+  it('lets a write token use the API and records its use', async () => {
+    expect((await request(app).get('/api/overview').set('authorization', `Bearer ${write}`)).status).toBe(200);
+    const put = await request(app).put('/api/settings').set('authorization', `Bearer ${write}`).send({ mode: 'always' });
+    expect(put.body.mode).toBe('always');
+    expect(one<{ last_used_at: number }>('SELECT last_used_at FROM api_tokens WHERE id = ?', writeId)?.last_used_at).toBeGreaterThan(0);
+  });
+
+  it('keeps a read token to GET', async () => {
+    const put = await request(app).put('/api/settings').set('authorization', `Bearer ${read}`).send({ mode: 'paused' });
+    expect(put.status).toBe(403);
+    expect(put.body.error).toBe('This API token is read-only.');
+    expect((await request(app).get('/api/usage').set('authorization', `Bearer ${read}`)).status).toBe(200);
+  });
+
+  it('answers an unknown token with JSON 401, not a redirect', async () => {
+    const res = await request(app).get('/api/overview').set('accept', 'text/html').set('authorization', 'Bearer wks_nope');
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('That API token is wrong or was revoked.');
+  });
+
+  it("can't reach connections or tokens, which still work with the session", async () => {
+    const auth = { authorization: `Bearer ${write}` };
+    for (const res of [
+      await request(app).get('/api/connections').set(auth),
+      await request(app).post('/api/tokens').set(auth).send({ name: 'x', scope: 'read' }),
+      await request(app).delete(`/api/tokens/${writeId}`).set(auth),
+    ]) {
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/can't manage connections or tokens/);
+    }
+    expect((await request(app).get('/api/connections').set('cookie', cookie)).status).toBe(200);
+  });
+
+  it('stops a revoked token and 404s an unknown id', async () => {
+    expect((await request(app).delete(`/api/tokens/${writeId}`).set('cookie', cookie)).status).toBe(200);
+    expect((await request(app).get('/api/overview').set('authorization', `Bearer ${write}`)).status).toBe(401);
+    expect((await request(app).delete(`/api/tokens/${writeId}`).set('cookie', cookie)).status).toBe(404);
+  });
+});
+
+describe('usage and launch', () => {
+  it('reports usage with the caps', async () => {
+    const res = await request(app).get('/api/usage').set('cookie', cookie);
+    expect(res.body).toMatchObject({ allowance: [], apiSpendTodayUsd: 0, thresholds: { fiveHour: expect.any(Number), weekly: expect.any(Number) } });
+    const s = (await request(app).get('/api/settings').set('cookie', cookie)).body;
+    expect(res.body).toMatchObject({ apiRunCapUsd: s.apiRunCapUsd, apiDailyCapUsd: s.apiDailyCapUsd });
+  });
+
+  it('refuses to launch what cannot run', async () => {
+    const post = (id: number) => request(app).post(`/api/tickets/${id}/launch`).set('cookie', cookie);
+    expect((await post(999)).status).toBe(404);
+
+    const conn = createConnection('vcs', 'github', 'GitHub', { appId: 1, slug: 'bot', installations: [1] }, { privateKey: 'x' });
+    run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled) VALUES (?, ?, 'me/app', 'main', 'u', 1)", conn, conn);
+    const repo = one<{ id: number }>('SELECT id FROM repos')!.id;
+    const ticket = (labels: string[]) =>
+      Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, ?, 't', '', 'u', 'Damiante', 'open', ?, '2026-10-13T00:00:00Z')", repo, Math.floor(Math.random() * 1e6), JSON.stringify(labels)).lastInsertRowid);
+    await request(app).put('/api/settings').set('cookie', cookie).send({ mode: 'paused' });
+
+    const done = await post(ticket(['workshop/size:s', 'workshop/stage:pr-review']));
+    expect(done.status).toBe(409);
+    expect(done.body.error).toBe("There's nothing for an agent to do on this ticket right now.");
+
+    // Paused doesn't matter; the missing agent host still does.
+    const ready = await post(ticket(['workshop/size:s', 'workshop/stage:implement']));
+    expect(ready.status).toBe(409);
+    expect(ready.body.error).toMatch(/^Can't start an agent yet: /);
+    expect(ready.body.error).not.toMatch(/paused/i);
+  });
+});
+
+describe('OpenAPI', () => {
+  const routes = (apiRouter.stack as unknown as { route?: { path: string; methods: Record<string, boolean> } }[])
+    .filter((l) => l.route)
+    .flatMap((l) => Object.keys(l.route!.methods).map((m) => `${m} ${l.route!.path.replace(/:(\w+)/g, '{$1}')}`));
+  const documented = Object.entries(OPENAPI.paths).flatMap(([path, ops]) => Object.keys(ops).map((m) => `${m} ${path}`));
+
+  it('documents every route and nothing else', () => {
+    expect(documented.sort()).toEqual(routes.sort());
+  });
+
+  it('is served', async () => {
+    const res = await request(app).get('/api/openapi.json').set('cookie', cookie);
+    expect(res.body.openapi).toBe('3.1.0');
+  });
+
+  it.each([
+    ['/overview', 'Overview'],
+    ['/settings', 'Settings'],
+    ['/usage', 'Usage'],
+  ])('%s matches its schema fields', async (path, name) => {
+    const res = await request(app).get(`/api${path}`).set('cookie', cookie);
+    const props = Object.keys((OPENAPI.components.schemas[name] as { properties: object }).properties);
+    expect(Object.keys(res.body).sort()).toEqual(props.sort());
+  });
+
+  it('/agents matches its schema fields', async () => {
+    const res = await request(app).get('/api/agents').set('cookie', cookie);
+    const props = Object.keys((OPENAPI.components.schemas.AgentClassView as { properties: object }).properties);
+    expect(Object.keys(res.body[0]).sort()).toEqual(props.sort());
   });
 });
 

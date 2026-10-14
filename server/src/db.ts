@@ -126,6 +126,16 @@ const MIGRATIONS = [
   );
   `,
   `ALTER TABLE tickets ADD COLUMN blocked_by TEXT NOT NULL DEFAULT '[]';`,
+  `
+  CREATE TABLE api_tokens (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    scope TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER
+  );
+  `,
 ];
 
 export let db: DatabaseSync;
