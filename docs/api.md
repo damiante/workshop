@@ -56,6 +56,8 @@ Either push also ends where Workshop would wait for you anyway: your pull reques
 
 `DELETE /api/tickets/:id/push` cancels a push. It doesn't stop an agent that's already running (use `POST /api/runs/:id/stop` for that).
 
+`PUT /api/tickets/:id/nominated` with `{"nominated": true}` or `false` adds or removes the `workshop/nominated` label on a ticket in a repository that only works on nominated tickets. It answers with the ticket; 409 if the repository works on its whole backlog.
+
 A push is refused with 409 and the reason when the ticket is closed, failed, skipped, waiting on a question or waiting for your review, or (for `stage`) already has an agent working on that stage. A ticket that doesn't exist, belongs to a disabled repository or was opened by someone outside the author allowlist is 404, and a missing or invalid scope is 400.
 
 ## Errors

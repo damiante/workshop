@@ -276,6 +276,15 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
         {repo.private && <span className="tag">Private</span>}
       </label>
       {repo.enabled && (
+        <label className="row small">
+          <span className="muted">Tickets to work on</span>
+          <select value={repo.selection} onChange={(e) => onChange(repo.id, { selection: e.target.value })}>
+            <option value="all">All open tickets</option>
+            <option value="nominated">Only nominated tickets</option>
+          </select>
+        </label>
+      )}
+      {repo.enabled && (
         <form
           className="row"
           onSubmit={(e) => {
@@ -324,7 +333,7 @@ function Repos() {
       }
     >
       <div className="panel-body stack">
-        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub.</p>
+        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on.</p>
         <input type="search" placeholder="Search repositories" aria-label="Search repositories" value={query} onChange={(e) => setQuery(e.target.value)} />
         <ErrorNote error={actionError ?? error} />
       </div>

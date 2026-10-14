@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
 import { allowanceViews, apiSpendSince } from '../allowance.ts';
-import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, Overview, Settings, Usage } from '../api-types.ts';
+import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, Overview, Settings, TicketStatePatch, Usage } from '../api-types.ts';
 import { all, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
@@ -10,10 +10,11 @@ import { pushRefusal, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings } from '../settings.ts';
-import { activeRunId, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketView } from '../tickets.ts';
+import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketInScope, ticketView } from '../tickets.ts';
+import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
 import { OPENAPI } from './openapi.ts';
-import { check, int, num } from './util.ts';
+import { check, HttpError, int, num } from './util.ts';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -188,6 +189,7 @@ function pushableTicket(id: string) {
 
 apiRouter.post('/tickets/:id/push', (req, res) => {
   const { t, repo } = pushableTicket(req.params.id);
+  check(ticketInScope(t, repo), "This repository only works on nominated tickets. Nominate this ticket first.", 409);
   const scope = req.body?.scope;
   check(scope === 'stage' || scope === 'lifecycle', 'Choose "stage" or "lifecycle".');
   const refusal = pushRefusal({ labels: labelsOf(t), open: t.state === 'open', running: Boolean(activeRunId(t.id)) }, scope);
@@ -197,9 +199,49 @@ apiRouter.post('/tickets/:id/push', (req, res) => {
   res.json(ticketView(t, repo));
 });
 
+apiRouter.put('/tickets/:id/nominated', async (req, res) => {
+  const { t, repo } = pushableTicket(req.params.id);
+  const nominated = req.body?.nominated;
+  check(typeof nominated === 'boolean', 'Say whether to nominate the ticket.');
+  check(repo.selection === 'nominated', "This repository works on its whole backlog, so tickets don't need nominating.", 409);
+  await editLabels(t, nominated ? [label.nominated] : [], nominated ? [] : [label.nominated]);
+  if (nominated) kick();
+  res.json(ticketView(t, repo));
+});
+
 apiRouter.delete('/tickets/:id/push', (req, res) => {
   const { t, repo } = pushableTicket(req.params.id);
   setPush(t, null);
+  res.json(ticketView(t, repo));
+});
+
+apiRouter.put('/tickets/:id/state', async (req, res) => {
+  const { t, repo } = pushableTicket(req.params.id);
+  const b = req.body ?? {};
+  const patch: TicketStatePatch = {};
+  if ('stage' in b) {
+    check(b.stage === null || STAGES.includes(b.stage), 'Choose a stage.');
+    patch.stage = b.stage;
+  }
+  if ('size' in b) {
+    check(b.size === null || SIZES.includes(b.size), 'Choose a size: XS, S, M, L or XL.');
+    patch.size = b.size;
+  }
+  for (const key of ['needsInfo', 'skip', 'failed'] as const) {
+    if (!(key in b)) continue;
+    check(typeof b[key] === 'boolean', 'needsInfo, skip and failed must be true or false.');
+    patch[key] = b[key];
+  }
+  check(Object.keys(patch).length, 'Send at least one of stage, size, needsInfo, skip or failed.');
+  check(!activeRunId(t.id), 'An agent is working on this ticket. Stop it in the run view first.', 409);
+  const { add, remove } = stateEdits(labelsOf(t), patch);
+  try {
+    await editLabels(t, add, remove);
+  } catch (err) {
+    throw new HttpError(502, `Couldn't update the labels on GitHub: ${(err as Error).message}`);
+  }
+  if (remove.includes(label.failed)) run('UPDATE tickets SET failures = 0 WHERE id = ?', t.id);
+  kick();
   res.json(ticketView(t, repo));
 });
 

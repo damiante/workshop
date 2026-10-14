@@ -9,10 +9,10 @@ import { environmentOf, getConnection, listConnections, modelsOf, setConnectionS
 import { deleteLog, RUNNING_SQL, type RunRow } from '../runs.ts';
 import { check } from '../http/util.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPush, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
-import { allowanceBlock, apiCapBlock, dependencyBlock, localTime, modeBlock, pickHost, pushEnded, stepPriority, type HostLoad } from './gates.ts';
+import { allowanceBlock, apiCapBlock, dependencyBlock, inScope, localTime, modeBlock, pickHost, pushEnded, stepPriority, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 import { drive, isDriving, launch, onRunSettled, resume } from './runner.ts';
 import { syncRepo } from './sync.ts';
@@ -148,7 +148,7 @@ const openTicketsSql = `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_
 export function settlePushes() {
   for (const t of all<TicketRow>('SELECT * FROM tickets WHERE push IS NOT NULL')) {
     const repo = getRepo(t.repo_id);
-    if (!repo?.enabled || !isAllowedAuthor(t.author) || pushEnded(t.push!, t.push_stage, labelsOf(t), t.state === 'open')) setPush(t, null);
+    if (!repo?.enabled || !isAllowedAuthor(t.author) || !inScope(repo.selection, labelsOf(t)) || pushEnded(t.push!, t.push_stage, labelsOf(t), t.state === 'open')) setPush(t, null);
   }
 }
 
@@ -156,7 +156,8 @@ export function settlePushes() {
 export async function mergeApproved(pushedOnly: boolean) {
   for (const t of all<TicketRow>(openTicketsSql)) {
     if (pushedOnly && !t.push) continue;
-    if (!isAllowedAuthor(t.author) || nextStep(parseLabels(labelsOf(t)), true)?.kind !== 'merge' || activeRunId(t.id)) continue;
+    const repo = getRepo(t.repo_id)!;
+    if (!isAllowedAuthor(t.author) || !ticketInScope(t, repo) || nextStep(parseLabels(labelsOf(t)), true)?.kind !== 'merge' || activeRunId(t.id)) continue;
     if (blockersOf(t).length) continue; // an approved pull request waits for its blockers too
     try {
       await advanceMerge(t);
@@ -240,7 +241,8 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
   const spentToday = apiSpendSince(startOfDay(now, s.timezone));
   const out: (Candidate & { priority: number })[] = [];
   for (const t of all<TicketRow>(`${openTicketsSql} ORDER BY t.updated_at`)) {
-    if (!isAllowedAuthor(t.author) || activeRunId(t.id)) continue;
+    const repo = getRepo(t.repo_id)!;
+    if (!isAllowedAuthor(t.author) || !ticketInScope(t, repo) || activeRunId(t.id)) continue;
     const step = nextStep(parseLabels(labelsOf(t)), true);
     if (!step) continue;
     if (step.kind === 'merge' && t.pr_status !== 'conflict') continue; // merged through the API, no agent needed
@@ -256,7 +258,7 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     }
     if (!blockedBy) blockedBy = cls.billing === 'api' ? apiCapBlock(spentToday, s) : allowanceBlock(allowanceOf(conn!.id), s, now);
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo: getRepo(t.repo_id)!, agent, mode, blockedBy, hostId, modelConnectionId: conn?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), priority: stepPriority(step) });
+    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: conn?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), priority: stepPriority(step) });
   }
   return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || a.priority - b.priority);
 }
