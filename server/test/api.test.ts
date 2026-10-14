@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { seedAgents } from '../src/agents.ts';
 import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
@@ -7,6 +7,13 @@ import { initDb, one, run } from '../src/db.ts';
 import { createConnection } from '../src/providers/index.ts';
 import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
+
+// Only the ticket source is faked, so label edits can be recorded or made to fail.
+const fakeTickets = vi.hoisted(() => ({ setLabels: null as any }));
+vi.mock('../src/providers/index.ts', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  ticketsOf: () => fakeTickets,
+}));
 
 const PASSWORD = 'correct horse battery'; // see vitest.config.ts
 const app = (() => {
@@ -203,6 +210,14 @@ describe('OpenAPI', () => {
     expect(Object.keys(res.body).sort()).toEqual(props.sort());
   });
 
+  it('describes the ticket state request body', () => {
+    const op = OPENAPI.paths['/tickets/{id}/state'].put as { requestBody: { content: Record<string, { schema: unknown }> } };
+    expect(Object.values(op.requestBody.content)[0].schema).toEqual({ $ref: '#/components/schemas/TicketStatePatch' });
+    const patch = OPENAPI.components.schemas.TicketStatePatch as { properties: object; required: string[] };
+    expect(Object.keys(patch.properties).sort()).toEqual(['failed', 'needsInfo', 'size', 'skip', 'stage']);
+    expect(patch.required).toEqual([]);
+  });
+
   it('/agents matches its schema fields', async () => {
     const res = await request(app).get('/api/agents').set('cookie', cookie);
     const props = Object.keys((OPENAPI.components.schemas.AgentClassView as { properties: object }).properties);
@@ -244,6 +259,73 @@ describe('pushing a ticket by hand', () => {
     const refused = await push(id, 'stage');
     expect(refused.status).toBe(409);
     expect(refused.body.error).toMatch(/waiting for your review/);
+  });
+});
+
+describe("changing a ticket's status", () => {
+  const put = (id: number | string, body: object) => request(app).put(`/api/tickets/${id}/state`).set('cookie', cookie).send(body);
+  const labelsIn = (id: number) => JSON.parse(one<{ labels: string }>('SELECT labels FROM tickets WHERE id = ?', id)!.labels) as string[];
+  let id = 0;
+
+  beforeAll(() => {
+    run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('tickets', 'github', 'Issues', '{}', '', 'ok', 0, 0)");
+    const conn = one<{ id: number }>("SELECT id FROM connections WHERE kind = 'tickets'")!.id;
+    run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled) VALUES (1, ?, 'me/state', 'main', 'u', 1)", conn);
+    const repo = one<{ id: number }>("SELECT id FROM repos WHERE full_name = 'me/state'")!.id;
+    run(
+      "INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, failures, updated_at) VALUES (?, 50, 'T', '', 'u', 'me', 'open', ?, 2, 'x')",
+      repo,
+      JSON.stringify(['bug', 'workshop/stage:design', 'workshop/size:m', 'workshop/failed', 'workshop/running']),
+    );
+    id = one<{ id: number }>('SELECT id FROM tickets WHERE number = 50')!.id;
+  });
+
+  it('validates the body and the ticket', async () => {
+    fakeTickets.setLabels = vi.fn();
+    expect((await put(id, { stage: 'nowhere' })).status).toBe(400);
+    expect((await put(id, { size: 'huge' })).status).toBe(400);
+    expect((await put(id, { skip: 'yes' })).status).toBe(400);
+    expect((await put(id, {})).status).toBe(400);
+    expect((await put(9999, { skip: true })).status).toBe(404);
+    expect(fakeTickets.setLabels).not.toHaveBeenCalled();
+  });
+
+  it('refuses while an agent works on the ticket', async () => {
+    fakeTickets.setLabels = vi.fn();
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-state', ?, 'design', 1, 'm', 'subscription', 'running', 0)", id);
+    const res = await put(id, { skip: true });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/Stop it in the run view first/);
+    expect(fakeTickets.setLabels).not.toHaveBeenCalled();
+    run("UPDATE runs SET status = 'failed' WHERE id = 'r-state'");
+  });
+
+  it('turns a GitHub failure into a readable 502 and changes nothing locally', async () => {
+    fakeTickets.setLabels = vi.fn().mockRejectedValue(new Error('rate limited'));
+    const before = labelsIn(id);
+    const res = await put(id, { skip: true });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toMatch(/Couldn't update the labels on GitHub: rate limited/);
+    expect(labelsIn(id)).toEqual(before);
+  });
+
+  it('changes labels on GitHub, mirrors them, and resets attempts when failed is cleared', async () => {
+    fakeTickets.setLabels = vi.fn().mockResolvedValue(undefined);
+    const res = await put(id, { stage: 'merge', size: 'l', failed: false });
+    expect(res.status).toBe(200);
+    const [, number, add, remove] = fakeTickets.setLabels.mock.calls[0];
+    expect(number).toBe(50);
+    expect([...add].sort()).toEqual(['workshop/size:l', 'workshop/stage:merge']);
+    expect([...remove].sort()).toEqual(['workshop/failed', 'workshop/size:m', 'workshop/stage:design']);
+    expect(res.body).toMatchObject({ stage: 'merge', size: 'l', failed: false });
+    expect(labelsIn(id).sort()).toEqual(['bug', 'workshop/running', 'workshop/size:l', 'workshop/stage:merge']);
+    expect(one<{ failures: number }>('SELECT failures FROM tickets WHERE id = ?', id)!.failures).toBe(0);
+  });
+
+  it('keeps a read-only token out', async () => {
+    const made = await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'RO', scope: 'read' });
+    const res = await request(app).put(`/api/tickets/${id}/state`).set('authorization', `Bearer ${made.body.token}`).send({ skip: true });
+    expect(res.status).toBe(403);
   });
 });
 

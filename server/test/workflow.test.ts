@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { branchFor, label, nextStep, parseLabels, stageAfterClassify } from '../src/workflow/labels.ts';
+import { branchFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
 import { parseResult } from '../src/workflow/schemas.ts';
 import { planTransition, type PlanContext } from '../src/workflow/transitions.ts';
 import { taskPrompt } from '../src/workflow/prompts.ts';
@@ -196,5 +196,32 @@ describe('taskPrompt', () => {
     expect(prompt).toContain('2 comment(s) from people outside');
     expect(prompt).toContain('on `a.ts:4`: Rename this');
     expect(prompt).toContain('Address all of the review feedback above.');
+  });
+});
+
+describe('stateEdits', () => {
+  const labels = ['bug', 'workshop/stage:design', 'workshop/size:m', 'workshop/running'];
+
+  it('moves to another stage or clears it', () => {
+    expect(stateEdits(labels, { stage: 'implement' })).toEqual({ add: ['workshop/stage:implement'], remove: ['workshop/stage:design'] });
+    expect(stateEdits(labels, { stage: null })).toEqual({ add: [], remove: ['workshop/stage:design'] });
+  });
+
+  it('replaces or clears the size', () => {
+    expect(stateEdits(labels, { size: 'xl' })).toEqual({ add: ['workshop/size:xl'], remove: ['workshop/size:m'] });
+    expect(stateEdits(labels, { size: null })).toEqual({ add: [], remove: ['workshop/size:m'] });
+  });
+
+  it('adds and removes flags', () => {
+    expect(stateEdits(labels, { needsInfo: true, skip: true, failed: false })).toEqual({ add: ['workshop/needs-info', 'workshop/skip'], remove: [] });
+    expect(stateEdits([...labels, 'workshop/failed'], { failed: false })).toEqual({ add: [], remove: ['workshop/failed'] });
+  });
+
+  it('leaves omitted fields, running and other labels alone', () => {
+    expect(stateEdits(labels, {})).toEqual({ add: [], remove: [] });
+  });
+
+  it('gives no edits when the patch matches the labels', () => {
+    expect(stateEdits(labels, { stage: 'design', size: 'm', skip: false })).toEqual({ add: [], remove: [] });
   });
 });

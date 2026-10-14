@@ -1,4 +1,4 @@
-import type { AgentName, Size, Stage } from '../api-types.ts';
+import type { AgentName, Size, Stage, TicketStatePatch } from '../api-types.ts';
 import type { LabelDef } from '../providers/types.ts';
 
 export const SIZES: Size[] = ['xs', 's', 'm', 'l', 'xl'];
@@ -112,6 +112,33 @@ export function setSize(labels: string[], size: Size) {
     add: labels.includes(target) ? [] : [target],
     remove: SIZES.map(label.size).filter((name) => name !== target && labels.includes(name)),
   };
+}
+
+/** Label edits that apply `patch`, keeping one stage and one size label at most. Fields left out stay as they are. */
+export function stateEdits(labels: string[], patch: TicketStatePatch): { add: string[]; remove: string[] } {
+  const add: string[] = [];
+  const remove: string[] = [];
+  if ('stage' in patch) {
+    const m = moveTo(labels, patch.stage ?? null);
+    add.push(...m.add);
+    remove.push(...m.remove);
+  }
+  if ('size' in patch) {
+    if (patch.size) {
+      const m = setSize(labels, patch.size);
+      add.push(...m.add);
+      remove.push(...m.remove);
+    } else {
+      remove.push(...SIZES.map(label.size).filter((name) => labels.includes(name)));
+    }
+  }
+  for (const [key, name] of [['needsInfo', label.needsInfo], ['skip', label.skip], ['failed', label.failed]] as const) {
+    if (!(key in patch)) continue;
+    if (patch[key]) {
+      if (!labels.includes(name)) add.push(name);
+    } else if (labels.includes(name)) remove.push(name);
+  }
+  return { add, remove };
 }
 
 export function slugify(title: string): string {

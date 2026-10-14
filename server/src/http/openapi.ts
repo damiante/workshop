@@ -19,6 +19,8 @@ const schemas: Record<string, Schema> = {
   Ok: object({ ok: bool }),
   Mode: enumOf('paused', 'scheduled', 'always'),
   Billing: enumOf('subscription', 'api'),
+  Stage: enumOf('design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify'),
+  Size: enumOf('xs', 's', 'm', 'l', 'xl'),
   AgentName: enumOf('classifier', 'design', 'design-review', 'implement', 'merge'),
   RunStatus: enumOf('starting', 'running', 'publishing', 'paused', 'succeeded', 'failed', 'cancelled', 'lost'),
   Settings: object({
@@ -84,8 +86,8 @@ const schemas: Record<string, Schema> = {
     author: str,
     state: enumOf('open', 'closed'),
     labels: array(str),
-    size: nullable(enumOf('xs', 's', 'm', 'l', 'xl')),
-    stage: nullable(enumOf('design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify')),
+    size: nullable(ref('Size')),
+    stage: nullable(ref('Stage')),
     needsInfo: bool,
     skipped: bool,
     failed: bool,
@@ -99,6 +101,16 @@ const schemas: Record<string, Schema> = {
     nominated: nullable(bool),
     updatedAt: str,
   }),
+  TicketStatePatch: object(
+    {
+      stage: { ...nullable(ref('Stage')), description: 'The ticket\'s stage. null removes the stage label.' },
+      size: { ...nullable(ref('Size')), description: 'The ticket\'s size. null removes the size label.' },
+      needsInfo: { ...bool, description: 'Whether the ticket is waiting for an answer from the owner.' },
+      skip: { ...bool, description: 'Whether Workshop should leave the ticket alone.' },
+      failed: { ...bool, description: 'Whether the ticket has failed. Setting it to false also resets the attempt count so the ticket can run again.' },
+    },
+    [],
+  ),
   HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), slots: int, busy: int, specs: nullable(str) }),
   QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str) }),
   AlertView: object({
@@ -148,6 +160,7 @@ const ERRORS: Record<string, string> = {
   403: 'The token is read-only, or the request came from another site.',
   404: 'Not found.',
   409: 'Workshop cannot do that right now.',
+  502: 'GitHub refused the change.',
 };
 
 interface Op {
@@ -213,6 +226,15 @@ const paths: Record<string, Record<string, Op>> = {
       errors: [400, 403, 404, 409],
     },
     delete: { summary: 'Cancels a push.', params: ['id'], ok: ref('TicketView'), errors: [403, 404] },
+  },
+  '/tickets/{id}/state': {
+    put: {
+      summary: "Sets the ticket's stage, size or flags by changing its workshop labels on GitHub. Send only the fields to change; stage and size may be null to clear them. Clearing failed also resets the attempt count. Refused (409) while an agent works on the ticket or its run is paused; GitHub rejecting the change gives 502.",
+      params: ['id'],
+      body: ref('TicketStatePatch'),
+      ok: ref('TicketView'),
+      errors: [400, 403, 404, 409, 502],
+    },
   },
   '/tickets/{id}/nominated': {
     put: {

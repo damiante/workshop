@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import type { Push, TicketView } from '../../../server/src/api-types.ts';
+import type { Push, Size, Stage, TicketStatePatch, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
-import { ErrorNote, Status } from '../components/ui.tsx';
+import { ErrorNote, Modal, Status } from '../components/ui.tsx';
 
 const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
   { title: 'To classify', match: (t) => t.stage === null || t.stage === 'reclassify' },
@@ -75,6 +75,91 @@ function PushControls({ t }: { t: TicketView }) {
   );
 }
 
+const STAGE_OPTIONS: { value: Stage | ''; text: string }[] = [
+  { value: '', text: 'To classify' },
+  { value: 'design', text: 'Design' },
+  { value: 'design-review', text: 'Design review' },
+  { value: 'implement', text: 'Implementation' },
+  { value: 'pr-review', text: 'Your review' },
+  { value: 'merge', text: 'Merge' },
+  { value: 'reclassify', text: 'Re-classify changes' },
+];
+const SIZE_OPTIONS: Size[] = ['xs', 's', 'm', 'l', 'xl'];
+
+function StatusEditor({ t, onClose }: { t: TicketView; onClose: () => void }) {
+  const [stage, setStage] = useState<Stage | ''>(t.stage ?? '');
+  const [size, setSize] = useState<Size | ''>(t.size ?? '');
+  const [needsInfo, setNeedsInfo] = useState(t.needsInfo);
+  const [skip, setSkip] = useState(t.skipped);
+  const [failed, setFailed] = useState(t.failed);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const patch: TicketStatePatch = {};
+  if (stage !== (t.stage ?? '')) patch.stage = stage || null;
+  if (size !== (t.size ?? '')) patch.size = size || null;
+  if (needsInfo !== t.needsInfo) patch.needsInfo = needsInfo;
+  if (skip !== t.skipped) patch.skip = skip;
+  if (failed !== t.failed) patch.failed = failed;
+  const changed = Object.keys(patch).length > 0;
+  const save = (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    api(`/tickets/${t.id}/state`, { method: 'PUT', body: patch })
+      .then(onClose)
+      .catch((err: Error) => {
+        setError(err.message);
+        setBusy(false);
+      });
+  };
+  return (
+    <Modal title={`Change status of #${t.number}`} onClose={onClose}>
+      <form className="stack" onSubmit={save}>
+        <label className="field">
+          <span>Stage</span>
+          <select value={stage} onChange={(e) => setStage(e.target.value as Stage | '')}>
+            {STAGE_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.text}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Size</span>
+          <select value={size} onChange={(e) => setSize(e.target.value as Size | '')}>
+            <option value="">Not sized</option>
+            {SIZE_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s.toUpperCase()}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={needsInfo} onChange={(e) => setNeedsInfo(e.target.checked)} />
+          <span>Waiting for your answer (needs-info)</span>
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={skip} onChange={(e) => setSkip(e.target.checked)} />
+          <span>Skipped</span>
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={failed} onChange={(e) => setFailed(e.target.checked)} />
+          <span>Stopped after failures</span>
+        </label>
+        <p className="small muted">Workshop changes the issue's workshop labels. The next stage starts when Workshop's mode allows it.</p>
+        <ErrorNote error={error} />
+        <div className="row">
+          <button className="primary" disabled={busy || !changed}>
+            {busy ? 'Saving…' : 'Save labels on GitHub'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function NominateControls({ t }: { t: TicketView }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +193,7 @@ function NominateControls({ t }: { t: TicketView }) {
 }
 
 function Card({ t }: { t: TicketView }) {
+  const [editing, setEditing] = useState(false);
   return (
     <article className="card">
       <div className="spread small muted">
@@ -127,6 +213,12 @@ function Card({ t }: { t: TicketView }) {
         </a>
       )}
       {t.next && !t.activeRunId && <span className="small muted">Next: {t.next}</span>}
+      {!t.activeRunId && (
+        <div className="row small">
+          <button onClick={() => setEditing(true)}>Change status</button>
+        </div>
+      )}
+      {editing && <StatusEditor t={t} onClose={() => setEditing(false)} />}
       <NominateControls t={t} />
       {t.nominated !== false && <PushControls t={t} />}
     </article>
