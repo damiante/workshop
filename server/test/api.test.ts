@@ -85,3 +85,31 @@ describe('lockout', () => {
     expect(res.body.error).toMatch(/Try again in 15 minutes/);
   });
 });
+
+describe('pushing a ticket by hand', () => {
+  const push = (id: number | string, scope?: string) => request(app).post(`/api/tickets/${id}/push`).set('cookie', cookie).send({ scope });
+
+  it('validates, refuses what cannot run, then sets and cancels a push', async () => {
+    const { run } = await import('../src/db.ts');
+    run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('vcs', 'github', 'GitHub', '{}', '', 'ok', 0, 0)");
+    run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (1, 'me/app', 'main', 'u', 1)");
+    await request(app).put('/api/settings').set('cookie', cookie).send({ authors: ['me'] });
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 4, 'T', '', 'u', 'me', 'open', '[\"workshop/stage:implement\"]', 'x')");
+    const id = (await import('../src/db.ts')).one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
+
+    expect((await push(id, 'sideways')).status).toBe(400);
+    expect((await push(9999, 'stage')).status).toBe(404);
+
+    const ok = await push(id, 'lifecycle');
+    expect(ok.status).toBe(200);
+    expect(ok.body.push).toBe('lifecycle');
+
+    const cleared = await request(app).delete(`/api/tickets/${id}/push`).set('cookie', cookie);
+    expect(cleared.body.push).toBeNull();
+
+    run("UPDATE tickets SET labels = '[\"workshop/stage:pr-review\"]' WHERE id = ?", id);
+    const refused = await push(id, 'stage');
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toMatch(/waiting for your review/);
+  });
+});

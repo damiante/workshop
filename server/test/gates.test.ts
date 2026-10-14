@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, dependencyBlock, modeBlock, pickHost, stepPriority, withinHours } from '../src/scheduler/gates.ts';
+import { allowanceBlock, dependencyBlock, modeBlock, pickHost, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -99,5 +99,47 @@ describe('dependency gate', () => {
     expect(dependencyBlock(['#2', 'other/repo#5'])).toBe('Depends on #2 and other/repo#5');
     expect(dependencyBlock(['#2', '#5', '#7'])).toBe('Depends on #2, #5 and #7');
     expect(dependencyBlock([])).toBeNull();
+  });
+});
+
+describe('hand pushes', () => {
+  const l = (...names: string[]) => names;
+  it('a stage push ends when the stage changes, not before', () => {
+    expect(pushEnded('stage', 'new', [], true)).toBe(false);
+    expect(pushEnded('stage', 'new', l('workshop/size:m', 'workshop/stage:design'), true)).toBe(true);
+    expect(pushEnded('stage', 'design', l('workshop/stage:design'), true)).toBe(false);
+    expect(pushEnded('stage', 'design', l('workshop/stage:implement'), true)).toBe(true);
+    expect(pushEnded('stage', 'reclassify', l('workshop/stage:implement'), true)).toBe(true);
+  });
+
+  it('a lifecycle push carries on through stage changes', () => {
+    expect(pushEnded('lifecycle', 'new', l('workshop/stage:design'), true)).toBe(false);
+    expect(pushEnded('lifecycle', 'design', l('workshop/stage:implement'), true)).toBe(false);
+    expect(pushEnded('lifecycle', 'implement', l('workshop/stage:merge'), true)).toBe(false);
+  });
+
+  it.each(['stage', 'lifecycle'] as const)('a %s push ends where Workshop waits for you', (push) => {
+    expect(pushEnded(push, 'implement', l('workshop/stage:pr-review'), true)).toBe(true);
+    expect(pushEnded(push, 'implement', l('workshop/stage:implement', 'workshop/needs-info'), true)).toBe(true);
+    expect(pushEnded(push, 'implement', l('workshop/stage:implement', 'workshop/failed'), true)).toBe(true);
+    expect(pushEnded(push, 'implement', l('workshop/stage:implement', 'workshop/skip'), true)).toBe(true);
+    expect(pushEnded(push, 'implement', l('workshop/stage:implement'), false)).toBe(true);
+  });
+
+  it('refuses pushes that could not do anything', () => {
+    const ok = { labels: l('workshop/stage:implement'), open: true, running: false };
+    expect(pushRefusal(ok, 'stage')).toBeNull();
+    expect(pushRefusal({ ...ok, labels: [] }, 'lifecycle')).toBeNull();
+    expect(pushRefusal({ ...ok, open: false }, 'stage')).toBe('This ticket is closed.');
+    expect(pushRefusal({ ...ok, labels: l('workshop/failed') }, 'stage')).toMatch(/workshop\/failed/);
+    expect(pushRefusal({ ...ok, labels: l('workshop/skip') }, 'stage')).toMatch(/skipped/);
+    expect(pushRefusal({ ...ok, labels: l('workshop/needs-info') }, 'stage')).toMatch(/asked a question/);
+    expect(pushRefusal({ ...ok, labels: l('workshop/stage:pr-review') }, 'lifecycle')).toMatch(/waiting for your review/);
+  });
+
+  it('allows a lifecycle push while an agent works, but not a stage push', () => {
+    const running = { labels: l('workshop/stage:implement'), open: true, running: true };
+    expect(pushRefusal(running, 'lifecycle')).toBeNull();
+    expect(pushRefusal(running, 'stage')).toBe('An agent is already working on this stage.');
   });
 });

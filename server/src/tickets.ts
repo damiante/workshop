@@ -1,4 +1,4 @@
-import type { RepoView, TicketView } from './api-types.ts';
+import type { Push, RepoView, TicketView } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import { publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
@@ -37,6 +37,8 @@ export interface TicketRow {
   pr_status: string | null;
   failures: number;
   blocked_by: string;
+  push: Push | null;
+  push_stage: string | null;
   updated_at: string;
 }
 
@@ -54,6 +56,18 @@ export const branchOf = (t: TicketRow) => t.branch ?? branchFor(t.number, t.titl
 export const docPathOf = (t: TicketRow) => `docs/workshop/${branchOf(t).replace(/^workshop\//, '')}.md`;
 
 export const linkRef = (link: TicketLink, repo: RepoRow) => (link.repo.toLowerCase() === repo.full_name.toLowerCase() ? `#${link.number}` : `${link.repo}#${link.number}`);
+
+/** The stage a ticket is at, as stored with a push: the stage label, or 'new' when it has none. */
+export const stageKey = (labels: string[]) => parseLabels(labels).stage ?? 'new';
+
+export function setPush(t: TicketRow, push: Push | null) {
+  const stage = push ? stageKey(labelsOf(t)) : null;
+  run('UPDATE tickets SET push = ?, push_stage = ? WHERE id = ?', push, stage, t.id);
+  t.push = push;
+  t.push_stage = stage;
+  publish('tickets');
+  publish('runs');
+}
 
 export function setBlockers(t: TicketRow, refs: string[]) {
   const value = JSON.stringify(refs);
@@ -112,6 +126,7 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
     prUrl: t.pr_url,
     prStatus: t.pr_status,
     activeRunId: activeRunId(t.id),
+    push: t.push,
     updatedAt: t.updated_at,
   };
 }

@@ -1,5 +1,5 @@
-import type { AllowanceView, Settings, UsageWindow } from '../api-types.ts';
-import type { Step } from '../workflow/labels.ts';
+import type { AllowanceView, Push, Settings, UsageWindow } from '../api-types.ts';
+import { nextStep, parseLabels, type Step } from '../workflow/labels.ts';
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -93,4 +93,26 @@ export function stepPriority(step: Step): number {
   if (step.agent === 'design-review') return 2;
   if (step.agent === 'design') return 3;
   return 4;
+}
+
+/**
+ * Whether a hand push is finished. Both kinds end where Workshop would wait for you anyway
+ * (review, a question, skip, failed, closed); a stage push also ends once the stage changes.
+ */
+export function pushEnded(push: Push, pushStage: string | null, labels: string[], open: boolean): boolean {
+  const state = parseLabels(labels);
+  if (!nextStep(state, open)) return true;
+  return push === 'stage' && (state.stage ?? 'new') !== pushStage;
+}
+
+/** Why a push can't start on this ticket, or null. */
+export function pushRefusal(t: { labels: string[]; open: boolean; running: boolean }, scope: Push): string | null {
+  const state = parseLabels(t.labels);
+  if (!t.open) return 'This ticket is closed.';
+  if (state.failed) return 'Remove the workshop/failed label first, then push it again.';
+  if (state.skip) return 'Workshop skipped this ticket. Remove the workshop/skip label first.';
+  if (state.needsInfo) return 'An agent asked a question. Answer it and remove the workshop/needs-info label first.';
+  if (state.stage === 'pr-review') return 'This is waiting for your review. Approve the pull request or request changes on GitHub first.';
+  if (scope === 'stage' && t.running) return 'An agent is already working on this stage.';
+  return null;
 }
