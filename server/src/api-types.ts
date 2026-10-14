@@ -187,6 +187,8 @@ export interface HostView {
   id: number;
   name: string;
   status: ConnectionStatus;
+  /** False when switched off for new agents; running agents carry on. */
+  available: boolean;
   slots: number;
   busy: number;
   specs: string | null;

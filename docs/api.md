@@ -33,6 +33,10 @@ curl -X POST $WORKSHOP/api/tickets/12/launch -H "Authorization: Bearer $TOKEN"
 curl -X POST $WORKSHOP/api/tickets/12/push -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"scope":"lifecycle"}'
 
+# Switch an agent host off for new agents (it stays connected; running agents carry on)
+curl -X PUT $WORKSHOP/api/hosts/3 -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"available":false}'
+
 # Stop a run
 curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 ```

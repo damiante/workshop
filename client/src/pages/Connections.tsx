@@ -185,6 +185,15 @@ function ConnectionItem({ c, provider, onEdit, extra }: { c: ConnectionView; pro
       api(`/connections/${c.id}`, { method: 'DELETE' }).catch((e: Error) => setTest({ ok: false, message: e.message }));
     }
   };
+  const [toggling, setToggling] = useState(false);
+  const isHost = c.kind === 'environment';
+  const available = c.config.available !== false;
+  const toggle = () => {
+    setToggling(true);
+    api(`/hosts/${c.id}`, { method: 'PUT', body: { available: !available } })
+      .catch((e: Error) => setTest({ ok: false, message: e.message }))
+      .finally(() => setToggling(false));
+  };
   const specs = typeof c.config.specs === 'string' ? c.config.specs : null;
   const labelOf = (key: string) => provider.fields.find((f) => f.key === key)?.label ?? key;
   const saved = Object.entries(c.secrets).map(([key, hint]) => `${labelOf(key)} ${hint}`);
@@ -195,6 +204,7 @@ function ConnectionItem({ c, provider, onEdit, extra }: { c: ConnectionView; pro
         <strong>{c.name}</strong>
         <Status tone={c.status === 'ok' ? 'ok' : c.status === 'error' ? 'error' : 'idle'}>{c.status === 'ok' ? 'Working' : c.status === 'error' ? 'Not working' : 'Not checked yet'}</Status>
       </div>
+      {isHost && !available && <span className="small muted">Switched off: no new agents start here. Running agents carry on.</span>}
       {specs && <span className="small muted">{specs}</span>}
       {credentials && <span className="small muted">{credentials}</span>}
       {c.status === 'error' && c.error && <span className="small error-text">{c.error}</span>}
@@ -204,6 +214,11 @@ function ConnectionItem({ c, provider, onEdit, extra }: { c: ConnectionView; pro
         <button onClick={check} disabled={busy}>
           {busy ? 'Checking…' : 'Check connection'}
         </button>
+        {isHost && (
+          <button onClick={toggle} disabled={toggling}>
+            {available ? 'Switch off' : 'Switch on'}
+          </button>
+        )}
         <button onClick={onEdit}>Edit</button>
         <button className="danger" onClick={remove}>
           Remove

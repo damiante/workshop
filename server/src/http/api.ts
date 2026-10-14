@@ -161,6 +161,19 @@ apiRouter.get('/tickets', (req, res) => {
   res.json(listTicketViews(req.query.closed === '1'));
 });
 
+apiRouter.put('/hosts/:id', (req, res) => {
+  const id = int(req.params.id, 'Host id', 1, Number.MAX_SAFE_INTEGER);
+  const conn = getConnection(id);
+  check(conn?.kind === 'environment', 'Agent host not found.', 404);
+  const { available } = req.body ?? {};
+  check(typeof available === 'boolean', 'available must be true or false.');
+  // json_set leaves updated_at alone, so the cached client (and its pinned SSH host key) stays.
+  run("UPDATE connections SET config = json_set(config, '$.available', json(?)) WHERE id = ?", JSON.stringify(available), id);
+  publish('connections');
+  kick();
+  res.json(hostViews().find((h) => h.id === id));
+});
+
 apiRouter.post('/tickets/:id/launch', (req, res) => {
   const id = launchNow(int(req.params.id, 'Ticket id', 1, Number.MAX_SAFE_INTEGER));
   res.status(202).json(runView(id));

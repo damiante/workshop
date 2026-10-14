@@ -142,6 +142,7 @@ export function Dashboard() {
                       {h.status === 'ok' ? `${h.busy} of ${h.slots} in use` : h.status === 'error' ? 'Unreachable' : 'Not checked yet'}
                     </Status>
                   </div>
+                  {!h.available && <span className="small muted">Switched off for new agents</span>}
                   {h.specs && <span className="small muted">{h.specs}</span>}
                 </li>
               ))}
