@@ -251,16 +251,22 @@ function GitHubSetup({ onExisting }: { onExisting: () => void }) {
   );
 }
 
-function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, body: object) => void }) {
+function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, body: object) => Promise<unknown> }) {
   const [image, setImage] = useState(repo.image ?? '');
+  const [enabling, setEnabling] = useState<boolean | null>(null);
+  const toggle = (enabled: boolean) => {
+    setEnabling(enabled);
+    onChange(repo.id, { enabled }).finally(() => setEnabling(null));
+  };
   return (
-    <li className="spread">
+    <li className={`spread${enabling === null ? '' : ' pending'}`} aria-busy={enabling !== null}>
       <label className="row">
-        <input type="checkbox" checked={repo.enabled} onChange={(e) => onChange(repo.id, { enabled: e.target.checked })} />
+        <input type="checkbox" checked={enabling ?? repo.enabled} disabled={enabling !== null} onChange={(e) => toggle(e.target.checked)} />
         <span>{repo.fullName}</span>
         {repo.private && <span className="tag">Private</span>}
+        {enabling !== null && <span className="spinner" role="status" aria-label={enabling ? 'Turning on' : 'Turning off'} />}
       </label>
-      {repo.enabled && (
+      {repo.enabled && enabling === null && (
         <form
           className="row"
           onSubmit={(e) => {
