@@ -4,7 +4,7 @@ How a ticket moves from "new issue" to "merged", what each agent receives and re
 
 ## Labels are the state
 
-Workshop stores a ticket's state in labels on the issue, all prefixed `workshop/`. Because the labels are the state, you can steer a ticket by editing them on GitHub; Workshop picks up the change on its next sync. Workshop creates the labels when you turn a repository on.
+Workshop stores a ticket's state in labels on the issue, all prefixed `workshop/`. Because the labels are the state, you can steer a ticket by editing them on GitHub; Workshop picks up the change on its next sync. You can also change them from a ticket's **Change status** on the Tickets page, which writes the labels to GitHub straight away. It isn't available while an agent works on the ticket, and it resets the attempt count when it clears `failed`. Workshop creates the labels when you turn a repository on.
 
 | Label | Meaning |
 |---|---|

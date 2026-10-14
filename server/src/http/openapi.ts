@@ -19,6 +19,8 @@ const schemas: Record<string, Schema> = {
   Ok: object({ ok: bool }),
   Mode: enumOf('paused', 'scheduled', 'always'),
   Billing: enumOf('subscription', 'api'),
+  Stage: enumOf('design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify'),
+  Size: enumOf('xs', 's', 'm', 'l', 'xl'),
   AgentName: enumOf('classifier', 'design', 'design-review', 'implement', 'merge'),
   RunStatus: enumOf('starting', 'running', 'publishing', 'paused', 'succeeded', 'failed', 'cancelled', 'lost'),
   Settings: object({
@@ -147,6 +149,7 @@ const ERRORS: Record<string, string> = {
   403: 'The token is read-only, or the request came from another site.',
   404: 'Not found.',
   409: 'Workshop cannot do that right now.',
+  502: 'GitHub refused the change.',
 };
 
 interface Op {
@@ -212,6 +215,18 @@ const paths: Record<string, Record<string, Op>> = {
       errors: [400, 403, 404, 409],
     },
     delete: { summary: 'Cancels a push.', params: ['id'], ok: ref('TicketView'), errors: [403, 404] },
+  },
+  '/tickets/{id}/state': {
+    put: {
+      summary: "Sets the ticket's stage, size or flags by changing its workshop labels on GitHub. Send only the fields to change; stage and size may be null to clear them. Refused while an agent works on the ticket.",
+      params: ['id'],
+      body: {
+        type: 'object',
+        properties: { stage: nullable(ref('Stage')), size: nullable(ref('Size')), needsInfo: bool, skip: bool, failed: bool },
+      },
+      ok: ref('TicketView'),
+      errors: [400, 403, 404, 409, 502],
+    },
   },
   '/sync': { post: { summary: 'Asks Workshop to sync tickets from GitHub soon.', status: '202', errors: [403] } },
   '/runs': { get: { summary: 'Agent runs, newest first.', query: { ticket: 'Only runs for this ticket id.' }, ok: array(ref('RunView')) } },
