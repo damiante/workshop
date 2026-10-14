@@ -5,7 +5,7 @@ import type { AgentName, Billing, HostView, QueueItem, Settings } from '../api-t
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
 import { readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts';
-import { environmentOf, getConnection, listConnections, modelsOf, setConnectionStatus } from '../providers/index.ts';
+import { environmentOf, forgetEnvironment, getConnection, listConnections, modelsOf, setConnectionStatus, type Connection } from '../providers/index.ts';
 import { deleteLog, RUNNING_SQL, type RunRow } from '../runs.ts';
 import { check } from '../http/util.ts';
 import { getSettings } from '../settings.ts';
@@ -101,22 +101,26 @@ export function hostViews(): HostView[] {
   return hostLoads().map((h) => ({ id: h.id, name: h.name, status: status.get(h.id)!, slots: h.slots, busy: h.busy, specs: h.specs }));
 }
 
-async function checkHosts() {
-  for (const c of listConnections('environment')) {
-    try {
-      await withTimeout(environmentOf(c).ping(), 15_000);
-      hostFailures.delete(c.id);
-      setConnectionStatus(c.id, 'ok');
-      clearAlert('host-offline', `host:${c.id}`);
-    } catch (err) {
-      const failures = (hostFailures.get(c.id) ?? 0) + 1;
-      hostFailures.set(c.id, failures);
-      setConnectionStatus(c.id, 'error', (err as Error).message);
-      if (failures === HOST_FAILURES_BEFORE_ALERT) {
-        const runs = all(`SELECT id FROM runs WHERE environment_id = ? AND ${RUNNING_SQL}`, c.id).length;
-        const note = runs ? ` ${runs} agent run(s) there will be checked again when it's back.` : '';
-        raiseAlert('error', 'host-offline', `Can't reach agent host ${c.name}: ${(err as Error).message}.${note}`, `host:${c.id}`);
-      }
+export async function checkHosts() {
+  await Promise.all(listConnections('environment').map(checkHost));
+}
+
+async function checkHost(c: Connection) {
+  try {
+    await withTimeout(environmentOf(c).ping(), 15_000);
+    hostFailures.delete(c.id);
+    setConnectionStatus(c.id, 'ok');
+    clearAlert('host-offline', `host:${c.id}`);
+  } catch (err) {
+    // Reconnect from scratch on the next tick, so a host that comes back is found without a manual reconnect.
+    forgetEnvironment(c.id);
+    const failures = (hostFailures.get(c.id) ?? 0) + 1;
+    hostFailures.set(c.id, failures);
+    setConnectionStatus(c.id, 'error', (err as Error).message);
+    if (failures === HOST_FAILURES_BEFORE_ALERT) {
+      const runs = all(`SELECT id FROM runs WHERE environment_id = ? AND ${RUNNING_SQL}`, c.id).length;
+      const note = runs ? ` ${runs} agent run(s) there will be checked again when it's back.` : '';
+      raiseAlert('error', 'host-offline', `Can't reach agent host ${c.name}: ${(err as Error).message}.${note}`, `host:${c.id}`);
     }
   }
 }

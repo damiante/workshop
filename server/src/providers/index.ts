@@ -117,6 +117,11 @@ function cached<T>(c: Connection, make: () => T): T {
   return value;
 }
 
+/** Drops a host's cached client, so the next use connects afresh (a dead SSH or TCP session never recovers on its own). */
+export function forgetEnvironment(id: number) {
+  instances.delete(id);
+}
+
 export function environmentOf(c: Connection) {
   const cfg = c.config as unknown as DockerConfig;
   return cached(c, () =>

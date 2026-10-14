@@ -18,7 +18,7 @@ const { initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
 const { getRun } = await import('../src/runs.ts');
 const { launch } = await import('../src/scheduler/runner.ts');
-const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
+const { buildQueue, checkHosts, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
 const { setPush, getTicket } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { saveSettings } = await import('../src/settings.ts');
@@ -507,5 +507,19 @@ describe('manual pushes', () => {
 
   it('launches nothing for a paused Workshop with no pushes', () => {
     expect(buildQueue().every((c) => c.blockedBy)).toBe(true);
+  });
+});
+
+describe('host checks', () => {
+  it('marks a lost host as error, then ok again by itself once it answers', async () => {
+    const status = () => one<{ status: string }>('SELECT status FROM connections WHERE id = ?', ids.env)?.status;
+    fake.env.ping = async () => {
+      throw new Error('connect ECONNREFUSED');
+    };
+    await checkHosts();
+    expect(status()).toBe('error');
+    fake.env.ping = async () => {};
+    await checkHosts();
+    expect(status()).toBe('ok');
   });
 });
