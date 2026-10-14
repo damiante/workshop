@@ -20,6 +20,7 @@ Workshop stores a ticket's state in labels on the issue, all prefixed `workshop/
 | `workshop/skip` | The Classifier declined the ticket (the reason is in a comment). Remove it to classify again |
 | `workshop/failed` | A stage failed twice, or you pressed Stop. Remove it to retry |
 | `workshop/running` | An agent is working on it now (information only) |
+| `workshop/nominated` | You want this ticket worked on. Only matters in a repository set to nominated tickets |
 
 At most one stage label is present. `needs-info`, `skip` and `failed` sit alongside it and pause the ticket.
 
@@ -79,6 +80,10 @@ For a ticket in `stage:merge`, Workshop reads the pull request's mergeability:
 | conflict | Run the Merge agent; after its push, try the merge again |
 | blocked, still approved | Wait (required checks or reviews pending) |
 | blocked, approval dismissed | Back to `stage:pr-review` and request your review |
+
+## Nominated tickets only
+
+Each repository has a "Tickets to work on" setting: all open tickets (the default) or only nominated ones. In a nominated-only repository, Workshop still syncs every ticket from an allowed author, but queues, merges and pushes only those with `workshop/nominated`. Add the label on GitHub or press Nominate on the Tickets page. Removing the label doesn't stop a run already in progress; it finishes its stage, then the ticket isn't picked up again. The author allowlist still applies.
 
 ## Pushing a ticket by hand
 

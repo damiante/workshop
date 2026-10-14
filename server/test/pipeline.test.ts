@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StepSpec } from '../src/providers/types.ts';
 
 // The providers are replaced with fakes; everything else (DB, runner, transitions) is real.
@@ -19,7 +19,7 @@ const { createConnection } = await import('../src/providers/index.ts');
 const { getRun } = await import('../src/runs.ts');
 const { launch } = await import('../src/scheduler/runner.ts');
 const { buildQueue, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
-const { setPush, getTicket } = await import('../src/tickets.ts');
+const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
@@ -480,5 +480,51 @@ describe('manual pushes', () => {
 
   it('launches nothing for a paused Workshop with no pushes', () => {
     expect(buildQueue().every((c) => c.blockedBy)).toBe(true);
+  });
+});
+
+describe('nominated tickets only', () => {
+  const setLabels = (...labels: string[]) => run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(labels));
+  const queued = () => buildQueue().find((c) => c.ticket.id === 1);
+  const view = () => ticketView(getTicket(1)!, getRepo(1)!);
+
+  beforeEach(() => saveSettings({ mode: 'always' }));
+  afterEach(() => run("UPDATE repos SET selection = 'all'"));
+
+  it('queues every ticket in a whole-backlog repository', () => {
+    expect(queued()).toBeDefined();
+    expect(view().nominated).toBeNull();
+  });
+
+  it('skips tickets without the label until they are nominated', () => {
+    run("UPDATE repos SET selection = 'nominated'");
+    expect(queued()).toBeUndefined();
+    expect(view()).toMatchObject({ nominated: false, next: 'Not nominated' });
+    setLabels(label.size('s'), label.stage('implement'), label.nominated);
+    expect(queued()).toBeDefined();
+    expect(view()).toMatchObject({ nominated: true, next: 'Implement' });
+  });
+
+  it('merges approved pull requests only when nominated', async () => {
+    fake.vcs.pullRequestState = vi.fn(async () => ({ state: 'merged', mergeable: 'clean', decision: 'approved' }));
+    run("UPDATE repos SET selection = 'nominated'");
+    setLabels(label.size('s'), label.stage('merge'));
+    run('UPDATE tickets SET pr_number = 7 WHERE id = 1');
+    await mergeApproved(false);
+    expect(fake.vcs.pullRequestState).not.toHaveBeenCalled();
+    setLabels(label.size('s'), label.stage('merge'), label.nominated);
+    await mergeApproved(false);
+    expect(fake.vcs.pullRequestState).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a push when the nomination is withdrawn', () => {
+    run("UPDATE repos SET selection = 'nominated'");
+    setLabels(label.size('s'), label.stage('implement'), label.nominated);
+    setPush(getTicket(1)!, 'lifecycle');
+    settlePushes();
+    expect(getTicket(1)!.push).toBe('lifecycle');
+    setLabels(label.size('s'), label.stage('implement'));
+    settlePushes();
+    expect(getTicket(1)!.push).toBeNull();
   });
 });

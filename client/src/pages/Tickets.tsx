@@ -75,6 +75,38 @@ function PushControls({ t }: { t: TicketView }) {
   );
 }
 
+function NominateControls({ t }: { t: TicketView }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (t.nominated === null || (t.nominated === false && t.state !== 'open')) return null;
+  const send = (nominated: boolean) => {
+    setBusy(true);
+    setError(null);
+    api(`/tickets/${t.id}/nominated`, { method: 'PUT', body: { nominated } })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <>
+      <div className="row small">
+        {t.nominated ? (
+          <>
+            <span className="muted">Nominated</span>
+            <button onClick={() => send(false)} disabled={busy}>
+              Withdraw nomination
+            </button>
+          </>
+        ) : (
+          <button onClick={() => send(true)} disabled={busy}>
+            Nominate
+          </button>
+        )}
+      </div>
+      <ErrorNote error={error} />
+    </>
+  );
+}
+
 function Card({ t }: { t: TicketView }) {
   return (
     <article className="card">
@@ -95,7 +127,8 @@ function Card({ t }: { t: TicketView }) {
         </a>
       )}
       {t.next && !t.activeRunId && <span className="small muted">Next: {t.next}</span>}
-      <PushControls t={t} />
+      <NominateControls t={t} />
+      {t.nominated !== false && <PushControls t={t} />}
     </article>
   );
 }
