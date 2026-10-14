@@ -261,7 +261,12 @@ export class GitHubApp implements VcsHost, TicketSource {
     const kit = await this.kit(repo);
     const existing = new Set((await kit.paginate('GET /repos/{owner}/{repo}/labels', { ...split(repo), per_page: 100 })).map((l) => l.name));
     for (const l of labels.filter((l) => !existing.has(l.name))) {
-      await kit.request('POST /repos/{owner}/{repo}/labels', { ...split(repo), name: l.name, color: l.color, description: l.description });
+      try {
+        await kit.request('POST /repos/{owner}/{repo}/labels', { ...split(repo), name: l.name, color: l.color, description: l.description });
+      } catch (err) {
+        // Two enables at once (a second click while the first is still creating labels) race to create the same label.
+        if (!String((err as Error).message).includes('already_exists')) throw err;
+      }
     }
   }
 

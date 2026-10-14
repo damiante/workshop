@@ -68,3 +68,15 @@ describe('GitHub blockers', () => {
     expect(list.map((t) => t.openBlockers)).toEqual([1, 0]);
   });
 });
+
+describe('GitHub ensureLabels', () => {
+  it('accepts a label created by a concurrent enable', async () => {
+    const gh = new GitHubApp({ appId: 1, slug: 'workshop', owner: 'me', htmlUrl: '', installations: [1] }, { privateKey: 'unused' });
+    const request = vi.fn(async () => {
+      throw Object.assign(new Error('Validation Failed: {"resource":"Label","code":"already_exists","field":"name"}'), { status: 422 });
+    });
+    vi.spyOn(gh as unknown as { kit: () => unknown }, 'kit').mockResolvedValue({ request, paginate: async () => [] });
+    await expect(gh.ensureLabels(repo, [{ name: 'workshop/skip', color: '9e9e9e', description: '' }])).resolves.toBeUndefined();
+    expect(request).toHaveBeenCalledOnce();
+  });
+});
