@@ -140,6 +140,10 @@ const MIGRATIONS = [
   ALTER TABLE tickets ADD COLUMN push TEXT;
   ALTER TABLE tickets ADD COLUMN push_stage TEXT;
   `,
+  `
+  ALTER TABLE repos ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
+  `,
+  `ALTER TABLE repos ADD COLUMN selection TEXT NOT NULL DEFAULT 'all';`,
 ];
 
 export let db: DatabaseSync;

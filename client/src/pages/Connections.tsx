@@ -185,6 +185,15 @@ function ConnectionItem({ c, provider, onEdit, extra }: { c: ConnectionView; pro
       api(`/connections/${c.id}`, { method: 'DELETE' }).catch((e: Error) => setTest({ ok: false, message: e.message }));
     }
   };
+  const [toggling, setToggling] = useState(false);
+  const isHost = c.kind === 'environment';
+  const available = c.config.available !== false;
+  const toggle = () => {
+    setToggling(true);
+    api(`/hosts/${c.id}`, { method: 'PUT', body: { available: !available } })
+      .catch((e: Error) => setTest({ ok: false, message: e.message }))
+      .finally(() => setToggling(false));
+  };
   const specs = typeof c.config.specs === 'string' ? c.config.specs : null;
   const labelOf = (key: string) => provider.fields.find((f) => f.key === key)?.label ?? key;
   const saved = Object.entries(c.secrets).map(([key, hint]) => `${labelOf(key)} ${hint}`);
@@ -195,6 +204,7 @@ function ConnectionItem({ c, provider, onEdit, extra }: { c: ConnectionView; pro
         <strong>{c.name}</strong>
         <Status tone={c.status === 'ok' ? 'ok' : c.status === 'error' ? 'error' : 'idle'}>{c.status === 'ok' ? 'Working' : c.status === 'error' ? 'Not working' : 'Not checked yet'}</Status>
       </div>
+      {isHost && !available && <span className="small muted">Switched off: no new agents start here. Running agents carry on.</span>}
       {specs && <span className="small muted">{specs}</span>}
       {credentials && <span className="small muted">{credentials}</span>}
       {c.status === 'error' && c.error && <span className="small error-text">{c.error}</span>}
@@ -204,6 +214,11 @@ function ConnectionItem({ c, provider, onEdit, extra }: { c: ConnectionView; pro
         <button onClick={check} disabled={busy}>
           {busy ? 'Checking…' : 'Check connection'}
         </button>
+        {isHost && (
+          <button onClick={toggle} disabled={toggling}>
+            {available ? 'Switch off' : 'Switch on'}
+          </button>
+        )}
         <button onClick={onEdit}>Edit</button>
         <button className="danger" onClick={remove}>
           Remove
@@ -258,25 +273,46 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
     setEnabling(enabled);
     onChange(repo.id, { enabled }).finally(() => setEnabling(null));
   };
+  const [priority, setPriority] = useState(String(repo.priority));
   return (
     <li className={`spread${enabling === null ? '' : ' pending'}`} aria-busy={enabling !== null}>
       <label className="row">
         <input type="checkbox" checked={enabling ?? repo.enabled} disabled={enabling !== null} onChange={(e) => toggle(e.target.checked)} />
         <span>{repo.fullName}</span>
         {repo.private && <span className="tag">Private</span>}
+        {repo.priority !== 0 && <span className="tag">Priority {repo.priority}</span>}
         {enabling !== null && <span className="spinner" role="status" aria-label={enabling ? 'Turning on' : 'Turning off'} />}
       </label>
       {repo.enabled && enabling === null && (
-        <form
-          className="row"
-          onSubmit={(e) => {
-            e.preventDefault();
-            onChange(repo.id, { image });
-          }}
-        >
-          <input className="mono small" style={{ width: 300 }} aria-label={`Agent image for ${repo.fullName}`} placeholder="Agent image (default)" value={image} onChange={(e) => setImage(e.target.value)} />
-          <button>Save image</button>
-        </form>
+        <div className="row">
+          <label className="row small">
+            <span className="muted">Tickets to work on</span>
+            <select value={repo.selection} onChange={(e) => onChange(repo.id, { selection: e.target.value })}>
+              <option value="all">All open tickets</option>
+              <option value="nominated">Only nominated tickets</option>
+            </select>
+          </label>
+          <form
+            className="row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onChange(repo.id, { priority: Number(priority) });
+            }}
+          >
+            <input type="number" step={1} min={-100} max={100} className="small" style={{ width: 80 }} aria-label={`Priority for ${repo.fullName}`} value={priority} onChange={(e) => setPriority(e.target.value)} />
+            <button>Save priority</button>
+          </form>
+          <form
+            className="row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onChange(repo.id, { image });
+            }}
+          >
+            <input className="mono small" style={{ width: 300 }} aria-label={`Agent image for ${repo.fullName}`} placeholder="Agent image (default)" value={image} onChange={(e) => setImage(e.target.value)} />
+            <button>Save image</button>
+          </form>
+        </div>
       )}
     </li>
   );
@@ -315,7 +351,7 @@ function Repos() {
       }
     >
       <div className="panel-body stack">
-        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub.</p>
+        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. Repositories with a higher priority go first: a lower one waits until every open ticket in the higher ones has been classified. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on.</p>
         <input type="search" placeholder="Search repositories" aria-label="Search repositories" value={query} onChange={(e) => setQuery(e.target.value)} />
         <ErrorNote error={actionError ?? error} />
       </div>

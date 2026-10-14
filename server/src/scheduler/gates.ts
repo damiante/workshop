@@ -1,5 +1,10 @@
-import type { AllowanceView, Push, Settings, UsageWindow } from '../api-types.ts';
-import { nextStep, parseLabels, type Step } from '../workflow/labels.ts';
+import type { AllowanceView, Push, RepoSelection, Settings, UsageWindow } from '../api-types.ts';
+import { label, nextStep, parseLabels, type Step } from '../workflow/labels.ts';
+
+/** Whether Workshop may work on a ticket: always for a whole-backlog repository, otherwise only when nominated. */
+export function inScope(selection: RepoSelection, labels: string[]): boolean {
+  return selection === 'all' || labels.includes(label.nominated);
+}
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -64,13 +69,15 @@ export function apiCapBlock(spentTodayUsd: number, s: Settings): string | null {
 export interface HostLoad {
   id: number;
   healthy: boolean;
+  /** Switched on for new agents. Off keeps the host connected and its running agents going. */
+  available: boolean;
   slots: number;
   busy: number;
 }
 
-/** The healthy host with the most free slots. */
+/** The healthy, available host with the most free slots. */
 export function pickHost(hosts: HostLoad[]): number | null {
-  const free = hosts.filter((h) => h.healthy && h.busy < h.slots);
+  const free = hosts.filter((h) => h.healthy && h.available && h.busy < h.slots);
   free.sort((a, b) => b.slots - b.busy - (a.slots - a.busy) || a.id - b.id);
   return free[0]?.id ?? null;
 }
@@ -83,6 +90,19 @@ export function joinRefs(refs: string[]): string {
 /** Why open blocking tickets hold a ticket back, or null. */
 export function dependencyBlock(refs: string[]): string | null {
   return refs.length ? `Depends on ${joinRefs(refs)}` : null;
+}
+
+/** A ticket the Classifier still has to look at: no stage yet, and nothing it waits on. */
+export function isUnclassified(labels: string[], open: boolean, blockers: string[]): boolean {
+  if (blockers.length) return false;
+  const step = nextStep(parseLabels(labels), open);
+  return step?.kind === 'agent' && step.agent === 'classifier' && step.mode === 'normal';
+}
+
+/** Why unclassified tickets in higher-priority repos hold a ticket back, or null. */
+export function priorityBlock(priority: number, waiting: { repo: string; priority: number }[]): string | null {
+  const names = [...new Set(waiting.filter((w) => w.priority > priority).map((w) => w.repo))];
+  return names.length ? `Waiting for ${joinRefs(names)} to be classified first` : null;
 }
 
 /** Finish work in flight before starting new work. */

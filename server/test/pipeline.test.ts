@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StepSpec } from '../src/providers/types.ts';
 
 // The providers are replaced with fakes; everything else (DB, runner, transitions) is real.
@@ -19,7 +19,7 @@ const { createConnection, setConnectionStatus } = await import('../src/providers
 const { getRun } = await import('../src/runs.ts');
 const { launch } = await import('../src/scheduler/runner.ts');
 const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
-const { setPush, getTicket } = await import('../src/tickets.ts');
+const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
@@ -507,5 +507,110 @@ describe('manual pushes', () => {
 
   it('launches nothing for a paused Workshop with no pushes', () => {
     expect(buildQueue().every((c) => c.blockedBy)).toBe(true);
+  });
+});
+
+describe('repository priority', () => {
+  const held = () => buildQueue().find((c) => c.ticket.id === 1)?.blockedBy;
+  let api: number;
+  const apiTicket = (labels: string[], over: { author?: string } = {}) =>
+    Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 9, 'Api', '', 'u', ?, 'open', ?, '2026-10-13T00:00:00Z')", api, over.author ?? 'me', JSON.stringify(labels)).lastInsertRowid);
+
+  beforeEach(() => {
+    saveSettings({ mode: 'always' });
+    const app = one<{ vcs_connection_id: number; ticket_connection_id: number }>('SELECT * FROM repos WHERE id = 1')!;
+    api = Number(run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled, priority) VALUES (?, ?, 'me/api', 'main', 'u', 1, 1)", app.vcs_connection_id, app.ticket_connection_id).lastInsertRowid);
+  });
+  afterEach(() => {
+    run('DELETE FROM tickets WHERE repo_id = ?', api);
+    run('DELETE FROM repos WHERE id = ?', api);
+  });
+
+  it('holds a lower-priority repo while a higher one has unclassified tickets', () => {
+    const t = apiTicket([]);
+    expect(held()).toBe('Waiting for me/api to be classified first');
+    const q = buildQueue();
+    expect(q[0].ticket.id).toBe(t);
+    expect(q[0].blockedBy ?? '').not.toMatch(/Waiting/);
+  });
+
+  it('releases it once those are classified, held or skipped, and still sorts the higher repo first', () => {
+    const t = apiTicket([label.size('s'), label.stage('design')]);
+    expect(held() ?? '').not.toMatch(/Waiting/);
+    expect(buildQueue()[0].ticket.id).toBe(t);
+    for (const [labels, blocked] of [[['workshop/skip'], '[]'], [[], '["#2"]']] as const) {
+      run('UPDATE tickets SET labels = ?, blocked_by = ? WHERE id = ?', JSON.stringify(labels), blocked, t);
+      expect(held() ?? '').not.toMatch(/Waiting/);
+    }
+  });
+
+  it('lets equal priorities proceed', () => {
+    run('UPDATE repos SET priority = 0 WHERE id = ?', api);
+    apiTicket([]);
+    expect(held() ?? '').not.toMatch(/Waiting/);
+  });
+
+  it('is skipped by a hand push and by launching now', () => {
+    apiTicket([]);
+    setPush(getTicket(1)!, 'stage');
+    expect(held() ?? '').not.toMatch(/Waiting/);
+    expect(buildQueue()[0].ticket.id).toBe(1);
+    setPush(getTicket(1)!, null);
+    const ignoring = buildQueue(undefined, Date.now(), { ignoreMode: true }).find((c) => c.ticket.id === 1);
+    expect(ignoring?.blockedBy ?? '').not.toMatch(/Waiting/);
+  });
+
+  it('ignores tickets by other authors and in disabled repos', () => {
+    const t = apiTicket([], { author: 'stranger' });
+    expect(held() ?? '').not.toMatch(/Waiting/);
+    run('UPDATE tickets SET author = ? WHERE id = ?', 'me', t);
+    run('UPDATE repos SET enabled = 0 WHERE id = ?', api);
+    expect(held() ?? '').not.toMatch(/Waiting/);
+  });
+});
+
+describe('nominated tickets only', () => {
+  const setLabels = (...labels: string[]) => run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(labels));
+  const queued = () => buildQueue().find((c) => c.ticket.id === 1);
+  const view = () => ticketView(getTicket(1)!, getRepo(1)!);
+
+  beforeEach(() => saveSettings({ mode: 'always' }));
+  afterEach(() => run("UPDATE repos SET selection = 'all'"));
+
+  it('queues every ticket in a whole-backlog repository', () => {
+    expect(queued()).toBeDefined();
+    expect(view().nominated).toBeNull();
+  });
+
+  it('skips tickets without the label until they are nominated', () => {
+    run("UPDATE repos SET selection = 'nominated'");
+    expect(queued()).toBeUndefined();
+    expect(view()).toMatchObject({ nominated: false, next: 'Not nominated' });
+    setLabels(label.size('s'), label.stage('implement'), label.nominated);
+    expect(queued()).toBeDefined();
+    expect(view()).toMatchObject({ nominated: true, next: 'Implement' });
+  });
+
+  it('merges approved pull requests only when nominated', async () => {
+    fake.vcs.pullRequestState = vi.fn(async () => ({ state: 'merged', mergeable: 'clean', decision: 'approved' }));
+    run("UPDATE repos SET selection = 'nominated'");
+    setLabels(label.size('s'), label.stage('merge'));
+    run('UPDATE tickets SET pr_number = 7 WHERE id = 1');
+    await mergeApproved(false);
+    expect(fake.vcs.pullRequestState).not.toHaveBeenCalled();
+    setLabels(label.size('s'), label.stage('merge'), label.nominated);
+    await mergeApproved(false);
+    expect(fake.vcs.pullRequestState).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a push when the nomination is withdrawn', () => {
+    run("UPDATE repos SET selection = 'nominated'");
+    setLabels(label.size('s'), label.stage('implement'), label.nominated);
+    setPush(getTicket(1)!, 'lifecycle');
+    settlePushes();
+    expect(getTicket(1)!.push).toBe('lifecycle');
+    setLabels(label.size('s'), label.stage('implement'));
+    settlePushes();
+    expect(getTicket(1)!.push).toBeNull();
   });
 });

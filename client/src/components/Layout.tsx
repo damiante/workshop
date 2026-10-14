@@ -37,7 +37,26 @@ export function Layout({ version }: { version: string }) {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand">Workshop</div>
+        <div className="brand">
+          Workshop
+          {/* Traced from workshop-logo.png; colours follow the theme tokens. */}
+          <svg viewBox="30 50 740 660" width="26" height="23" aria-hidden="true">
+            <clipPath id="logo-walls">
+              <path d="M85 310 225 262V685L85 640ZM225 262 458 120 700 268V665L225 685Z" />
+            </clipPath>
+            <path d="M85 310 225 262V685L85 640ZM225 262 458 120 700 268V665L225 685Z" fill="var(--muted)" />
+            <g stroke="var(--text)" strokeOpacity="0.3" clipPath="url(#logo-walls)">
+              <path d="M163 0V800M300 0V800M375 0V800M450 0V800M520 0V800M582 0V800M640 0V800" strokeWidth="10" />
+              <path d="M100 0V800M692 0V800" strokeWidth="26" />
+            </g>
+            <path d="M35 270 210 160 460 55 762 245 748 282 458 100 45 302Z" fill="var(--text)" />
+            <path d="M45 302 458 100 748 282M225 262V685M318 278H588V668" fill="none" stroke="var(--bg)" strokeWidth="22" strokeLinejoin="round" />
+            <rect x="329" y="289" width="248" height="380" fill="var(--text)" />
+            <path d="M488 355 578 305V698L488 655Z" fill="var(--text)" stroke="var(--bg)" strokeWidth="14" strokeLinejoin="round" />
+            <circle cx="516" cy="510" r="11" fill="var(--bg)" />
+            <path d="M365 318H475L458 343H350Z" fill="var(--attention)" />
+          </svg>
+        </div>
         <nav className="nav" aria-label="Main">
           <NavLink to="/" end>
             Dashboard
