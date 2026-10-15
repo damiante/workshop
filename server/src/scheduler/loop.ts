@@ -1,9 +1,10 @@
 import { getAgent } from '../agents.ts';
 import { clearAlert, raiseAlert } from '../alerts.ts';
-import { allowanceOf, apiSpendSince, recordProbe } from '../allowance.ts';
+import { allowanceOf, allowanceViews, apiSpendSince, recordProbe } from '../allowance.ts';
 import type { AgentName, Billing, HostView, QueueItem, Settings } from '../api-types.ts';
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
+import { publish } from '../events.ts';
 import { readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts';
 import { environmentOf, getConnection, listConnections, modelsOf, setConnectionStatus } from '../providers/index.ts';
 import { deleteLog, RUNNING_SQL, type RunRow } from '../runs.ts';
@@ -12,7 +13,7 @@ import { getSettings } from '../settings.ts';
 import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
-import { allowanceBlock, apiCapBlock, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, stepPriority, type HostLoad } from './gates.ts';
+import { allowanceBlock, apiCapBlock, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 import { drive, isDriving, launch, onRunSettled, resume } from './runner.ts';
 import { syncRepo } from './sync.ts';
@@ -23,6 +24,7 @@ const HOST_FAILURES_BEFORE_ALERT = 3;
 let ticking = false;
 let again = false;
 let lastCleanup = 0;
+let clock: ClockState | null = null;
 const lastSync = new Map<number, number>();
 const hostFailures = new Map<number, number>();
 const probing = new Set<number>();
@@ -75,6 +77,13 @@ export async function tick() {
       lastCleanup = now;
       await cleanup(s);
     }
+    const nextClock: ClockState = {
+      withinHours: withinHours(s, new Date(now)),
+      blocks: JSON.stringify(allowanceViews().map((a) => [a.connectionId, a.blockedUntil])),
+      queue: JSON.stringify(queue.map((c) => [c.ticket.id, c.blockedBy])),
+    };
+    for (const topic of clockTopics(clock, nextClock)) publish(topic);
+    clock = nextClock;
   } catch (err) {
     console.error('[scheduler]', err);
   } finally {
@@ -335,10 +344,13 @@ export async function probeAllowance(connectionId: number, force = false) {
 
 async function cleanup(s: Settings) {
   const cutoff = Date.now() - s.retentionDays * 86400_000;
+  let deleted = false;
   for (const r of all<RunRow>("SELECT * FROM runs WHERE status IN ('succeeded', 'failed', 'cancelled', 'lost') AND ended_at < ?", cutoff)) {
     deleteLog(r.id);
     run('DELETE FROM runs WHERE id = ?', r.id);
+    deleted = true;
   }
+  if (deleted) publish('runs');
   // Workspaces of finished runs whose host was unreachable when they ended.
   for (const r of all<RunRow>("SELECT * FROM runs WHERE status IN ('succeeded', 'failed', 'cancelled', 'lost') AND volume IS NOT NULL")) {
     const host = getConnection(r.environment_id);

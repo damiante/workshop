@@ -1,4 +1,4 @@
-import type { AllowanceView, Push, RepoSelection, Settings, UsageWindow } from '../api-types.ts';
+import type { AllowanceView, Topic, Push, RepoSelection, Settings, UsageWindow } from '../api-types.ts';
 import { label, nextStep, parseLabels, type Step } from '../workflow/labels.ts';
 
 /** Whether Workshop may work on a ticket: always for a whole-backlog repository, otherwise only when nominated. */
@@ -135,4 +135,21 @@ export function pushRefusal(t: { labels: string[]; open: boolean; running: boole
   if (state.stage === 'pr-review') return 'This is waiting for your review. Approve the pull request or request changes on GitHub first.';
   if (scope === 'stage' && t.running) return 'An agent is already working on this stage.';
   return null;
+}
+
+/** What changes with the clock alone, as fingerprints: compared between ticks to know what to announce. */
+export interface ClockState {
+  withinHours: boolean;
+  blocks: string;
+  queue: string;
+}
+
+/** Topics whose views changed since the previous tick without any write announcing it. */
+export function clockTopics(prev: ClockState | null, next: ClockState): Topic[] {
+  if (!prev) return [];
+  const out: Topic[] = [];
+  if (prev.withinHours !== next.withinHours) out.push('settings');
+  if (prev.blocks !== next.blocks) out.push('allowance');
+  if (prev.queue !== next.queue) out.push('tickets');
+  return out;
 }

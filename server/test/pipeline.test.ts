@@ -173,6 +173,40 @@ describe('runner', () => {
     expect(allowanceOf(ids.model).fiveHour).toEqual({ pct: 44, resetsAt: 1791897000_000 });
   });
 
+  it('records each change in subscription usage during a run, at most every 30 seconds', async () => {
+    const rate = (five: number, seven = 0.07) =>
+      line({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: five, resetsAt: 1791897000 }, seven_day: { utilization: seven, resetsAt: 1792087200 } } } });
+    const lines = [rate(0.44), rate(0.5), rate(0.5), rate(0.6)];
+    // Time moves 31 s after the first and third lines; the second is inside the throttle window.
+    let offset = 0;
+    const realNow = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+    fake.env.follow = async (id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+      if (!id.startsWith('run')) return void (id.startsWith('publish') && onLine({ stream: 'stdout', text: line({ before: '', after: 'def5678', ahead: 1 }) }));
+      lines.forEach((text, i) => {
+        if (i === 1 || i === 3) offset += 31_000;
+        onLine({ stream: 'stdout', text });
+      });
+      onLine({ stream: 'stdout', text: result({ outcome: 'done', summary: 'Done.' }) });
+    };
+    const samples = () => one<{ n: number }>('SELECT COUNT(*) AS n FROM allowance_samples WHERE connection_id = ?', ids.model)!.n;
+    const before = samples();
+    const topics: string[] = [];
+    const listener = (t: string) => topics.push(t);
+    bus.on('topic', listener);
+    try {
+      await settle(go());
+      // 0.44 at once, 0.5 after 31 s, the repeat of 0.5 is not a change, 0.6 after another 31 s.
+      expect(samples() - before).toBe(3);
+      expect(allowanceOf(ids.model).fiveHour).toEqual({ pct: 60, resetsAt: 1791897000_000 });
+      expect(topics.filter((t) => t === 'allowance')).toHaveLength(3);
+    } finally {
+      bus.off('topic', listener);
+      spy.mockRestore();
+    }
+  });
+
   it('fails when the implementation commits nothing', async () => {
     fake.env = new FakeEnv({
       prepare: ['ok'],

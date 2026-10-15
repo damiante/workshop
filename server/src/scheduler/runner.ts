@@ -45,6 +45,7 @@ type StepName = 'prepare' | 'run' | 'publish';
 
 class HostUnreachable extends Error {}
 
+const USAGE_RECORD_MS = 30_000;
 const driving = new Set<string>();
 export const isDriving = (id: string) => driving.has(id);
 
@@ -248,6 +249,16 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   const name = AGENT_INFO[r.agent].label;
   const claude: ClaudeRun = {};
   let lastPublished = 0;
+  let recorded = '';
+  let recordedAt = 0;
+  const recordUsage = () => {
+    if (!claude.usage || r.billing !== 'subscription' || !r.model_connection_id) return;
+    const reading = JSON.stringify(claude.usage);
+    if (reading === recorded) return;
+    recorded = reading;
+    recordedAt = Date.now();
+    recordProbe(r.model_connection_id, claude.usage.fiveHour, claude.usage.sevenDay);
+  };
   let trailing: NodeJS.Timeout | undefined;
   const state = await runContainer(
     ctx,
@@ -255,12 +266,10 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     () => runSpec(ctx, agent),
     (text) => {
       const before = claude.activity;
-      const hadUsage = Boolean(claude.usage);
       readClaudeLine(claude, text);
-      // Every run reports current subscription usage: a free, fresh reading for the allowance gate.
-      if (!hadUsage && claude.usage && r.billing === 'subscription' && r.model_connection_id) {
-        recordProbe(r.model_connection_id, claude.usage.fiveHour, claude.usage.sevenDay);
-      }
+      // Every run reports current subscription usage: a free, fresh reading for the allowance gate and
+      // the usage bars. Recorded whenever it changes, at most every 30 seconds.
+      if (Date.now() - recordedAt >= USAGE_RECORD_MS) recordUsage();
       if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
         // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
@@ -279,6 +288,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     },
     agent.timeout_min * 60_000,
   );
+  recordUsage();
   clearTimeout(trailing);
   activity.delete(r.id);
   publish('runs');
