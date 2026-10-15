@@ -5,6 +5,7 @@ import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
 import { initDb, one, run } from '../src/db.ts';
 import { createConnection } from '../src/providers/index.ts';
+import { saveSettings } from '../src/settings.ts';
 import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
 
@@ -126,6 +127,7 @@ describe('API tokens', () => {
     expect(put.status).toBe(403);
     expect(put.body.error).toBe('This API token is read-only.');
     expect((await request(app).get('/api/usage').set('authorization', `Bearer ${read}`)).status).toBe(200);
+    expect((await request(app).get('/api/usage/lifetime').set('authorization', `Bearer ${read}`)).status).toBe(200);
   });
 
   it('answers an unknown token with JSON 401, not a redirect', async () => {
@@ -151,6 +153,41 @@ describe('API tokens', () => {
     expect((await request(app).delete(`/api/tokens/${writeId}`).set('cookie', cookie)).status).toBe(200);
     expect((await request(app).get('/api/overview').set('authorization', `Bearer ${write}`)).status).toBe(401);
     expect((await request(app).delete(`/api/tokens/${writeId}`).set('cookie', cookie)).status).toBe(404);
+  });
+});
+
+describe('lifetime usage', () => {
+  const ins = (run_id: string, ts: string, model: string, billing: string, i: number, o: number, c: number) =>
+    run('INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)', run_id, Date.parse(ts), model, billing, i, o, c);
+
+  it('is empty before anything is recorded', async () => {
+    const res = await request(app).get('/api/usage/lifetime').set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.since).toBeNull();
+    expect(res.body.total).toEqual({ runs: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
+    expect(res.body.byModel).toEqual([]);
+  });
+
+  it('totals by billing, model and month in the settings time zone', async () => {
+    run('DELETE FROM spend');
+    saveSettings({ timezone: 'Australia/Sydney' });
+    ins('a', '2026-09-30T20:00:00Z', 'opus', 'subscription', 100, 10, 1); // 1 Oct in Sydney
+    ins('a', '2026-10-02T00:00:00Z', 'opus', 'subscription', 50, 5, 0.5); // same run, resumed
+    ins('b', '2026-10-03T00:00:00Z', 'sonnet', 'api', 20, 2, 0.25);
+    ins('c', '2026-08-15T00:00:00Z', 'sonnet', 'subscription', 10, 1, 0.1);
+    const res = await request(app).get('/api/usage/lifetime').set('cookie', cookie);
+    const b = res.body;
+    expect(b.since).toBe(Date.parse('2026-08-15T00:00:00Z'));
+    expect(b.total).toMatchObject({ runs: 3, inputTokens: 180, outputTokens: 18 });
+    expect(b.total.costUsd).toBeCloseTo(1.85);
+    expect(b.subscription).toMatchObject({ runs: 2, inputTokens: 160 });
+    expect(b.api).toMatchObject({ runs: 1, inputTokens: 20, costUsd: 0.25 });
+    expect(b.byModel.map((m: { model: string }) => m.model)).toEqual(['opus', 'sonnet']);
+    expect(b.byModel[0]).toMatchObject({ runs: 1, inputTokens: 150 });
+    expect(b.byMonth.map((m: { month: string }) => m.month)).toEqual(['2026-10', '2026-08']);
+    expect(b.byMonth[0]).toMatchObject({ runs: 2, inputTokens: 170 });
+    run('DELETE FROM spend');
+    saveSettings({ timezone: 'UTC' });
   });
 });
 
@@ -219,6 +256,7 @@ describe('OpenAPI', () => {
     ['/overview', 'Overview'],
     ['/settings', 'Settings'],
     ['/usage', 'Usage'],
+    ['/usage/lifetime', 'LifetimeSpend'],
   ])('%s matches its schema fields', async (path, name) => {
     const res = await request(app).get(`/api${path}`).set('cookie', cookie);
     const props = Object.keys((OPENAPI.components.schemas[name] as { properties: object }).properties);

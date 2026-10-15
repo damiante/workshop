@@ -14,10 +14,10 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
 const { seedAgents, updateAgent } = await import('../src/agents.ts');
 const { allowanceOf, recordProbe } = await import('../src/allowance.ts');
 const { initCrypto } = await import('../src/crypto.ts');
-const { initDb, one, run } = await import('../src/db.ts');
+const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
 const { getRun } = await import('../src/runs.ts');
-const { launch } = await import('../src/scheduler/runner.ts');
+const { launch, resume } = await import('../src/scheduler/runner.ts');
 const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
 const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
@@ -199,6 +199,42 @@ describe('runner', () => {
     expect(r).toMatchObject({ status: 'paused', resets_at: 1791897000_000, step: 'run' });
     expect(fake.env.spec('publish')).toBeUndefined();
     expect(one<{ failures: number }>('SELECT failures FROM tickets WHERE id = 1')?.failures).toBe(0);
+  });
+
+  it('records each claude invocation in the spend ledger, which outlives the run', async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [line({ type: 'result', subtype: 'success', is_error: false, structured_output: { outcome: 'done', summary: 'Done.' }, total_cost_usd: 0.25, usage: { input_tokens: 10, output_tokens: 5 } })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    const r = await settle(go());
+    expect(r).toMatchObject({ status: 'succeeded', input_tokens: 10, output_tokens: 5, cost_usd: 0.25 });
+    const rows = all<object>('SELECT model, billing, input_tokens, output_tokens, cost_usd FROM spend WHERE run_id = ?', r.id);
+    expect(rows).toEqual([{ model: 'claude-sonnet-5-5', billing: 'subscription', input_tokens: 10, output_tokens: 5, cost_usd: 0.25 }]);
+    run('DELETE FROM runs WHERE id = ?', r.id);
+    expect(all('SELECT id FROM spend WHERE run_id = ?', r.id)).toHaveLength(1);
+  });
+
+  it('adds up a paused run and its resume', async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [
+        line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1791897000 } }),
+        line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Usage limit reached'], total_cost_usd: 0.1, usage: { input_tokens: 4, output_tokens: 2 } }),
+      ],
+    });
+    const id = go();
+    expect((await settle(id)).status).toBe('paused');
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [line({ type: 'result', subtype: 'success', is_error: false, structured_output: { outcome: 'done', summary: 'Done.' }, total_cost_usd: 0.25, usage: { input_tokens: 10, output_tokens: 5 } })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    resume(id);
+    await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+    expect(getRun(id)).toMatchObject({ input_tokens: 14, output_tokens: 7 });
+    expect(getRun(id)!.cost_usd).toBeCloseTo(0.35);
+    expect(all('SELECT id FROM spend WHERE run_id = ?', id)).toHaveLength(2);
   });
 
   it('labels the ticket failed after the second failed attempt', async () => {

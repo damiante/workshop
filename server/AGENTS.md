@@ -17,6 +17,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/agents.ts` | Agent-class settings, defaults, suggested models |
 | `src/tickets.ts` | Ticket and repo rows, views, `editLabels` (remote first, then local mirror) |
 | `src/runs.ts` | Run rows and views, run log files (`DATA_DIR/runs/<id>.jsonl`), live activity |
+| `src/spend.ts` | Lifetime spend ledger: one row per claude invocation, kept past run cleanup |
 | `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
 | `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |

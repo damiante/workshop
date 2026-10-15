@@ -12,6 +12,7 @@ import { environmentOf, getConnection, modelsOf } from '../providers/index.ts';
 import type { ContainerState, Environment, StepSpec } from '../providers/types.ts';
 import { ACTIVE_STATUSES, activity, appendLog, getRun, linesFrom, readLog, type RunRow } from '../runs.ts';
 import { getSettings } from '../settings.ts';
+import { recordSpend } from '../spend.ts';
 import {
   branchOf,
   docPathOf,
@@ -273,7 +274,8 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   activity.delete(r.id);
   if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
   const res = claude.result;
-  setRun(r.id, { exit_code: state.exitCode, input_tokens: res?.inputTokens ?? null, output_tokens: res?.outputTokens ?? null, cost_usd: res?.costUsd ?? null });
+  setRun(r.id, { exit_code: state.exitCode });
+  if (res) recordSpend(r, res);
 
   if (claude.limit && r.model_connection_id) recordLimit(r.model_connection_id, claude.limit.resetsAt ?? Date.now() + 3600_000);
   if (state.oomKilled) {
