@@ -260,7 +260,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     recordProbe(r.model_connection_id, claude.usage.fiveHour, claude.usage.sevenDay);
   };
   let trailing: NodeJS.Timeout | undefined;
-  const state = await runContainer(
+  const running = runContainer(
     ctx,
     'run',
     () => runSpec(ctx, agent),
@@ -288,7 +288,8 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     },
     agent.timeout_min * 60_000,
   );
-  recordUsage();
+  // Record what the run reported even if the container failed.
+  const state = await running.finally(recordUsage);
   clearTimeout(trailing);
   activity.delete(r.id);
   publish('runs');

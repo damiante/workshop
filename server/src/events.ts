@@ -25,6 +25,7 @@ export function openSse(res: Response, onClose: () => void) {
   const ping = () => res.write('event: ping\ndata: {}\n\n');
   ping();
   const heartbeat = setInterval(ping, HEARTBEAT_MS);
+  res.on('error', () => {}); // a write after the client left is not worth crashing for
   res.on('close', () => {
     clearInterval(heartbeat);
     onClose();

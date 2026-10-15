@@ -274,17 +274,23 @@ apiRouter.post('/runs/:id/stop', async (req, res) => {
 apiRouter.get('/runs/:id/log', (req, res) => {
   const id = req.params.id;
   check(getRun(id), 'Run not found.', 404);
-  const resume = Number(req.get('last-event-id') ?? req.query.after ?? -1);
-  const after = Number.isFinite(resume) ? resume : -1;
+  const given = req.get('last-event-id') ?? req.query.after;
+  const resume = typeof given === 'string' && /^\d+$/.test(given) ? Number(given) : -1;
+  const after = resume;
   const onLine = (index: number, entry: LogEntry) => send(entry, index);
+  let done = false;
   const finish = () => {
+    if (done) return; // two publishes in one tick must not write after the response ended
+    done = true;
+    bus.off('topic', onTopic);
     send({}, undefined, 'end');
     res.end();
   };
   // setRun publishes 'runs' after the last line is appended, so `end` never cuts off the tail.
   const onTopic = (topic: string) => {
+    if (topic !== 'runs') return;
     const r = getRun(id);
-    if (topic === 'runs' && (!r || !ACTIVE_STATUSES.includes(r.status))) finish();
+    if (!r || !ACTIVE_STATUSES.includes(r.status)) finish();
   };
   const send = openSse(res, () => {
     logBus.off(id, onLine);
