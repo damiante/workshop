@@ -7,6 +7,8 @@ The dashboard's Running card and the sidebar's plan usage bars go stale until yo
 What the code does today:
 
 - **The server already publishes these changes.** Every run row change goes through `setRun` (`server/src/scheduler/runner.ts:57`), which calls `publish('runs')`. Every usage reading goes through `recordProbe` or `recordLimit`, which call `publish('allowance')`. `Layout` listens to `allowance` and `runs`; `Dashboard` listens to both as well. The earlier fix on this branch (a trailing publish after a throttled activity update, plus one when the agent finishes) is still correct, but it only covers activity text, and it can't explain stale views that last longer than 3 seconds.
+- **The run page's evidence doesn't show the topic stream is working.** "The agent finished." on the run page is a transcript entry (`client/src/transcript.ts:103`, the agent's `result` line) from the run's *log* stream (`/api/runs/:id/log`), not a `runs` refetch. So the run page and the Running card are fed by different connections, and the ticket only tells us that the log connection worked.
+- **Browser connection starvation is the leading suspect for "stale until refresh".** Express serves HTTP/1.1. Opened directly (`http://host:3000` on a LAN, which the README allows), the browser allows 6 connections per host, shared by every tab in the profile, and an `EventSource` holds one for as long as it's open. Each Workshop tab holds the topic stream, and a run page also holds that run's log stream. The log stream never closes, even for a run that finished hours ago. Three tabs on run pages use all 6 connections. Five dashboard tabs use 5, which leaves every `fetch` queued behind one slot. In that state topic events still arrive, but the refetches they trigger wait in the browser's queue. They finish late ("takes longer") or not at all, until a reload closes that tab's streams and frees its slots ("or a refresh"). The same thing explains the usage bars: the `allowance` event arrives, but `/overview` can't be fetched.
 - **The client's single topic stream never recovers.** `client/src/api.ts` opens one `EventSource('/api/events')` per page load and never replaces it:
   - An `EventSource` closes for good (`readyState === CLOSED`, no retry) when a reconnect gets a non-200 answer. Examples are a reverse proxy's 502 while Workshop restarts or its image updates, or a 401. `source` stays non-null, so `connect()` never runs again and every view goes quietly stale.
   - A half-open connection (laptop sleep, Wi-Fi change, NAT or proxy idle drop) delivers nothing, and the browser never notices. The server's 25-second heartbeat is an SSE comment (`: ping`), which JavaScript can't see, so the client can't detect it either.
@@ -16,31 +18,36 @@ What the code does today:
   - `/api` responses have no `Cache-Control` header.
   - Some state changes with the clock and is never published: operating hours opening or closing (`withinHours`), a usage-limit block expiring (`blockedUntil`), and the queue's `blockedBy` reasons that depend on them.
   - Daily cleanup deletes old runs without publishing.
-  - Each tab also keeps a log stream open for finished runs. On plain HTTP/1.1 the browser allows only 6 connections per origin across all tabs, so a few open tabs can starve new requests.
+  - A run reports its subscription usage only once: `runner.ts` calls `recordProbe` on the *first* `rate_limit_event` (`!hadUsage`). Later events update `claude.usage` in memory, but nothing records them, so the plan usage bars stay at the run-start reading for the whole run, which can last up to the agent's timeout. No transport fix can show a reading the server never stores.
 
 ## Approach
 
-Make the event stream self-healing and observable, and publish the remaining clock-driven changes. No new transport or dependency: SSE and the topic bus stay.
+Keep each tab's connection use small, make the event stream self-healing and observable, and publish or record the remaining changes. No new transport or dependency: SSE and the topic bus stay.
+
+0. **Hidden tabs release their streams.** When `document.visibilityState` becomes `hidden`, the topic stream and the run log stream close at once. When the tab becomes visible again, they reopen, and the topic stream refetches every subscribed view (the log resumes with `?after=`). Background tabs then hold no connections, so the 6-connection budget is shared only by tabs you can see. Combined with item 5, a visible tab holds one stream, or two while it shows an active run.
 
 1. **Visible heartbeat.** The server sends a named event (`event: ping`) once when the stream opens and then every 15 seconds, instead of the `: ping` comment.
 2. **A client stream supervisor** (`client/src/live.ts`, pure and testable). It owns the one `EventSource` and:
    - reconnects itself whenever the source is `CLOSED`, with backoff of 1, 2, 4… seconds up to 30, reset once a connection opens;
    - runs a watchdog: if nothing (ping or topic) arrives for 40 seconds, it closes the source and reconnects;
-   - wakes on `visibilitychange` (becoming visible) and `online`: if the source isn't open, or has been silent for more than 40 seconds, it reconnects now;
+   - has `stop()` and `start()`, which the callers use for item 0 (a `start()` after a `stop()` counts as a reconnect, so views refetch);
+   - wakes on `online`: if the source isn't open, or has been silent for more than 40 seconds, it reconnects now;
    - after every reconnect that follows a drop, refetches every subscribed view once (today's behaviour, now also covering manual reconnects);
    - checks the session when the source closes, by calling `GET /api/auth/state`. If `authenticated` is false, it dispatches `workshop:signed-out` rather than retrying forever;
    - opens when the first listener subscribes and closes when the last one leaves, so signing out doesn't leave a stream retrying in the background;
    - reports `live | reconnecting`, so the sidebar can show a quiet note when updates are paused.
 3. **`useApi` ignores out-of-order responses**, using a request counter per hook instance.
 4. **`Cache-Control: no-store` on every `/api` response.** This rules out the browser or proxy caching the user suspected. The SSE endpoints send `no-cache, no-transform`, so proxies don't compress or buffer them.
-5. **The run log stream can resume after a full reconnect.** A new `EventSource` doesn't send `Last-Event-ID`, so `GET /runs/:id/log` also accepts `?after=<index>`. `RunView` uses the same supervisor (watchdog included) and passes the last index it saw. For a finished run, the server sends `event: end` after the replay and the client closes the stream. That frees the connection.
-6. **Clock-driven publishes in the scheduler tick.** A pure `clockTopics(prev, next)` compares a small snapshot (`withinHours`, each connection's `blockedUntil`, and the queue's `[ticketId, blockedBy]` pairs) with the previous tick's and returns the topics to publish: `settings`, `allowance` and `tickets`. `cleanup` publishes `runs` when it deletes any. A tick runs every 60 seconds, so these views lag the clock by at most a minute. That's fine, since the underlying gates are only evaluated per tick anyway.
+5. **The run log stream can resume after a full reconnect.** A new `EventSource` doesn't send `Last-Event-ID`, so `GET /runs/:id/log` also accepts `?after=<index>`. `RunView` uses the same supervisor (watchdog included) and passes the last index it saw. For a finished run, the server sends `event: end` after the replay and closes the stream. For a run that is still active, the server also listens for `runs` on the topic bus, and once the run leaves `ACTIVE_STATUSES` it sends `end` and closes. Every log stream is released when its run finishes, even if the page stays open.
+6. **Runs record every usage change.** In `runner.ts`, call `recordProbe` whenever a `rate_limit_event` changes either window's `pct` or `resetsAt` from the last reading this run recorded, at most once every 30 seconds per run, plus a final record when the run's container exits if anything is still unrecorded. Each record publishes `allowance` as today. Samples are pruned after 8 days already, and change-only recording keeps the table small.
+7. **Clock-driven publishes in the scheduler tick.** A pure `clockTopics(prev, next)` compares a small snapshot (`withinHours`, each connection's `blockedUntil`, and the queue's `[ticketId, blockedBy]` pairs) with the previous tick's and returns the topics to publish: `settings`, `allowance` and `tickets`. `cleanup` publishes `runs` when it deletes any. A tick runs every 60 seconds, so these views lag the clock by at most a minute. That's fine, since the underlying gates are only evaluated per tick anyway.
 
 Not chosen:
 
 - **Polling as a fallback.** The watchdog already detects a dead stream within 40 seconds without the extra load.
 - **WebSockets.** Same failure modes, plus more code.
-- **Sharing one stream across tabs** (Web Locks plus `BroadcastChannel`). Closing finished log streams covers the common case. See Risks.
+- **Sharing one stream across tabs** (Web Locks plus `BroadcastChannel`). Releasing hidden tabs and closing finished log streams cover the common case with much less code. See Risks.
+- **Folding the log stream into `/api/events`** (one connection per tab). This saves a connection only while an active run is on screen, and it costs a per-connection subscription protocol.
 
 ## Changes
 
@@ -52,12 +59,15 @@ Not chosen:
 - Before the `/api` routers: `app.use('/api', (_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); })`. `openSse` overrides it for streams, because `writeHead` headers win.
 
 ### `server/src/http/api.ts`
-- `GET /runs/:id/log`: `after = Number(req.get('last-event-id') ?? req.query.after ?? -1)`, with non-numeric values treated as -1. After replaying the lines, if the run's status isn't one of `ACTIVE_STATUSES` (from `runs.ts`), call `send({}, undefined, 'end')` and `res.end()` without subscribing. Otherwise subscribe as today.
-  - There's a race when a run ends between the replay and the next publish. It's harmless: the stream stays open, the client sees `runs` and refetches, and the next visit gets `end`.
+- `GET /runs/:id/log`: `after = Number(req.get('last-event-id') ?? req.query.after ?? -1)`, with non-numeric values treated as -1. After replaying the lines, if the run's status isn't one of `ACTIVE_STATUSES` (from `runs.ts`), call `send({}, undefined, 'end')` and `res.end()` without subscribing. Otherwise subscribe to `logBus` as today, and also to `bus` `'topic'`. On `'runs'`, if `getRun(id)` is gone or not active, send `end` and `res.end()`. The `openSse` close callback removes both listeners.
+  - `setRun` publishes `runs` for the final status change, after the last log line has been appended, so `end` never cuts off the tail of the log.
 
 ### `server/src/http/openapi.ts`
 - `/events` summary: mention the `ping` event every 15 seconds.
 - `/runs/{id}/log`: document the `after` query parameter and the `end` event for finished runs.
+
+### `server/src/scheduler/runner.ts`
+- In the `run` step's stdout callback, replace the `!hadUsage` check. Keep `let recorded = ''` and `let recordedAt = 0`. When `claude.usage` is set and `JSON.stringify(claude.usage) !== recorded` and `Date.now() - recordedAt >= 30_000`, call `recordProbe` and update both. After `runContainer` returns, record once more if `JSON.stringify(claude.usage) !== recorded`. Only subscription runs with a `model_connection_id` record, as today.
 
 ### `server/src/scheduler/gates.ts`
 - `export interface ClockState { withinHours: boolean; blocks: string; queue: string }`. The strings are JSON fingerprints, so the comparison stays trivial.
@@ -89,7 +99,8 @@ export interface LiveOptions {
 export class LiveStream { constructor(opts: LiveOptions); start(): void; stop(): void; wake(): void }
 ```
 
-- `start()` opens the source and starts the watchdog interval (every 10 seconds, checking `Date.now() - lastSeen > 40_000`).
+- `start()` opens the source and starts the watchdog interval (every 10 seconds, checking `Date.now() - lastSeen > 40_000`). It does nothing if already started. A `start()` after an earlier open calls `onReconnect` when the new source opens.
+- `stop()` closes the source and clears every timer (watchdog and pending reconnect). It doesn't call `onClosed` or change the state to `reconnecting`.
 - Any `open`, `message` or `ping` sets `lastSeen`.
 - `onerror` sets the state to `reconnecting`. If `readyState === 2` (CLOSED), it calls `onClosed`, then schedules a reconnect after the current backoff.
 - `onopen` resets the backoff, sets the state to `live`, and calls `onReconnect` if this isn't the first open.
@@ -104,13 +115,13 @@ export class LiveStream { constructor(opts: LiveOptions); start(): void; stop():
   - `onClosed`: `api<AuthState>('/auth/state').then((s) => { if (!s.authenticated) window.dispatchEvent(new Event('workshop:signed-out')); }, () => {})`.
   - `onState`: store the state and notify `useLiveState` subscribers.
 - `onTopics`: start the stream when `listeners` goes from 0 to 1, and stop it when the set empties again.
-- Register `visibilitychange` (when `document.visibilityState === 'visible'`) and `online` listeners once, at module level, calling `stream?.wake()`.
+- Register `visibilitychange` and `online` listeners once, at module level. Hidden: `stream?.stop()`. Visible: `stream?.start()` if there are listeners. `online`: `stream?.wake()`. Don't open the stream at all while the page loads hidden.
 - `export function useLiveState(): 'live' | 'reconnecting'`: `useSyncExternalStore` over the stored state.
 - `useApi.reload`: `const seq = ++latest.current;` and apply the result or error only if `seq === latest.current` (`latest = useRef(0)`).
 
 ### `client/src/pages/RunView.tsx`
 - Replace the raw `EventSource` with `new LiveStream({ url: () => `/api/runs/${id}/log${last >= 0 ? `?after=${last}` : ''}`, onMessage: (data, lastEventId) => { last = Number(lastEventId); addEntry(...) } })`, with `let last = -1` inside the effect. Keep the `requestAnimationFrame` batching. Call `start()` in the effect and `stop()` in its cleanup.
-- Wire `visibilitychange` to `wake()` inside the same effect, removing the listener in the cleanup.
+- Wire `visibilitychange` in the same effect: hidden calls `stop()`, visible calls `start()`. `onEnd` sets a local `ended = true` so a later visible event doesn't reopen a finished run's log. Remove the listener in the cleanup.
 - Update the comment about `Last-Event-ID`.
 
 ### `client/src/components/Layout.tsx`
@@ -142,7 +153,11 @@ Server (`npm test --workspace server`):
   - `GET /api/runs/:id/log` for a run inserted as `succeeded`, with a log of two lines written via `appendLog`, replays both and ends with `event: end`, and the response finishes;
   - the same request with `?after=0` replays only the second line;
   - for a `running` run, the stream stays open (the read hasn't finished after replay, then abort).
-- `test/pipeline.test.ts`: keep the existing throttled-activity test. If the loop is already exercised there, add a test that `cleanup` publishes `runs` when it deletes an old run; otherwise put it in `api.test.ts` with direct rows.
+  - for a `running` run, updating its status to `succeeded` and calling `publish('runs')` ends the stream with `event: end`;
+- `test/pipeline.test.ts`:
+  - a run whose stdout has two `rate_limit_event`s with different utilization, 30 seconds apart under fake timers or with the clock mocked, leaves two probe samples, and the latest `allowanceOf` matches the second event. Two identical events leave one sample;
+  - keep the existing throttled-activity test.
+  - if the loop is already exercised there, a test that `cleanup` publishes `runs` when it deletes an old run (otherwise in `api.test.ts` with direct rows).
 
 Client (`npm test --workspace client`), new `client/test/live.test.ts` with `vi.useFakeTimers()` and a fake `SourceLike` factory recording each opened URL:
 
@@ -150,14 +165,32 @@ Client (`npm test --workspace client`), new `client/test/live.test.ts` with `vi.
 - `onReconnect` is called on the second open, not the first;
 - 40 seconds without messages closes the source and opens a new one; regular `ping`s prevent that;
 - `wake()` reconnects at once when the source is closed or stale, and does nothing when it's live;
+- `stop()` closes the source, and no reconnect or watchdog fires afterwards. A later `start()` opens a new source and calls `onReconnect` once it opens;
 - `onClosed` fires on a CLOSED error; `end` stops the stream with no reconnect, and `onEnd` fires;
 - `url()` is re-read on reconnect (so `?after=` follows the last id).
 
-Then `npm run typecheck` and `npm test` from the root. A manual check: open the dashboard, restart the server behind a proxy (or kill `dev:server` for 10 seconds), and confirm the sidebar note appears and the Running card updates without a reload once a run finishes.
+Then `npm run typecheck` and `npm test` from the root. Manual checks: open five Workshop tabs over plain `http://` (three of them on run pages), and confirm the visible dashboard's Running card still updates when a run finishes. Then open the dashboard, restart the server behind a proxy (or kill `dev:server` for 10 seconds), and confirm the sidebar note appears and the Running card updates without a reload once a run finishes.
 
 ## Risks and open questions
 
 - **The diagnosis is inferred, not reproduced** against the owner's deployment, which we can't see. These fixes cover every way we found for the stream to die silently. The sidebar note makes any remaining gap visible: if views go stale while it says nothing, the stream is alive but events are missing, which points to a publish gap rather than transport.
-- **HTTP/1.1 connection limit.** On plain HTTP the browser allows 6 connections per origin, shared by all tabs, and each Workshop tab holds one or two streams. Closing finished log streams helps. HTTPS through a proxy (as the README recommends) usually means HTTP/2, which removes the limit. If it still bites, a follow-up can share one stream across tabs with Web Locks plus `BroadcastChannel`.
+- **HTTP/1.1 connection limit.** Once hidden tabs release their streams and finished log streams close, only several visible windows side by side, each on an active run, can reach 6. HTTPS through a proxy (as the README recommends) usually means HTTP/2, which removes the limit. If it still bites, a follow-up can share one stream across tabs with Web Locks plus `BroadcastChannel`.
+- **A quick way for the owner to confirm the cause:** with several Workshop tabs open over plain HTTP, the browser's network panel shows dashboard refetches stuck as "Pending" or "Stalled" while the topic stream's EventStream tab still receives events. If that's what happened, the hidden-tab release fixes it.
+- **Reopen cost on tab switches.** Each switch back to a Workshop tab refetches its views once (about four small requests on the dashboard). That's cheap, and it's what makes the tab correct on sight.
 - **Clock-driven changes lag by up to a tick (60 seconds).** That's acceptable, because launches follow the same tick.
 - **#25** adds the settings topic and the pending buttons for operation modes. This design doesn't touch those buttons. If #25 lands first, `clockTopics`' `settings` publish fits alongside it unchanged.
+
+## Review
+
+Design review against the code at `bd2b62f`. Each criticism, its fix, and whether the body above adopts it.
+
+1. **The diagnosis relied on evidence that doesn't support it.** The design read "the run page shows *Agent finished*" as proof that the run page's `runs` updates worked. That text is a transcript item built from the log stream's `result` line (`client/src/transcript.ts:103`). It says nothing about the topic stream or `useApi`. *Fix:* say so in Context, and rank the causes again. **Adopted.**
+2. **Connection starvation was listed as a risk, but it fits the symptoms best.** It explains all three things the owner reports. Refetches are slow when a few slots are free and never finish when none are. A reload fixes it reliably, because the reload closes that tab's streams. The usage bars fail the same way. A dead stream explains staleness, but not "takes longer". Today every run page keeps a log stream open forever, including for finished runs, and background tabs keep all their streams. *Fix:* hidden tabs close their streams and reopen with a refetch when shown (Approach 0). The server also closes a log stream once its run finishes, not only when the run had already finished on connect (Approach 5). **Adopted.**
+3. **The `end` event only covered runs that had already finished when the page opened.** A page opened while the run was active kept its log connection after the run ended, and that's the usual case. *Fix:* the log handler also listens for `runs` on the topic bus and ends the stream once the run is no longer active. This also removes the race the design accepted. **Adopted.**
+4. **The usage bars have a server-side gap the design missed.** `runner.ts` records the subscription usage only on a run's first `rate_limit_event` (`!hadUsage`). During a long run the bars freeze at the run-start reading, whatever the client does. The owner asked for the bars to stay live. *Fix:* record whenever the reading changes, at most every 30 seconds per run, plus once when the container exits (Approach 6), with a pipeline test. **Adopted.**
+5. **`wake()` on `visibilitychange` became redundant**, because becoming visible now restarts the stream. *Fix:* visibility drives `stop()`/`start()`, and `wake()` stays for `online`. `stop()` and `start()` semantics are spelled out so they can be tested (no `onClosed`, no state flip, timers cleared, `onReconnect` on restart). **Adopted.**
+6. **A finished run's log could reopen when the tab is shown again.** With visibility restarting the log stream, a run that already sent `end` would reconnect and replay nothing on every tab switch. *Fix:* `RunView` keeps an `ended` flag set by `onEnd`. Paused runs count as active, so their stream stays open, and a resumed run keeps streaming without reopening. **Adopted.**
+7. **The design isn't verified against the deployment.** *Fix:* add a check the owner can do in the network panel: refetches stuck as Pending/Stalled while EventStream still receives events. Also add a manual multi-tab test. The sidebar note still covers the dead-stream case. **Adopted.**
+8. **Detecting stalled fetches in the client** (for example, a "Waiting for the server…" note when a refetch takes more than 10 seconds) would make starvation visible too. **Not adopted:** it adds state to every `useApi`, and once hidden tabs release their streams, starvation needs several visible windows side by side. It's easy to add later if the manual check shows it's still needed.
+9. **Folding the log stream into `/api/events`, or sharing one stream across tabs** would cut connections further. **Not adopted:** both are much more code (a subscription protocol, or leader election with Web Locks and `BroadcastChannel`) for the case that remains after items 2 and 3. Kept under "Not chosen" and Risks.
+10. **Checked and found sound:** `Cache-Control: no-store` before the routers doesn't affect the static bundle (hashed assets keep `maxAge: '1h'`, and `index.html` goes through `sendFile`). `useApi`'s request counter is enough for out-of-order responses. `clockTopics` covers `withinHours`, expiring `blockedUntil` and queue reasons, which are the only clock-driven fields in `/overview`. `cleanup` is the only other path that writes `runs` without `setRun`. No change.
