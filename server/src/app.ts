@@ -32,6 +32,11 @@ export function createApp() {
     next();
   });
   app.use(express.json({ limit: '1mb' }));
+  // Streams override this in openSse. Nothing else under /api may be served from a cache.
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
   app.use('/api', sameOrigin);
   app.use('/api/auth', authRouter);
   app.use('/api', requireAuth, apiRouter, sessionOnly, tokensRouter, connectionsRouter);

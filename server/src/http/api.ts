@@ -5,7 +5,7 @@ import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, Overv
 import { all, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
-import { getRun, logBus, readLog, runView, runViews } from '../runs.ts';
+import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews } from '../runs.ts';
 import { pushRefusal, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { stopRun } from '../scheduler/runner.ts';
@@ -266,18 +266,43 @@ apiRouter.post('/runs/:id/stop', async (req, res) => {
   res.json(runView(req.params.id));
 });
 
-/** The run's log as Server-Sent Events: everything so far, then live lines. Resumes from Last-Event-ID. */
+/**
+ * The run's log as Server-Sent Events: everything so far, then live lines. Resumes from Last-Event-ID
+ * or `?after=` (a fresh EventSource doesn't send the header). Ends with an `end` event, and closes,
+ * once the run is no longer active, so a finished run doesn't hold a browser connection.
+ */
 apiRouter.get('/runs/:id/log', (req, res) => {
   const id = req.params.id;
   check(getRun(id), 'Run not found.', 404);
-  const after = Number(req.get('last-event-id') ?? -1);
+  const given = req.get('last-event-id') ?? req.query.after;
+  const resume = typeof given === 'string' && /^\d+$/.test(given) ? Number(given) : -1;
+  const after = resume;
   const onLine = (index: number, entry: LogEntry) => send(entry, index);
-  const send = openSse(res, () => logBus.off(id, onLine));
+  let done = false;
+  const finish = () => {
+    if (done) return; // two publishes in one tick must not write after the response ended
+    done = true;
+    bus.off('topic', onTopic);
+    send({}, undefined, 'end');
+    res.end();
+  };
+  // setRun publishes 'runs' after the last line is appended, so `end` never cuts off the tail.
+  const onTopic = (topic: string) => {
+    if (topic !== 'runs') return;
+    const r = getRun(id);
+    if (!r || !ACTIVE_STATUSES.includes(r.status)) finish();
+  };
+  const send = openSse(res, () => {
+    logBus.off(id, onLine);
+    bus.off('topic', onTopic);
+  });
   // readLog is synchronous, so no line can be appended between replaying the file and subscribing.
   readLog(id).forEach((entry, index) => {
     if (index > after) send(entry, index);
   });
+  if (!ACTIVE_STATUSES.includes(getRun(id)!.status)) return finish();
   logBus.on(id, onLine);
+  bus.on('topic', onTopic);
 });
 
 apiRouter.get('/alerts', (_req, res) => {
