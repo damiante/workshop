@@ -14,7 +14,7 @@ Outcome:
 
 ## Approach
 
-- **Closed PR.** `stopAfterClosedPr` stops any active run (a Merge agent may be working on a conflict), removes the stage labels, `running` and `needs-info`, closes the issue with reason `not_planned`, sets `state = 'closed', pr_status = 'closed'`, and comments: `The pull request was closed without merging, so Workshop closed this issue as not planned. Reopen the issue to start again from classification.` No more `workshop/skip`: a closed issue already gets no work (`nextStep(…, open = false)`), and reopening it is the natural way back. The branch is kept: it's the head of your closed PR, and GitHub offers its own "Delete branch" / "Restore branch" there.
+- **Closed PR.** `stopAfterClosedPr` removes the stage labels, `running` and `needs-info`, closes the issue with reason `not_planned`, sets `state = 'closed', pr_status = 'closed'`, and comments: `The pull request was closed without merging, so Workshop closed this issue as not planned. Reopen the issue to start again from classification.` No more `workshop/skip`: a closed issue already gets no work (`nextStep(…, open = false)`), and reopening it is the natural way back. The branch is kept: it's the head of your closed PR, and GitHub offers its own "Delete branch" / "Restore branch" there.
   Because the local row is set to closed before the next sync, the sync doesn't see an open → closed transition and doesn't run the manual-close cleanup on top.
 - **Manual close.** In `syncRepo`, detect the transition (`existing?.state === 'open' && t.state === 'closed'`), and after the upsert (and the existing `stopRun`) call a new `cleanUpClosedIssue(getTicket(existing.id)!)` in `merge.ts`:
   1. Find the PR: `t.pr_number ?? (t.branch ? await vcs.findPullRequest(ref, t.branch) : null)`.
@@ -38,11 +38,12 @@ Outcome:
 - `deleteBranch`: `DELETE /repos/{owner}/{repo}/git/refs/{ref}` with `ref: \`heads/${branch}\``; ignore 404 and 422 (already gone), using the file's `status(err)` helper.
 
 ### `server/src/scheduler/merge.ts`
-- `stopAfterClosedPr`: as described above. Import `activeRunId` from `../tickets.ts` and `stopRun` from `./runner.ts` (check for an import cycle: `runner.ts` must not import `merge.ts`; if it does, pass the stop in from the caller or move `cleanUpClosedIssue` into `sync.ts`).
+- `stopAfterClosedPr`: as described above. It doesn't stop runs itself: `runner.ts` imports `merge.ts`, so `merge.ts` must not import `runner.ts`. `advanceMerge` only runs when no agent is active, and `syncReviews` handles the other case (below).
 - New `export async function cleanUpClosedIssue(t: TicketRow)`: as described above.
 
 ### `server/src/scheduler/sync.ts`
 - In the `syncRepo` loop, after `stopRun`, call `cleanUpClosedIssue` on the open → closed transition inside `try/catch` with the alert.
+- In `syncReviews`, before `stopAfterClosedPr(t)`: `const active = activeRunId(t.id); if (active) await stopRun(active, 'The pull request was closed.', false);` (a Merge agent may be resolving a conflict on that PR).
 
 ### Docs
 - `docs/design/workflow.md`: replace the "Pull request closed without merging" bullet (line ~71): `Workshop closes the issue as not planned and comments; reopen the issue to start again from classification.` Add a bullet: `**Issue closed by you:** Workshop stops any run, clears its labels, closes its open pull request and deletes the branch it created.` The table row "Closed … → Nothing" is unchanged.
