@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import type { ApiTokenView, NewApiToken, Settings } from '../../../server/src/api-types.ts';
+import type { ApiTokenView, LifetimeSpend, NewApiToken, Settings, SpendTotals } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Panel } from '../components/ui.tsx';
-import { ago } from '../format.ts';
+import { ago, money, tokens } from '../format.ts';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ZONES = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
@@ -14,6 +14,68 @@ function NumberField({ label, help, value, min, max, step = 1, onChange }: { lab
       <input type="number" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} required />
       {help && <span className="help">{help}</span>}
     </label>
+  );
+}
+
+function SpendTable({ title, label, rows }: { title: string; label: string; rows: { key: string; name: string; t: SpendTotals }[] }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>{title}</th>
+            <th>Runs</th>
+            <th>Input</th>
+            <th>Output</th>
+            <th>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={`${label}-${r.key}`}>
+              <td>{r.name}</td>
+              <td>{r.t.runs}</td>
+              <td>{tokens(r.t.inputTokens)}</td>
+              <td>{tokens(r.t.outputTokens)}</td>
+              <td>{money(r.t.costUsd)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LifetimeUsage() {
+  const { data, error } = useApi<LifetimeSpend>('/usage/lifetime', ['runs']);
+  return (
+    <Panel title="Lifetime usage">
+      <div className="panel-body stack">
+        <ErrorNote error={error} />
+        {data && data.since === null && <p className="small muted">No agent runs recorded yet.</p>}
+        {data && data.since !== null && (
+          <>
+            <p className="small muted">
+              Tokens and token-equivalent cost of every agent run Workshop has recorded since {new Date(data.since).toLocaleDateString()}. On a subscription this is what the same use would
+              cost on the API, not what you paid. Claude Code you use outside Workshop isn't counted.
+            </p>
+            <p>
+              {money(data.total.costUsd)} · {tokens(data.total.inputTokens)} in · {tokens(data.total.outputTokens)} out · {data.total.runs} runs
+            </p>
+            <SpendTable
+              title="By billing"
+              label="billing"
+              rows={[
+                { key: 'subscription', name: 'Subscription', t: data.subscription },
+                { key: 'api', name: 'API', t: data.api },
+              ]}
+            />
+            <SpendTable title="By model" label="model" rows={data.byModel.map((m) => ({ key: m.model, name: m.model, t: m }))} />
+            <SpendTable title="By month" label="month" rows={data.byMonth.map((m) => ({ key: m.month, name: m.month, t: m }))} />
+          </>
+        )}
+      </div>
+    </Panel>
   );
 }
 
@@ -211,6 +273,7 @@ export function SettingsPage() {
       </div>
     </form>
     <ApiTokens />
+    <LifetimeUsage />
     </div>
   );
 }
