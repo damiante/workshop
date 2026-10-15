@@ -4,7 +4,8 @@ import { getSettings } from '../settings.ts';
 import { activeRunId, editLabels, getTicket, isAllowedAuthor, labelsOf, linkRef, repoRef, setBlockers, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
 import type { RemoteTicket } from '../providers/types.ts';
 import { label, moveTo, parseLabels } from '../workflow/labels.ts';
-import { finishMerged, stopAfterClosedPr } from './merge.ts';
+import { raiseAlert } from '../alerts.ts';
+import { cleanUpClosedIssue, finishMerged, stopAfterClosedPr } from './merge.ts';
 import { stopRun } from './runner.ts';
 
 /** Pulls changed tickets for one repo, then checks pull requests waiting for your review. */
@@ -37,6 +38,14 @@ export async function syncRepo(repo: RepoRow) {
     );
     const active = existing && t.state === 'closed' ? activeRunId(existing.id) : null;
     if (active) await stopRun(active, 'The ticket was closed.', false);
+    if (existing?.state === 'open' && t.state === 'closed') {
+      try {
+        await cleanUpClosedIssue(getTicket(existing.id)!);
+      } catch (err) {
+        // The row is already closed, so this isn't retried; the alert says what to tidy by hand.
+        raiseAlert('warning', 'close-cleanup', `Couldn't tidy up after ${repo.full_name}#${t.number} was closed: ${(err as Error).message}`, `ticket:${existing.id}`);
+      }
+    }
   }
   await syncBlockers(repo, changed);
   await syncReviews(repo);
@@ -88,7 +97,11 @@ async function syncReviews(repo: RepoRow) {
     let move: ReturnType<typeof moveTo> | null = null;
     if (pr.state === 'merged') await finishMerged(t);
     else if (t.state === 'closed') move = moveTo(labelsOf(t), null); // you closed the issue: stop quietly
-    else if (pr.state === 'closed') await stopAfterClosedPr(t);
+    else if (pr.state === 'closed') {
+      const active = activeRunId(t.id); // a Merge agent may be resolving a conflict on that PR
+      if (active) await stopRun(active, 'The pull request was closed.', false);
+      await stopAfterClosedPr(t);
+    }
     else if (state.stage === 'merge') continue; // still open and approved: the merge step handles it
     else if (pr.decision === 'approved') move = moveTo(labelsOf(t), 'merge');
     else if (pr.decision === 'changes_requested') move = moveTo(labelsOf(t), 'reclassify');
