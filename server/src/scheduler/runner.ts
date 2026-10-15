@@ -248,6 +248,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   const name = AGENT_INFO[r.agent].label;
   const claude: ClaudeRun = {};
   let lastPublished = 0;
+  let trailing: NodeJS.Timeout | undefined;
   const state = await runContainer(
     ctx,
     'run',
@@ -262,15 +263,25 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
       }
       if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
-        if (Date.now() - lastPublished > 3000) {
+        // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
+        const wait = lastPublished + 3000 - Date.now();
+        if (wait <= 0) {
           lastPublished = Date.now();
           publish('runs');
+        } else if (!trailing) {
+          trailing = setTimeout(() => {
+            trailing = undefined;
+            lastPublished = Date.now();
+            publish('runs');
+          }, wait);
         }
       }
     },
     agent.timeout_min * 60_000,
   );
+  clearTimeout(trailing);
   activity.delete(r.id);
+  publish('runs');
   if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
   const res = claude.result;
   setRun(r.id, { exit_code: state.exitCode, input_tokens: res?.inputTokens ?? null, output_tokens: res?.outputTokens ?? null, cost_usd: res?.costUsd ?? null });

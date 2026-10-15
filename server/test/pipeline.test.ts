@@ -16,6 +16,7 @@ const { allowanceOf, recordProbe } = await import('../src/allowance.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
+const { bus } = await import('../src/events.ts');
 const { getRun } = await import('../src/runs.ts');
 const { launch } = await import('../src/scheduler/runner.ts');
 const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
@@ -117,6 +118,25 @@ async function settle(id: string) {
 }
 
 describe('runner', () => {
+  it('publishes runs when the agent finishes, even if its last activity was throttled', async () => {
+    const tool = (command: string) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } });
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [tool('npm test'), tool('git status'), result({ outcome: 'done', summary: 'Done.', tests: 'ok' })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    const topics: string[] = [];
+    const listener = (t: string) => topics.push(t);
+    bus.on('topic', listener);
+    try {
+      await settle(go());
+    } finally {
+      bus.off('topic', listener);
+    }
+    // The second tool call fell inside the 3s throttle window; the runner must still announce it.
+    expect(topics.filter((t) => t === 'runs').length).toBeGreaterThanOrEqual(3);
+  });
+
   it('implements a ticket and opens a pull request, keeping git credentials away from Claude', async () => {
     fake.env = new FakeEnv({
       prepare: ['Checked out workshop/3-add-dark-mode at abc1234'],
