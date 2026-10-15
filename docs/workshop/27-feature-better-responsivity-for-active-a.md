@@ -4,6 +4,30 @@
 
 The dashboard's Running card and the sidebar's plan usage bars go stale until you reload the page. Sometimes that lasts minutes. Meanwhile the run page next to them shows "Agent finished" right away. The goal is a client that stays live without refreshes.
 
+## Dashboard and run page compared
+
+The owner confirmed that the run page's log reliably shows new lines, and asked whether the dashboard now uses the same method. With this branch, the **connection** is the same, but **what an event carries** is different, and some of that difference can't be removed.
+
+| | Run page log | Dashboard (Running card, usage bars) |
+|---|---|---|
+| Stream | `GET /api/runs/:id/log`, one per open run page | `GET /api/events`, one per tab, shared by every view |
+| Server side | `openSse`: `ping` on open and every 15 s, `no-cache, no-transform` | the same `openSse` |
+| Client side | a `LiveStream` (backoff, 40 s watchdog, released while hidden) | a `LiveStream` with the same settings |
+| What an event carries | the data itself: one log line with its index | only a topic name (`runs`, `allowance`, …) |
+| After an event | the line is appended; nothing else can fail | `onTopics` waits out a 250 ms debounce, then `useApi` refetches `/api/overview` |
+| After a drop | reconnects with `?after=<last index>` and replays exactly what it missed | reconnects and refetches every view once |
+| What it shows | everything Claude prints, as it prints it | the run's **status** and last tool call, which only change at step boundaries |
+
+So the dashboard adds a second step that the log doesn't have: a refetch after each event. On this branch, that step still has three weaknesses the log stream doesn't share:
+
+- **A failed refetch is never retried.** If `/api/overview` fails (a network blip, a proxy 502 during a restart, a timeout), `useApi` stores the error. The Dashboard ignores the error once it has data, so the card keeps its old content until the *next* event, which may be minutes away. After a drop, the log stream retries until it has caught up.
+- **The debounce can postpone indefinitely.** `onTopics` restarts its 250 ms timer on every event. The Dashboard listens to 8 topics, so with several agents running (each publishing `runs` up to every 3 seconds, plus `tickets`, `allowance` and `connections`), a steady stream of events closer than 250 ms apart keeps pushing the refetch back.
+- **The card means something different from "The agent finished."** That transcript line is Claude's `result` event. After it, the container still has to exit, and then the run is `publishing` (push, pull request, labels, comment) until it settles. The card correctly lists the run until then, but it says "Working", with the last tool call as activity, until the container exits. To someone watching both screens, that looks like lag.
+
+**Why the dashboard can't be aligned completely.** The log is one append-only sequence per run: each event is self-contained, and an index is enough to resume. The dashboard shows derived state from several tables: the queue with its gate reasons, hosts, needs-you, alerts and the allowance meters. The server computes these in `/api/overview`. To push data, the server would have to send the whole overview to every tab on every event (up to every 3 seconds per running agent), or the client would have to repeat the server's gate logic. Pushing only the Running card would give the page two sources of truth for the same response, and they could arrive out of order. Notify-then-refetch is the right model here.
+
+**What aligns instead are the guarantees.** The transport is already shared (above). Approach items 8 to 10 give the refetch step the log stream's properties: it retries until it succeeds, its delay is bounded, and the card shows the moment the agent finishes, just as the log does.
+
 What the code does today:
 
 - **The server already publishes these changes.** Every run row change goes through `setRun` (`server/src/scheduler/runner.ts:57`), which calls `publish('runs')`. Every usage reading goes through `recordProbe` or `recordLimit`, which call `publish('allowance')`. `Layout` listens to `allowance` and `runs`; `Dashboard` listens to both as well. The earlier fix on this branch (a trailing publish after a throttled activity update, plus one when the agent finishes) is still correct, but it only covers activity text, and it can't explain stale views that last longer than 3 seconds.
@@ -41,11 +65,15 @@ Keep each tab's connection use small, make the event stream self-healing and obs
 5. **The run log stream can resume after a full reconnect.** A new `EventSource` doesn't send `Last-Event-ID`, so `GET /runs/:id/log` also accepts `?after=<index>`. `RunView` uses the same supervisor (watchdog included) and passes the last index it saw. For a finished run, the server sends `event: end` after the replay and closes the stream. For a run that is still active, the server also listens for `runs` on the topic bus, and once the run leaves `ACTIVE_STATUSES` it sends `end` and closes. Every log stream is released when its run finishes, even if the page stays open.
 6. **Runs record every usage change.** In `runner.ts`, call `recordProbe` whenever a `rate_limit_event` changes either window's `pct` or `resetsAt` from the last reading this run recorded, at most once every 30 seconds per run, plus a final record when the run's container exits if anything is still unrecorded. Each record publishes `allowance` as today. Samples are pruned after 8 days already, and change-only recording keeps the table small.
 7. **Clock-driven publishes in the scheduler tick.** A pure `clockTopics(prev, next)` compares a small snapshot (`withinHours`, each connection's `blockedUntil`, and the queue's `[ticketId, blockedBy]` pairs) with the previous tick's and returns the topics to publish: `settings`, `allowance` and `tickets`. `cleanup` publishes `runs` when it deletes any. A tick runs every 60 seconds, so these views lag the clock by at most a minute. That's fine, since the underlying gates are only evaluated per tick anyway.
+8. **Refetches retry until they succeed, like the log stream reconnects.** When a `useApi` refetch fails with a network error or a 5xx, it retries after 2, 4, 8… seconds, up to 30 seconds, until it succeeds, a newer request replaces it, or the component unmounts. Errors that a retry won't fix (4xx, including 401, which already signs out) aren't retried.
+9. **Bounded coalescing.** `onTopics` throttles instead of debouncing: the first event of a burst schedules a refetch in 250 ms, and further events before then join it. Events that arrive while that refetch is in flight schedule one more, and `useApi`'s request counter keeps the newest response. The card then updates at most about 250 ms plus one request after any change.
+10. **The card shows when the agent finishes.** When the runner reads Claude's `result` line, it sets the run's activity to the same words the transcript uses ("The agent finished.", or "The agent stopped with an error.") and publishes `runs` straight away, bypassing the 3-second activity throttle. The card then says the same as the log at the same moment. It moves on to "Publishing" once the container exits, and leaves the Running card when the run settles.
 
 Not chosen:
 
 - **Polling as a fallback.** The watchdog already detects a dead stream within 40 seconds without the extra load.
 - **WebSockets.** Same failure modes, plus more code.
+- **Pushing the Running card's data on the event stream** (a `runs` event carrying the active runs). See "Why the dashboard can't be aligned completely" above. It would add a second source of truth to the page for the same response. Items 8 to 10 remove the failures the extra step adds.
 - **Sharing one stream across tabs** (Web Locks plus `BroadcastChannel`). Releasing hidden tabs and closing finished log streams cover the common case with much less code. See Risks.
 - **Folding the log stream into `/api/events`** (one connection per tab). This saves a connection only while an active run is on screen, and it costs a per-connection subscription protocol.
 
@@ -68,6 +96,8 @@ Not chosen:
 
 ### `server/src/scheduler/runner.ts`
 - In the `run` step's stdout callback, replace the `!hadUsage` check. Keep `let recorded = ''` and `let recordedAt = 0`. When `claude.usage` is set and `JSON.stringify(claude.usage) !== recorded` and `Date.now() - recordedAt >= 30_000`, call `recordProbe` and update both. After `runContainer` returns, record once more if `JSON.stringify(claude.usage) !== recorded`. Only subscription runs with a `model_connection_id` record, as today.
+
+- Also in that stdout callback: keep `let finished = false`. The first time `claude.result` is set, set `finished = true`, then `activity.set(r.id, claude.result.isError ? 'The agent stopped with an error.' : 'The agent finished.')`, `clearTimeout(trailing)`, `trailing = undefined`, `lastPublished = Date.now()` and `publish('runs')`. The existing `activity.delete(r.id)` after the container exits stays.
 
 ### `server/src/scheduler/gates.ts`
 - `export interface ClockState { withinHours: boolean; blocks: string; queue: string }`. The strings are JSON fingerprints, so the comparison stays trivial.
@@ -108,6 +138,19 @@ export class LiveStream { constructor(opts: LiveOptions); start(): void; stop():
 - `wake()` reconnects immediately (backoff reset) if the source isn't OPEN or `lastSeen` is stale.
 - Constants: `SILENCE_MS = 40_000`, `MAX_BACKOFF_MS = 30_000`.
 
+### `client/src/live.ts`, additions for the refetch step
+Pure helpers, tested in Node like `LiveStream`:
+
+```ts
+/** Calls fn once, `ms` after the first call of a burst; calls in between join it. */
+export function coalesce(fn: () => void, ms: number): { call(): void; cancel(): void };
+/** Whether a failed request is worth retrying: network errors and 5xx, not 4xx. */
+export function retryable(e: unknown): boolean; // true unless e has a numeric `status` below 500
+export function retryDelay(attempt: number): number; // min(2000 * 2 ** attempt, MAX_BACKOFF_MS)
+```
+
+`retryable` checks a `status` property rather than `instanceof ApiError`, so `live.ts` doesn't import `api.ts`, whose module-level listeners need a DOM.
+
 ### `client/src/api.ts`
 - Replace `source`/`connect()` with a lazily created `LiveStream` for `/api/events`:
   - `onMessage`: parse `{ topic }` and notify listeners as today.
@@ -117,6 +160,8 @@ export class LiveStream { constructor(opts: LiveOptions); start(): void; stop():
 - `onTopics`: start the stream when `listeners` goes from 0 to 1, and stop it when the set empties again.
 - Register `visibilitychange` and `online` listeners once, at module level. Hidden: `stream?.stop()`. Visible: `stream?.start()` if there are listeners. `online`: `stream?.wake()`. Don't open the stream at all while the page loads hidden.
 - `export function useLiveState(): 'live' | 'reconnecting'`: `useSyncExternalStore` over the stored state.
+- `onTopics`: `entry.fn` becomes `coalesce(fn, 250).call` (keep the `cancel` for the unsubscribe), instead of the clear-and-restart timer.
+- `useApi.reload`: on failure, if `retryable(e)` and `seq === latest.current`, set a retry timer (`retry = useRef<number>()`) for `retryDelay(attempt++)` that repeats the same request, still checking `seq`. Each new `reload` clears the pending retry. The mount effect's cleanup increments `latest.current` and clears the timer, so an unmounted view stops retrying. `setError` behaves as today.
 - `useApi.reload`: `const seq = ++latest.current;` and apply the result or error only if `seq === latest.current` (`latest = useRef(0)`).
 
 ### `client/src/pages/RunView.tsx`
@@ -129,6 +174,7 @@ export class LiveStream { constructor(opts: LiveOptions); start(): void; stop():
 
 ### Docs
 - `client/AGENTS.md`, data flow: the stream reconnects itself (watchdog, backoff, wake on visibility); `useApi` drops out-of-order responses; the log stream resumes with `?after=` and closes on `end`.
+- `client/AGENTS.md`, data flow: add one line on the two models: the log pushes data and resumes by index; views get topic notices and refetch, coalesced at most 250 ms, with failed refetches retried. Keep both on `LiveStream`.
 - `server/AGENTS.md`: the `events.ts` row mentions the visible `ping` heartbeat. Under Invariants: "Any state change a view shows must `publish` its topic. Clock-driven state goes through `clockTopics` in the tick."
 
 ## Data and interfaces
@@ -156,6 +202,7 @@ Server (`npm test --workspace server`):
   - for a `running` run, updating its status to `succeeded` and calling `publish('runs')` ends the stream with `event: end`;
 - `test/pipeline.test.ts`:
   - a run whose stdout has two `rate_limit_event`s with different utilization, 30 seconds apart under fake timers or with the clock mocked, leaves two probe samples, and the latest `allowanceOf` matches the second event. Two identical events leave one sample;
+  - a run whose stdout ends with a `result` line: a `bus` listener that reads `runViews()` on each `runs` topic sees the run with `status: 'running'` and `activity: 'The agent finished.'` (proves the card shows it before the container exits). With `is_error: true`, it sees `'The agent stopped with an error.'`;
   - keep the existing throttled-activity test.
   - if the loop is already exercised there, a test that `cleanup` publishes `runs` when it deletes an old run (otherwise in `api.test.ts` with direct rows).
 
@@ -168,8 +215,13 @@ Client (`npm test --workspace client`), new `client/test/live.test.ts` with `vi.
 - `stop()` closes the source, and no reconnect or watchdog fires afterwards. A later `start()` opens a new source and calls `onReconnect` once it opens;
 - `onClosed` fires on a CLOSED error; `end` stops the stream with no reconnect, and `onEnd` fires;
 - `url()` is re-read on reconnect (so `?after=` follows the last id).
+- `coalesce`: three calls 100 ms apart call `fn` once, 250 ms after the first call. Calls that keep arriving every 100 ms for 2 seconds still call `fn` about every 250 ms (this is the starvation bug in the old debounce). `cancel()` stops a pending call;
+- `retryable`: true for a plain `Error` (network) and for `{ status: 502 }`, false for `{ status: 404 }` and `{ status: 401 }`;
+- `retryDelay`: 2000, 4000, 8000… capped at `MAX_BACKOFF_MS`.
 
 Then `npm run typecheck` and `npm test` from the root. Manual checks: open five Workshop tabs over plain `http://` (three of them on run pages), and confirm the visible dashboard's Running card still updates when a run finishes. Then open the dashboard, restart the server behind a proxy (or kill `dev:server` for 10 seconds), and confirm the sidebar note appears and the Running card updates without a reload once a run finishes.
+
+Manual check for the comparison: open the dashboard and a run page side by side on an active run. When the transcript shows "The agent finished.", the card should show the same text within about a second, then "Publishing", then leave the Running card when the run settles. Stop the server for 10 seconds while a refetch is due: the card should catch up within about 30 seconds of the server's return, with no event needed.
 
 ## Risks and open questions
 
@@ -178,6 +230,7 @@ Then `npm run typecheck` and `npm test` from the root. Manual checks: open five 
 - **A quick way for the owner to confirm the cause:** with several Workshop tabs open over plain HTTP, the browser's network panel shows dashboard refetches stuck as "Pending" or "Stalled" while the topic stream's EventStream tab still receives events. If that's what happened, the hidden-tab release fixes it.
 - **Reopen cost on tab switches.** Each switch back to a Workshop tab refetches its views once (about four small requests on the dashboard). That's cheap, and it's what makes the tab correct on sight.
 - **Clock-driven changes lag by up to a tick (60 seconds).** That's acceptable, because launches follow the same tick.
+- **The two models stay different by design.** If the dashboard still lags after items 8 to 10, while the sidebar note is quiet and refetches aren't stuck as Pending, the next step is to push the Running card's data on the `runs` event (see Not chosen). This design doesn't build that.
 - **#25** adds the settings topic and the pending buttons for operation modes. This design doesn't touch those buttons. If #25 lands first, `clockTopics`' `settings` publish fits alongside it unchanged.
 
 ## Review
@@ -194,3 +247,11 @@ Design review against the code at `bd2b62f`. Each criticism, its fix, and whethe
 8. **Detecting stalled fetches in the client** (for example, a "Waiting for the server…" note when a refetch takes more than 10 seconds) would make starvation visible too. **Not adopted:** it adds state to every `useApi`, and once hidden tabs release their streams, starvation needs several visible windows side by side. It's easy to add later if the manual check shows it's still needed.
 9. **Folding the log stream into `/api/events`, or sharing one stream across tabs** would cut connections further. **Not adopted:** both are much more code (a subscription protocol, or leader election with Web Locks and `BroadcastChannel`) for the case that remains after items 2 and 3. Kept under "Not chosen" and Risks.
 10. **Checked and found sound:** `Cache-Control: no-store` before the routers doesn't affect the static bundle (hashed assets keep `maxAge: '1h'`, and `index.html` goes through `sendFile`). `useApi`'s request counter is enough for out-of-order responses. `clockTopics` covers `withinHours`, expiring `blockedUntil` and queue reasons, which are the only clock-driven fields in `/overview`. `cleanup` is the only other path that writes `runs` without `setRun`. No change.
+
+### Second review (PR feedback from @damiante)
+
+The owner confirmed that the run page's log reliably shows new lines while the dashboard doesn't, and asked whether the dashboard now uses the same method as the run page.
+
+11. **Compared the two paths** (Context, "Dashboard and run page compared"). Both now use the same transport, `openSse` plus `LiveStream`. The log pushes data and resumes by index. The dashboard gets topic notices and refetches.
+12. **The refetch step had weaknesses the log doesn't have:** failed refetches weren't retried, the debounce could postpone a refetch indefinitely, and the card didn't reflect Claude's `result` until the container exited. *Fix:* Approach items 8 to 10, with tests. **Adopted.**
+13. **Full alignment (pushing dashboard data) is not adopted.** The dashboard shows derived state from several tables, so it would mean sending the whole overview to every tab on every event, or repeating server logic in the client. Kept as the next step under Risks if lag remains.
