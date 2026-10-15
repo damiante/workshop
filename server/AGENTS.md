@@ -43,7 +43,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 
 ## Invariants: don't break these
 
-- **Any state change a view shows**  must `publish` its topic. Clock-driven state goes through `clockTopics` in the scheduler tick.**
+- **Every state change a view shows must `publish` its topic.** Clock-driven state goes through `clockTopics` in the scheduler tick.
 - **No git credentials in the `run` container.** Tokens go only to `prepare` (read) and `publish` (write), through env vars, never onto the volume. `pipeline.test.ts` checks this.
 - **Secrets never reach the browser.** `toView()` masks them. Edits with an empty secret field keep the stored value.
 - **Exactly one Claude credential per container** (`launchEnv`): with both set, Claude Code would bill the API key.
