@@ -266,11 +266,19 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     () => runSpec(ctx, agent),
     (text) => {
       const before = claude.activity;
+      const hadResult = !!claude.result;
       readClaudeLine(claude, text);
       // Every run reports current subscription usage: a free, fresh reading for the allowance gate and
       // the usage bars. Recorded whenever it changes, at most every 30 seconds.
       if (Date.now() - recordedAt >= USAGE_RECORD_MS) recordUsage();
-      if (claude.activity && claude.activity !== before) {
+      if (claude.result && !hadResult) {
+        // Say what the log says, the moment it says it: the container may take a while to exit.
+        activity.set(r.id, claude.result.isError ? 'The agent stopped with an error.' : 'The agent finished.');
+        clearTimeout(trailing);
+        trailing = undefined;
+        lastPublished = Date.now();
+        publish('runs');
+      } else if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
         // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
         const wait = lastPublished + 3000 - Date.now();

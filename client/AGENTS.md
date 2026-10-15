@@ -18,8 +18,9 @@ The Workshop UI: React 19, React Router 8, Vite. Plain CSS with custom propertie
 ## Data flow
 
 - Types come from `../../server/src/api-types.ts`, **type-only**. Never import other server modules: they pull in Node built-ins.
-- `useApi('/overview', ['runs', 'tickets'])` fetches on mount and refetches when the server publishes one of those topics on `/api/events`. Bursts are coalesced; after a reconnect everything refetches once. The stream reconnects itself, closes while the tab is hidden and refetches when it's shown, and `useApi` drops out-of-order responses. To make a new view live, publish the topic on the server where the data changes.
+- `useApi('/overview', ['runs', 'tickets'])` fetches on mount and refetches when the server publishes one of those topics on `/api/events`. Bursts are coalesced (at most 250 ms from the first event), failed refetches retry with backoff until they succeed; after a reconnect everything refetches once. The stream reconnects itself, closes while the tab is hidden and refetches when it's shown, and `useApi` drops out-of-order responses. To make a new view live, publish the topic on the server where the data changes.
 - The run view streams `/api/runs/:id/log` with its own `LiveStream`. A reconnect resumes with `?after=<last index>`, and the server's `end` event (the run finished) stops it.
+- Two models share `LiveStream`: the run log pushes data and resumes by index; views get topic notices and refetch, because the server derives their data from several tables.
 - A 401 from any call fires `workshop:signed-out`, which shows the sign-in screen.
 
 ## Visual rules

@@ -17,7 +17,7 @@ const { initCrypto } = await import('../src/crypto.ts');
 const { initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
 const { bus } = await import('../src/events.ts');
-const { getRun } = await import('../src/runs.ts');
+const { activity, getRun } = await import('../src/runs.ts');
 const { launch } = await import('../src/scheduler/runner.ts');
 const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
 const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
@@ -135,6 +135,28 @@ describe('runner', () => {
     }
     // The second tool call fell inside the 3s throttle window; the runner must still announce it.
     expect(topics.filter((t) => t === 'runs').length).toBeGreaterThanOrEqual(3);
+  });
+
+  it.each([
+    [false, 'The agent finished.'],
+    [true, 'The agent stopped with an error.'],
+  ])("shows the agent's result on the card before the container exits (is_error %s)", async (isError, text) => {
+    const res = line({ type: 'result', subtype: isError ? 'error_during_execution' : 'success', is_error: isError, errors: ['boom'], usage: { input_tokens: 1, output_tokens: 1 } });
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [res], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+    const seen: string[] = [];
+    let id = '';
+    const listener = (t: string) => {
+      const r = id && getRun(id);
+      if (t === 'runs' && r && r.status === 'running' && activity.get(id)) seen.push(activity.get(id)!);
+    };
+    bus.on('topic', listener);
+    try {
+      id = go();
+      await settle(id);
+    } finally {
+      bus.off('topic', listener);
+    }
+    expect(seen).toContain(text);
   });
 
   it('implements a ticket and opens a pull request, keeping git credentials away from Claude', async () => {

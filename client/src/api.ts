@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { AuthState, Topic } from '../../server/src/api-types.ts';
-import { LiveStream } from './live.ts';
+import { LiveStream, coalesce, retryable, retryDelay } from './live.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -72,18 +72,13 @@ window.addEventListener('online', () => stream?.wake());
 
 export function onTopics(topics: Topic[], fn: () => void) {
   if (!topics.length) return () => {};
-  let timer: number | undefined;
-  const entry = {
-    topics: new Set<string>(topics),
-    fn: () => {
-      clearTimeout(timer);
-      timer = window.setTimeout(fn, 250); // coalesce bursts
-    },
-  };
+  // The first event of a burst schedules the refetch; later ones join it, so a steady flow can't postpone it.
+  const burst = coalesce(fn, 250);
+  const entry = { topics: new Set<string>(topics), fn: burst.call };
   listeners.add(entry);
   if (listeners.size === 1 && document.visibilityState !== 'hidden') liveStream().start();
   return () => {
-    clearTimeout(timer);
+    burst.cancel();
     listeners.delete(entry);
     if (!listeners.size) {
       stream?.stop();
@@ -110,20 +105,36 @@ export function useApi<T>(path: string | null, topics: Topic[] = []) {
   const [data, setData] = useState<T | undefined>(() => (path ? (cache.get(path) as T | undefined) : undefined));
   const [error, setError] = useState<string | null>(null);
   const latest = useRef(0);
+  const retry = useRef<ReturnType<typeof setTimeout>>(undefined);
   const reload = useCallback(() => {
     if (!path) return;
+    clearTimeout(retry.current);
     const seq = ++latest.current; // a slow, older response must not overwrite a newer one
-    api<T>(path).then(
-      (d) => {
-        if (seq !== latest.current) return;
-        cache.set(path, d);
-        setData(d);
-        setError(null);
-      },
-      (e: Error) => seq === latest.current && setError(e.message),
-    );
+    let attempt = 0;
+    const run = () =>
+      api<T>(path).then(
+        (d) => {
+          if (seq !== latest.current) return;
+          cache.set(path, d);
+          setData(d);
+          setError(null);
+        },
+        (e: Error) => {
+          if (seq !== latest.current) return;
+          setError(e.message);
+          // Like the log stream reconnecting: keep trying until the view catches up.
+          if (retryable(e)) retry.current = setTimeout(run, retryDelay(attempt++));
+        },
+      );
+    run();
   }, [path]);
-  useEffect(reload, [reload]);
+  useEffect(() => {
+    reload();
+    return () => {
+      latest.current++;
+      clearTimeout(retry.current);
+    };
+  }, [reload]);
   const topicKey = topics.join();
   useEffect(() => onTopics(topicKey ? (topicKey.split(',') as Topic[]) : [], reload), [reload, topicKey]);
   return { data, error, reload };

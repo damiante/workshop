@@ -119,3 +119,31 @@ export class LiveStream {
     };
   }
 }
+
+/** Calls fn once, `ms` after the first call of a burst; calls in between join it. */
+export function coalesce(fn: () => void, ms: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return {
+    call() {
+      if (timer !== undefined) return;
+      timer = setTimeout(() => {
+        timer = undefined;
+        fn();
+      }, ms);
+    },
+    cancel() {
+      clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
+
+/** Whether a failed request is worth retrying: network errors and 5xx, not 4xx. */
+export function retryable(e: unknown): boolean {
+  const status = (e as { status?: unknown } | null)?.status;
+  return typeof status !== 'number' || status >= 500;
+}
+
+export function retryDelay(attempt: number): number {
+  return Math.min(2000 * 2 ** attempt, MAX_BACKOFF_MS);
+}

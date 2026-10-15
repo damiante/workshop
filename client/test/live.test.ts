@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LiveStream, MAX_BACKOFF_MS, SILENCE_MS, type LiveOptions, type SourceLike } from '../src/live.ts';
+import { LiveStream, MAX_BACKOFF_MS, coalesce, retryDelay, retryable, SILENCE_MS, type LiveOptions, type SourceLike } from '../src/live.ts';
 
 class FakeSource implements SourceLike {
   readyState = 0;
@@ -198,5 +198,53 @@ describe('LiveStream', () => {
     expect(last().url).toBe('/log?after=4');
     expect(calls.messages).toEqual(['a']);
     live.stop();
+  });
+});
+
+describe('coalesce', () => {
+  it('calls once, 250 ms after the first call of a burst', () => {
+    const fn = vi.fn();
+    const c = coalesce(fn, 250);
+    c.call();
+    vi.advanceTimersByTime(100);
+    c.call();
+    vi.advanceTimersByTime(100);
+    c.call();
+    expect(fn).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(50);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('is not postponed by a steady flow of calls', () => {
+    const fn = vi.fn();
+    const c = coalesce(fn, 250);
+    for (let t = 0; t < 2000; t += 100) {
+      c.call();
+      vi.advanceTimersByTime(100);
+    }
+    expect(fn.mock.calls.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('cancel stops a pending call', () => {
+    const fn = vi.fn();
+    const c = coalesce(fn, 250);
+    c.call();
+    c.cancel();
+    vi.advanceTimersByTime(1000);
+    expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+describe('retry helpers', () => {
+  it('retries network errors and 5xx, not 4xx', () => {
+    expect(retryable(new Error('Failed to fetch'))).toBe(true);
+    expect(retryable({ status: 502 })).toBe(true);
+    expect(retryable({ status: 404 })).toBe(false);
+    expect(retryable({ status: 401 })).toBe(false);
+  });
+
+  it('backs off from 2 seconds up to the cap', () => {
+    expect([0, 1, 2].map(retryDelay)).toEqual([2000, 4000, 8000]);
+    expect(retryDelay(20)).toBe(MAX_BACKOFF_MS);
   });
 });
