@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { NavLink, Outlet } from 'react-router';
 import type { Mode, Overview } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
@@ -30,6 +30,32 @@ function ModeSwitch({ mode, withinHours }: { mode: Mode; withinHours: boolean })
   );
 }
 
+function Brand({ className }: { className: string }) {
+  const wallsId = `logo-walls-${useId().replace(/\W/g, '')}`;
+  return (
+    <div className={className}>
+      Workshop
+      {/* Traced from workshop-logo.png; colours follow the theme tokens. */}
+      <svg viewBox="30 50 740 660" width="26" height="23" aria-hidden="true">
+        <clipPath id={wallsId}>
+          <path d="M85 310 225 262V685L85 640ZM225 262 458 120 700 268V665L225 685Z" />
+        </clipPath>
+        <path d="M85 310 225 262V685L85 640ZM225 262 458 120 700 268V665L225 685Z" fill="var(--muted)" />
+        <g stroke="var(--text)" strokeOpacity="0.3" clipPath={`url(#${wallsId})`}>
+          <path d="M163 0V800M300 0V800M375 0V800M450 0V800M520 0V800M582 0V800M640 0V800" strokeWidth="10" />
+          <path d="M100 0V800M692 0V800" strokeWidth="26" />
+        </g>
+        <path d="M35 270 210 160 460 55 762 245 748 282 458 100 45 302Z" fill="var(--text)" />
+        <path d="M45 302 458 100 748 282M225 262V685M318 278H588V668" fill="none" stroke="var(--bg)" strokeWidth="22" strokeLinejoin="round" />
+        <rect x="329" y="289" width="248" height="380" fill="var(--text)" />
+        <path d="M488 355 578 305V698L488 655Z" fill="var(--text)" stroke="var(--bg)" strokeWidth="14" strokeLinejoin="round" />
+        <circle cx="516" cy="510" r="11" fill="var(--bg)" />
+        <path d="M365 318H475L458 343H350Z" fill="var(--attention)" />
+      </svg>
+    </div>
+  );
+}
+
 export function Layout({ version }: { version: string }) {
   const { data } = useApi<Overview>('/overview', ['settings', 'allowance', 'alerts', 'runs', 'connections']);
   const signOut = () => api('/auth/logout', { body: {} }).finally(() => window.location.assign('/'));
@@ -37,26 +63,7 @@ export function Layout({ version }: { version: string }) {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand">
-          Workshop
-          {/* Traced from workshop-logo.png; colours follow the theme tokens. */}
-          <svg viewBox="30 50 740 660" width="26" height="23" aria-hidden="true">
-            <clipPath id="logo-walls">
-              <path d="M85 310 225 262V685L85 640ZM225 262 458 120 700 268V665L225 685Z" />
-            </clipPath>
-            <path d="M85 310 225 262V685L85 640ZM225 262 458 120 700 268V665L225 685Z" fill="var(--muted)" />
-            <g stroke="var(--text)" strokeOpacity="0.3" clipPath="url(#logo-walls)">
-              <path d="M163 0V800M300 0V800M375 0V800M450 0V800M520 0V800M582 0V800M640 0V800" strokeWidth="10" />
-              <path d="M100 0V800M692 0V800" strokeWidth="26" />
-            </g>
-            <path d="M35 270 210 160 460 55 762 245 748 282 458 100 45 302Z" fill="var(--text)" />
-            <path d="M45 302 458 100 748 282M225 262V685M318 278H588V668" fill="none" stroke="var(--bg)" strokeWidth="22" strokeLinejoin="round" />
-            <rect x="329" y="289" width="248" height="380" fill="var(--text)" />
-            <path d="M488 355 578 305V698L488 655Z" fill="var(--text)" stroke="var(--bg)" strokeWidth="14" strokeLinejoin="round" />
-            <circle cx="516" cy="510" r="11" fill="var(--bg)" />
-            <path d="M365 318H475L458 343H350Z" fill="var(--attention)" />
-          </svg>
-        </div>
+        <Brand className="brand" />
         <nav className="nav" aria-label="Main">
           <NavLink to="/" end>
             Dashboard
@@ -85,6 +92,7 @@ export function Layout({ version }: { version: string }) {
       </aside>
       <div className="main">
         <header className="topbar">
+          <Brand className="topbar-brand" />
           {data && <ModeSwitch mode={data.mode} withinHours={data.withinHours} />}
           {data?.allowance.map((a) => (
             <div key={a.connectionId} className="row">
