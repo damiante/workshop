@@ -14,16 +14,39 @@ export async function finishMerged(t: TicketRow) {
   run("UPDATE tickets SET state = 'closed', pr_status = 'merged' WHERE id = ?", t.id);
 }
 
-/** You closed the pull request without merging: stop rather than start the ticket over. */
+/** You closed the pull request without merging: close the issue as not planned. Reopening it starts again. */
 export async function stopAfterClosedPr(t: TicketRow) {
   const repo = getRepo(t.repo_id)!;
-  await editLabels(t, [label.skip], [...moveTo(labelsOf(t), null).remove, label.running]);
-  run("UPDATE tickets SET pr_status = 'closed' WHERE id = ?", t.id);
+  await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running, label.needsInfo]);
+  await sourceFor(repo).close(repoRef(repo), t.number, 'not_planned');
+  run("UPDATE tickets SET state = 'closed', pr_status = 'closed' WHERE id = ?", t.id);
   await sourceFor(repo).comment(
     repoRef(repo),
     t.number,
-    `The pull request was closed without merging, so Workshop has stopped working on this ticket. Remove the \`${label.skip}\` label to start again from classification.`,
+    'The pull request was closed without merging, so Workshop closed this issue as not planned. Reopen the issue to start again from classification.',
   );
+}
+
+/** You closed the issue: close Workshop's open pull request, delete its branch and clear its labels. */
+export async function cleanUpClosedIssue(t: TicketRow) {
+  const repo = getRepo(t.repo_id)!;
+  const vcs = vcsFor(repo);
+  const ref = repoRef(repo);
+  const number = t.pr_number ?? (t.branch ? await vcs.findPullRequest(ref, t.branch) : null);
+  if (number) {
+    const pr = await vcs.pullRequestState(ref, number, getSettings().authors);
+    if (pr.state === 'merged') {
+      await finishMerged(t); // GitHub closed the issue through "Closes #n"
+      return;
+    }
+    if (pr.state === 'open') {
+      await vcs.commentOnPullRequest(ref, number, 'The issue was closed, so Workshop closed this pull request.');
+      await vcs.closePullRequest(ref, number);
+    }
+    setPrStatus(t, 'closed');
+  }
+  if (t.branch) await vcs.deleteBranch(ref, t.branch);
+  await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running, label.needsInfo]);
 }
 
 /**

@@ -77,7 +77,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.tickets = {
@@ -88,6 +88,7 @@ beforeEach(() => {
     ],
     setLabels: vi.fn(async () => {}),
     comment: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
     blockers: vi.fn(async () => []),
     addBlocker: vi.fn(async (_repo: unknown, _n: number, blocker: number) => ({ repo: 'me/app', number: blocker, state: 'open', url: '' })),
   };
@@ -103,6 +104,8 @@ beforeEach(() => {
     findPullRequest: vi.fn(async () => null),
     openPullRequest: vi.fn(async () => ({ number: 7, url: 'https://github.com/me/app/pull/7' })),
     commentOnPullRequest: vi.fn(async () => {}),
+    closePullRequest: vi.fn(async () => {}),
+    deleteBranch: vi.fn(async () => {}),
     requestReview: vi.fn(async () => {}),
     createBranch: vi.fn(async () => {}),
   };
@@ -334,8 +337,13 @@ describe('sync', () => {
     fake.tickets.listChanged = async () => [];
     fake.vcs.pullRequestState = async () => pr({ state: 'closed' });
     await syncRepo(repo());
-    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.skip], [label.stage('pr-review')]);
+    expect(fake.tickets.close).toHaveBeenCalledWith(expect.anything(), 3, 'not_planned');
+    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], expect.arrayContaining([label.stage('pr-review')]));
+    expect(fake.tickets.setLabels).not.toHaveBeenCalledWith(expect.anything(), 3, [label.skip], expect.anything());
     expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('closed without merging'));
+    expect(one<{ state: string; pr_status: string }>('SELECT state, pr_status FROM tickets WHERE id = 1')).toEqual({ state: 'closed', pr_status: 'closed' });
+    expect(fake.vcs.closePullRequest).not.toHaveBeenCalled();
+    expect(fake.vcs.deleteBranch).not.toHaveBeenCalled();
   });
 
   it.each(['pr-review', 'merge'] as const)('tidies up when you merge the pull request yourself at %s, even though GitHub already closed the issue', async (stage) => {
@@ -347,12 +355,59 @@ describe('sync', () => {
     expect(one<{ pr_status: string }>('SELECT pr_status FROM tickets WHERE id = 1')?.pr_status).toBe('merged');
   });
 
-  it('drops the stage when you close the issue without merging', async () => {
-    fake.tickets.listChanged = async () => [remote({ state: 'closed' })];
-    fake.vcs.pullRequestState = async () => pr({ decision: 'approved' });
-    await syncRepo(repo());
-    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], [label.stage('pr-review')]);
-    expect(fake.tickets.comment).not.toHaveBeenCalled();
+  describe('when you close the issue', () => {
+    const branch = 'workshop/3-add-dark-mode';
+    beforeEach(() => {
+      run('UPDATE tickets SET branch = ? WHERE id = 1', branch);
+      fake.tickets.listChanged = async () => [remote({ state: 'closed' })];
+    });
+
+    it('closes the open pull request, deletes the branch and clears the stage', async () => {
+      fake.vcs.pullRequestState = async () => pr({ decision: 'approved' });
+      await syncRepo(repo());
+      expect(fake.vcs.commentOnPullRequest).toHaveBeenCalledWith(expect.anything(), 7, expect.stringContaining('issue was closed'));
+      expect(fake.vcs.closePullRequest).toHaveBeenCalledWith(expect.anything(), 7);
+      expect(fake.vcs.deleteBranch).toHaveBeenCalledWith(expect.anything(), branch);
+      expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], expect.arrayContaining([label.stage('pr-review')]));
+      expect(fake.tickets.comment).not.toHaveBeenCalled();
+    });
+
+    it('clears labels and deletes the branch at implement with needs-info and no pull request', async () => {
+      const labels = [label.size('s'), label.stage('implement'), label.needsInfo];
+      run('UPDATE tickets SET pr_number = NULL, labels = ? WHERE id = 1', JSON.stringify(labels));
+      fake.tickets.listChanged = async () => [remote({ state: 'closed', labels })];
+      await syncRepo(repo());
+      expect(fake.vcs.deleteBranch).toHaveBeenCalledWith(expect.anything(), branch);
+      expect(fake.vcs.closePullRequest).not.toHaveBeenCalled();
+      expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], expect.arrayContaining([label.stage('implement'), label.needsInfo]));
+    });
+
+    it('treats a merged pull request as a merge', async () => {
+      fake.vcs.pullRequestState = async () => pr({ state: 'merged' });
+      await syncRepo(repo());
+      expect(one<{ pr_status: string }>('SELECT pr_status FROM tickets WHERE id = 1')?.pr_status).toBe('merged');
+      expect(fake.vcs.closePullRequest).not.toHaveBeenCalled();
+      expect(fake.vcs.deleteBranch).not.toHaveBeenCalled();
+    });
+
+    it('raises an alert and finishes the sync when the cleanup fails', async () => {
+      fake.vcs.pullRequestState = async () => pr({});
+      fake.vcs.closePullRequest = vi.fn(async () => {
+        throw new Error('boom');
+      });
+      const before = repo().synced_at;
+      await syncRepo(repo());
+      expect(one<{ message: string }>("SELECT message FROM alerts WHERE kind = 'close-cleanup' AND ack_at IS NULL")?.message).toContain('boom');
+      expect(repo().synced_at).not.toBe(before);
+    });
+
+    it('does nothing for a ticket that was already closed', async () => {
+      run("UPDATE tickets SET state = 'closed', labels = '[]' WHERE id = 1");
+      fake.tickets.listChanged = async () => [remote({ state: 'closed', labels: [] })];
+      await syncRepo(repo());
+      expect(fake.vcs.closePullRequest).not.toHaveBeenCalled();
+      expect(fake.vcs.deleteBranch).not.toHaveBeenCalled();
+    });
   });
 
   it('resets the failure count when you remove workshop/failed', async () => {
