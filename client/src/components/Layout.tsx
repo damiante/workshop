@@ -13,13 +13,20 @@ const MODES: { value: Mode; label: string }[] = [
 
 function ModeSwitch({ mode, withinHours }: { mode: Mode; withinHours: boolean }) {
   const [error, setError] = useState<string | null>(null);
-  const set = (value: Mode) => api('/settings', { method: 'PUT', body: { mode: value } }).then(() => setError(null), (e: Error) => setError(e.message));
+  const [pending, setPending] = useState<Mode | null>(null);
+  // Stay locked until the refreshed overview reports the requested mode.
+  useEffect(() => { if (pending === mode) setPending(null); }, [mode, pending]);
+  const set = (value: Mode) => {
+    if (pending !== null || value === mode) return;
+    setPending(value);
+    api('/settings', { method: 'PUT', body: { mode: value } }).then(() => setError(null), (e: Error) => { setError(e.message); setPending(null); });
+  };
   const hint = mode === 'paused' ? 'No new agents start' : mode === 'scheduled' && !withinHours ? 'Outside operating hours' : null;
   return (
     <div className="row">
-      <div className="segmented" role="group" aria-label="Operation mode">
+      <div className={`segmented${pending === null ? '' : ' pending'}`} role="group" aria-label="Operation mode" aria-busy={pending !== null}>
         {MODES.map((m) => (
-          <button key={m.value} aria-pressed={mode === m.value} onClick={() => set(m.value)}>
+          <button key={m.value} aria-pressed={(pending ?? mode) === m.value} disabled={pending !== null} onClick={() => set(m.value)}>
             {m.label}
           </button>
         ))}
