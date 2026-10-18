@@ -53,6 +53,15 @@ const schemas: Record<string, Schema> = {
     apiRunCapUsd: num,
     apiDailyCapUsd: num,
   }),
+  SpendTotals: object({ runs: int, inputTokens: int, outputTokens: int, costUsd: num }),
+  LifetimeSpend: object({
+    since: nullable(int),
+    total: ref('SpendTotals'),
+    subscription: ref('SpendTotals'),
+    api: ref('SpendTotals'),
+    byModel: array({ allOf: [ref('SpendTotals'), object({ model: str })] }),
+    byMonth: array({ allOf: [ref('SpendTotals'), object({ month: str })] }),
+  }),
   RunView: object({
     id: str,
     ticketId: int,
@@ -197,6 +206,7 @@ function operation(method: string, op: Op) {
 const paths: Record<string, Record<string, Op>> = {
   '/overview': { get: { summary: 'Status: mode, running agents, queue, hosts, allowance and open alerts.', ok: ref('Overview') } },
   '/usage': { get: { summary: 'Claude allowance per connection, the thresholds, and today\'s API spend against the caps.', ok: ref('Usage') } },
+  '/usage/lifetime': { get: { summary: "Lifetime token use and token-equivalent cost of Workshop's agent runs, by billing, model and month.", ok: ref('LifetimeSpend') } },
   '/openapi.json': { get: { summary: 'This document.', ok: { type: 'object' } } },
   '/settings': {
     get: { summary: 'Operating settings.', ok: ref('Settings') },

@@ -144,6 +144,22 @@ const MIGRATIONS = [
   ALTER TABLE repos ADD COLUMN priority INTEGER NOT NULL DEFAULT 0;
   `,
   `ALTER TABLE repos ADD COLUMN selection TEXT NOT NULL DEFAULT 'all';`,
+  `
+  CREATE TABLE spend (
+    id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL, -- no FK: outlives the run
+    ts INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    billing TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cost_usd REAL NOT NULL
+  );
+  INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd)
+    SELECT id, COALESCE(ended_at, started_at), model, billing,
+           COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(cost_usd, 0)
+    FROM runs WHERE input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cost_usd IS NOT NULL;
+  `,
 ];
 
 export let db: DatabaseSync;
