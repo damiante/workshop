@@ -4,115 +4,137 @@
 
 The Implementation agent was told to attach a screenshot for web UI changes and replied that Playwright wasn't available.
 
-**Assessment: this is a container problem, not a host problem.** Every agent step, including `claude` and every tool it runs, executes inside the agent image (`agent/Dockerfile`). The host only supplies a Docker engine, CPU and memory (`DockerEnvironment.describe()`), and nothing from the host reaches the container apart from the run's volume. The image is `node:24-trixie-slim` plus git, Python and a C toolchain. It has no browser, no Playwright and none of the shared libraries Chromium needs. So probing hosts would find nothing useful, and no host could provide a browser to the container anyway.
+**Assessment: this is a container problem, not a host problem.** Every agent step, including `claude` and every tool it runs, executes inside the agent image (`agent/Dockerfile`). The host only supplies a Docker engine, CPU and memory, and nothing from the host reaches the container apart from the run's volume. So probing hosts would find nothing useful.
 
-Intended outcome:
-- The default agent image can drive a headless browser (Playwright + Chromium), so agents can take screenshots and run browser tests.
-- The image declares what it can do, Workshop reads that declaration from whatever image a run uses (default or per-repo), and it tells the agent in its system prompt. Agents then know what's available up front. They stop guessing, and when a custom image lacks something they say so plainly.
+The first implementation (commit `8abbb84` on this branch) put Playwright and Chromium in the one agent image. The owner rejected that in PR review: the extra 300–400 MB is wasted on most runs. **Revised outcome:**
+- Two agent images: the **base** image, exactly as it was before this ticket, and a **browser** image that adds Playwright with headless Chromium.
+- The Classifier says which capabilities a ticket needs for testing its change (today only `browser`). Workshop records that as a ticket label.
+- Implementation runs for a ticket that needs `browser` use the browser image. Every other run (Classifier, Design, Design review, Merge, usage probe, and Implementation for other tickets) uses the base image.
+- The runner still reads the `workshop.capabilities` label from the image it actually runs and tells the agent in `system.md` what it has. That part of `8abbb84` stays.
 
 ## Approach
 
-1. **Put Playwright and a headless Chromium in the default image.** Install the `playwright` npm package globally, pinned like Claude Code, and run `playwright install --with-deps --only-shell chromium` as root. Browsers go to a fixed `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`, owned by `agent`. That way a repository pinned to a different Playwright version can still `npx playwright install chromium` into the same place: the system libraries are already there, and the download needs no root. `--only-shell` (the headless shell) roughly halves the browser download compared with full Chromium, and headless is all an unattended container can use.
-   - Alternative considered: a separate `-browser` image variant chosen per ticket. It saves roughly 300–400 MB per host, but it needs a second CI build, a second pinned image setting, and selection logic. The image is already about 1 GB with build-essential, and it's pulled once per host. One image is simpler, and every ticket gets the capability.
-2. **Declare capabilities as an image label:** `LABEL workshop.capabilities="browser"` (comma-separated). Images built `FROM` the Workshop image inherit the label. If an image overrides it, it must restate the list. An image without the label (in practice: one built `FROM` a Workshop image older than this change, since an image not based on ours lacks the `workshop-agent` entrypoint and can't run a step at all) has no declared capabilities.
-3. **Detect at run time.** A new `Environment.imageLabels(image)` reads the labels through the host's engine (`docker.getImage(image).inspect()` → `Config.Labels`). When the runner builds `system.md`, it parses the labels into a capability list and appends an "Environment" section after the protocol. This is the detection the ticket title asks for. It works per run, so it covers per-repo images and needs no stored state.
-4. **No Classifier or allocation change (deliberately).** With one image per repo and the capability in the default image, there's nothing to choose between: every host runs the same image, and the repo setting decides the image. Adding `capabilities` to `CLASSIFIER_SCHEMA` would store a value that nothing acts on. If image variants or capability-specific hosts appear later, the label added here is what allocation would match against. See Open questions.
+1. **One Dockerfile, two stages.** `agent/Dockerfile` gets a `base` stage (today's content on `main`, unchanged) and a `browser` stage `FROM base`. The browser stage adds the Playwright install from `8abbb84` (pinned `PLAYWRIGHT_VERSION=1.64.1`, `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright` owned by `agent`, `NODE_PATH`), plus `LABEL workshop.capabilities="browser"`. Building `--target base` gives the old image byte for byte. Building `--target browser` gives the browser image. A separate `Dockerfile.browser` built `FROM` a published base tag would need the base pushed first and wouldn't work in the PR's build-only CI job. Stages share the build cache and need nothing extra.
+   - The base stage carries no `workshop.capabilities` label, so it declares no capabilities.
+2. **Ship both images.** CI publishes `…/workshop-agent` (base) and `…/workshop-agent-browser`, both tagged `latest` and with the commit sha. The Workshop image pins both, through `WORKSHOP_AGENT_IMAGE` and a new `WORKSHOP_AGENT_BROWSER_IMAGE`. A host pulls the browser image only the first time it runs a browser ticket (`ensureImage` is already lazy).
+3. **Classifier output → ticket label.** `CLASSIFIER_SCHEMA` gets an optional `capabilities` array (enum `["browser"]`). When the Classifier accepts a ticket, `planClassifier` sets the `workshop/needs:browser` label to match the list: it adds the label when `browser` is listed and removes it when it isn't. Ticket state already lives in `workshop/*` labels, so this follows the existing pattern: no migration, the owner sees the label on GitHub and can add or remove it by hand, and a re-classify after requested changes updates it. In delta mode the Classifier lists capabilities for the whole ticket, not just the delta, so a re-classify doesn't drop a browser the ticket still needs.
+4. **Allocation.** `context()` in `runner.ts` picks the image:
+   - a repository with a custom image always uses that image (Workshop can't know what variants it has);
+   - otherwise, `implement` runs on a ticket labelled `workshop/needs:browser` use `config.agentBrowserImage`;
+   - everything else uses `config.agentImage`.
+   This is a pure function, so it gets unit tests. The image is recomputed whenever `context()` runs (including when Workshop re-attaches after a restart). That's harmless: `prepare` and `publish` behave the same in both images, and a `run` container that is re-attached is never re-created.
+5. **Reporting stays label-based.** `imageLabels`, `capabilitiesOf` and `environmentText` from `8abbb84` stay. The no-browser text gets one extra sentence so agents on the base image know how a browser could be provided.
 
 ## Changes
 
+Start from the current branch (`8abbb84`). First merge `origin/main` into it: it carries `0c9d64f`, which lets agents push changes under `.github/workflows/`. The earlier push failures came from this branch editing `build.yml` without that permission.
+
 ### `agent/Dockerfile`
-- Before `USER agent`, add a root step:
+- Name the first stage: `FROM node:24-trixie-slim AS base`. Restore its content to `main`'s version: no Playwright, no `NODE_PATH`, no `LABEL`, and the original header comment, extended to describe the two targets. Keep `ENTRYPOINT` in `base`.
+- Append:
   ```dockerfile
-  # Headless Chromium for screenshots and browser tests. Browsers live outside $HOME at a fixed path,
-  # owned by agent, so a repository pinned to another Playwright version can install its own build there.
-  ARG PLAYWRIGHT_VERSION=<latest 1.x at implementation time: npm view playwright version>
+  # The browser image: the base image plus Playwright with headless Chromium, for screenshots and
+  # browser tests. Workshop uses it only for Implementation runs on tickets labelled workshop/needs:browser.
+  FROM base AS browser
+  USER root
+  ARG PLAYWRIGHT_VERSION=1.64.1
   ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-  RUN npm install -g playwright@${PLAYWRIGHT_VERSION} \
-   && playwright install --with-deps --only-shell chromium \
-   && rm -rf /var/lib/apt/lists/* /root/.npm \
-   && chown -R agent:agent /opt/ms-playwright
+  RUN <the npm install / playwright install --with-deps --only-shell chromium / chown step from 8abbb84>
+  USER agent
+  ENV NODE_PATH=/usr/local/lib/node_modules
+  LABEL workshop.capabilities="browser"
   ```
-  (It goes after the `usermod` step so `agent` exists.)
-- Add `NODE_PATH=/usr/local/lib/node_modules` to the final `ENV`, so `require('playwright')` works in ad-hoc CommonJS scripts. The CLI (`playwright screenshot …`) is on `PATH` already.
-- Add `LABEL workshop.capabilities="browser"`.
-- Update the header comment: mention the browser, and that images built `FROM` this one keep its capabilities label.
-
-### `server/src/providers/types.ts`
-- `Environment`: add `imageLabels(image: string): Promise<Record<string, string>>` with the doc comment `An image's labels; empty when the image isn't on the host.`
-
-### `server/src/providers/docker/index.ts`
-- Implement it: `(await this.docker.getImage(image).inspect()).Config?.Labels ?? {}`, and return `{}` on a 404 (use the existing `ignore(404)` pattern).
-
-### `server/src/workflow/prompts.ts` (pure)
-- `export const CAPABILITY_LABEL = 'workshop.capabilities';`
-- `export function capabilitiesOf(labels: Record<string, string>): string[]`: split the label on commas, trim, lowercase, drop empties, de-duplicate.
-- `export function environmentText(caps: string[]): string`: returns a `## Environment` section.
-  - With `browser`: `A headless Chromium is available through Playwright (installed globally; browsers in $PLAYWRIGHT_BROWSERS_PATH). For a screenshot, start the app and run \`playwright screenshot --full-page <url> <file>.png\`; for scripted checks, \`require('playwright')\` from a CommonJS script (\`.cjs\`: the global install resolves through NODE_PATH, which \`import\` ignores). If the repository pins its own Playwright version, run \`npx playwright install chromium\` first. Everything left under /work/repo is committed and pushed when you finish, so save screenshots outside it (for example /tmp) unless you mean to commit them.`
-  - Without `browser`: `No browser is installed in this environment. If the task needs one (screenshots, browser tests), do the rest and say in your summary what you couldn't check.`
-  - Any other capabilities are listed by name: `Other capabilities declared by this image: x, y.`
-- `protocolText` stays unchanged. It is also shown in the agent settings UI (`agents.ts`), and the environment section varies by run.
-
-### `server/src/scheduler/runner.ts`
-- In `runSpec`, in the `r.resumes === 0` branch (call the result `caps`: `Ctx.labels` already means the container labels): `const caps = capabilitiesOf(await ctx.env.imageLabels(ctx.image).catch(() => ({})));`. Failing to read labels must not fail the run; it just reads as "no capabilities".
-- `system.md` becomes `${promptFor(agent)}\n\n${protocolText(...)}\n\n${environmentText(caps)}`.
-
-### `server/test/pipeline.test.ts`
-- `FakeEnv`: add `imageLabels = async (_image: string) => this.labels` with a settable `labels: Record<string, string> = {}` field.
+- Note in the header comment: with no `--target`, Docker builds the last stage (`browser`), so build the base image with `--target base`.
 
 ### `.github/workflows/build.yml`
-- New job `agent-image`, on every push and pull request (no `needs`, runs alongside `test`): `docker/setup-buildx-action@v3`, then `docker/build-push-action@v6` with `context: agent`, `load: true`, `push: false`, `tags: workshop-agent:ci`, `cache-from: type=gha,scope=agent` (read only; `images` keeps writing the cache). Then two steps:
-  ```sh
-  docker run --rm --entrypoint bash workshop-agent:ci -c 'cd /tmp && playwright screenshot --full-page "data:text/html,<h1>hi</h1>" s.png && test -s s.png && node -e "require(\"playwright\")"'
-  test "$(docker image inspect workshop-agent:ci --format '{{index .Config.Labels "workshop.capabilities"}}')" = browser
-  ```
-  The container runs as `agent`, so this also proves the unprivileged user can launch the browser. Update the workflow's header comment (images are now built, not published, on every push).
+- `agent-image` job: build twice with `docker/build-push-action@v6` (`load: true`, `push: false`, `cache-from: type=gha,scope=agent`): `target: base` tagged `workshop-agent:ci`, and `target: browser` tagged `workshop-agent-browser:ci`. Checks:
+  - the existing screenshot and label checks, run against `workshop-agent-browser:ci`;
+  - base has no browser: `docker run --rm --entrypoint bash workshop-agent:ci -c '! command -v playwright'`, and its `workshop.capabilities` label is empty (`test -z "$(docker image inspect … --format '{{index .Config.Labels "workshop.capabilities"}}')"`).
+- `images` job: the agent push step gets `target: base`. Add a step "Build and push the agent browser image" (`target: browser`, tags `${image}-agent-browser:latest` and `:${sha}`, same cache scope). The Workshop build gets `AGENT_BROWSER_IMAGE=${image}-agent-browser:${sha}` in `build-args`.
+
+### `Dockerfile` (root)
+- `ARG AGENT_BROWSER_IMAGE=ghcr.io/damiante/workshop-agent-browser:latest` and `WORKSHOP_AGENT_BROWSER_IMAGE=$AGENT_BROWSER_IMAGE` in `ENV`. Update the comment ("the agent images built from the same commit").
+
+### `server/src/config.ts`
+- `agentBrowserImage: process.env.WORKSHOP_AGENT_BROWSER_IMAGE ?? 'ghcr.io/damiante/workshop-agent-browser:latest'`.
+
+### `server/src/workflow/labels.ts`
+- `export const CAPABILITIES = ['browser'] as const; export type Capability = (typeof CAPABILITIES)[number];`
+- `label.needs = (c: Capability) => \`workshop/needs:${c}\``.
+- `LABEL_DEFS`: `{ name: label.needs('browser'), color: '5c6b73', description: 'Workshop: Implementation gets a browser (Playwright) to test this' }`. Check that the description fits GitHub's 100-character limit.
+- `TicketState` gets `needs: Capability[]`, and `parseLabels` fills it.
+- `export function setNeeds(labels: string[], needs: Capability[])`: label edits in the same shape as `setSize` (adds missing labels, removes unlisted ones).
+- `export function imageFor(agent: AgentName, state: TicketState, images: { repo: string | null; base: string; browser: string }): string`: the rule in Approach 4.
+
+### `server/src/workflow/schemas.ts`
+- `ClassifierResult.capabilities?: Capability[]`.
+- `CLASSIFIER_SCHEMA.properties.capabilities`: `{ type: 'array', items: { type: 'string', enum: CAPABILITIES }, description: 'What the Implementation agent's container needs to test the change (accept only): browser for a web UI change that needs a screenshot or a browser test. Empty when nothing extra is needed.' }`. Not required.
+- `parseResult` (classifier): if present, `capabilities` must be an array of known values. Error: `capabilities must be a list of: browser.`
+
+### `server/src/workflow/transitions.ts`
+- `planClassifier` accept branch: `combine(setSize(...), moveTo(...), setNeeds(ctx.labels, r.capabilities ?? []))`. When `browser` is listed, append to the comment, before "Next:": `Implementation will run with a browser (Playwright) to test it.`
+
+### `server/src/workflow/prompts.ts`
+- Classifier prompt, new step 7: `7. When accepting, list in capabilities what the Implementation agent needs to test the change: "browser" when it changes a web UI that should be checked in a browser or shown in a screenshot. Leave it empty otherwise, since the browser image is large. In delta mode, list what the whole ticket needs, not only the requested changes.`
+- `environmentText` no-browser branch, after the existing text: `Workshop gives Implementation runs a browser when the ticket has the \`workshop/needs:browser\` label.`
+
+### `server/src/scheduler/runner.ts`
+- `context()`: `image: imageFor(r.agent, parseLabels(labelsOf(ticket)), { repo: repo.image, base: config.agentImage, browser: config.agentBrowserImage })`.
+- The `imageLabels`/`environmentText` lines from `8abbb84` stay as they are.
 
 ### Docs
-- `README.md` (custom image paragraph, line ~88): one sentence saying the default image includes Playwright with headless Chromium, and that an image built `FROM` it keeps the `workshop.capabilities` label, which tells agents what the image can do.
-- `docs/design/architecture.md` line 21: add "Playwright with headless Chromium" to the agent image description, plus one sentence on the capabilities label and that the runner reports it to the agent.
-- `README.md`, same paragraph: a custom image built `FROM` an older Workshop image has no browser until it is rebuilt; agents are told so.
-- `server/AGENTS.md`: under Docker notes, one bullet: "Image capabilities come from the `workshop.capabilities` label (`imageLabels`), read per run and described to the agent in `system.md`."
+- `README.md`:
+  - Custom image paragraph: replace the sentences added in `8abbb84`. New text: Workshop has two images, `workshop-agent` and `workshop-agent-browser` (Playwright with headless Chromium). Implementation runs on tickets labelled `workshop/needs:browser` (the Classifier sets this label, and you can set it yourself) use the browser image. A repository's custom image is used for every run, so build it `FROM` the browser image if its tickets need a browser.
+  - Configuration table: add a `WORKSHOP_AGENT_BROWSER_IMAGE` row (set at build).
+  - Development: the agent image command becomes `podman build --target base -t workshop-agent:dev agent` and `podman build --target browser -t workshop-agent-browser:dev agent`.
+- `AGENTS.md`, `.env.example` (add a commented `WORKSHOP_AGENT_BROWSER_IMAGE=localhost/workshop-agent-browser:dev`), and the `server/AGENTS.md` "Trying the agent image locally" block: use `--target base`.
+- `docs/design/architecture.md` line 21: the base image as before, plus a browser variant chosen for Implementation when the ticket is labelled `workshop/needs:browser`. Keep the sentence about the capabilities label.
+- `docs/design/workflow.md` label table (after the `workshop/size:*` row): `| \`workshop/needs:browser\` | Set by the Classifier (or you): Implementation runs in the browser image |`.
+- `server/AGENTS.md` Docker bullet: also mention `imageFor` choosing the image per run.
 
 ## Data and interfaces
 
-- No DB migration, no API or client change.
-- New image label `workshop.capabilities` (comma-separated; currently only `browser` is known).
-- `Environment.imageLabels` added to the provider interface.
-- Image env: `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`, `NODE_PATH=/usr/local/lib/node_modules`.
+- No DB migration. No API or client change: the ticket view already shows its labels.
+- New label `workshop/needs:browser`, created with the others from `LABEL_DEFS`.
+- Classifier schema: optional `capabilities: ("browser")[]`.
+- New env var `WORKSHOP_AGENT_BROWSER_IMAGE`. New published image `ghcr.io/damiante/workshop-agent-browser`.
+- Image label `workshop.capabilities`: set on the browser image only.
 
 ## Tests
 
 Run `npm run typecheck` and `npm test`.
 
 - `server/test/workflow.test.ts`:
-  - `capabilitiesOf`: `{}` → `[]`; `{ 'workshop.capabilities': ' Browser, ,gpu,browser' }` → `['browser', 'gpu']`; unrelated labels are ignored.
-  - `environmentText(['browser'])` mentions `playwright screenshot`. `environmentText([])` says no browser is installed. `environmentText(['browser', 'gpu'])` lists `gpu`.
-- `server/test/pipeline.test.ts`:
-  - With `fake.env.labels = { 'workshop.capabilities': 'browser' }`, the run step's `system.md` contains the Playwright text. With `{}`, it contains "No browser is installed".
-  - When `imageLabels` rejects, the run still starts and `system.md` says no browser is installed.
-- `server/test/docker.integration.test.ts` (opt-in): `imageLabels('docker.io/library/alpine:3.22')` returns an object, and `imageLabels('workshop-test/missing:none')` returns `{}`.
-- Image smoke test: the new `agent-image` CI job (see Changes) builds the image and takes a screenshot as `agent` on every push, so the PR's checks verify the Dockerfile. The Implementation agent's container has no Docker or Podman, so it can't build the image itself; it should say so in its summary and rely on CI. Locally the same commands work with `podman build -t workshop-agent:dev agent`.
+  - `parseLabels` reads `needs: ['browser']` from `workshop/needs:browser`.
+  - `setNeeds`: adds the label for `['browser']`, removes it for `[]`, and makes no edit when the labels already match.
+  - `imageFor`: implement + browser → browser image; implement without browser → base; design (or classifier, merge) + browser → base; a repo image wins in every case.
+  - `parseResult('classifier', …)`: accepts `capabilities: ['browser']` and a missing field; rejects `['gpu']` and `'browser'` (not an array).
+  - `planTransition` classifier accept: with `capabilities: ['browser']` it adds `workshop/needs:browser` and the comment mentions the browser. In delta mode with `capabilities: []` on a ticket that has the label, it removes the label.
+  - `environmentText([])` mentions `workshop/needs:browser`. The existing capability tests stay.
+- `server/test/pipeline.test.ts`: the started spec's `image` is `config.agentBrowserImage` for an implement run on a ticket labelled `workshop/needs:browser`, and `config.agentImage` without the label. Ticket 1 is already set to `implement`. The existing environment-capability tests stay.
+- Images: the `agent-image` CI job checks both targets on every push and PR. The Implementation agent's container has no Docker or Podman, so it should say in its summary that it relied on CI for this.
 
 ## Risks and open questions
 
-- **Debian trixie support in `playwright install --with-deps`.** Older Playwright releases only knew Debian 11/12 and fail on an unknown OS. Pin a release whose `nativeDeps` has a `debian13` entry if one exists; the CI job above shows immediately whether the install works. If the pinned version rejects trixie, install the dependency packages with `apt-get` explicitly (the Chromium list from Playwright's `nativeDeps` for Debian 12, mapped to trixie's `t64` names), then run `playwright install --only-shell chromium` without `--with-deps`. Note which path was taken in the Dockerfile comment.
-- **Image size** grows by roughly 300–400 MB (headless shell plus fonts and libraries). Hosts pull it once per release.
-- **arm64 hosts**: CI publishes amd64 only today, so nothing changes. Playwright's Chromium supports linux/arm64 if that changes.
-- **Memory and sandbox**: Docker's `/dev/shm` is 64 MB, but Playwright launches Chromium with `--disable-dev-shm-usage` and without the Chromium sandbox by default (`chromiumSandbox: false`), so neither `ShmSize` nor extra capabilities/seccomp changes are needed. Chromium does count against the per-agent memory limit; if agents report OOM kills while browsing, raise the host's per-agent memory.
-- **How screenshots reach the pull request** is outside this ticket. The `run` container has no GitHub access, so an agent can only commit an image to the branch or describe it. `publish` runs `git add -A`, so a screenshot left in the repo is committed whether or not the agent meant to; the environment text tells agents to save them in /tmp unless they intend to commit them. If the owner wants screenshots embedded in the PR, that's a follow-up: for example, `publish` uploads files from `.workshop/screenshots/`, and `openOrUpdatePr` links them.
-- **Open question (not blocking): Classifier capabilities.** I recommend not adding `capabilities` to the Classifier until there is more than one image or host to choose from (see Approach 4). If the owner prefers a separate browser image to keep the default small, the follow-up is: a `capabilities` array in `CLASSIFIER_SCHEMA` stored on the ticket, a `browserImage` setting, and `context()` picking that image when the ticket needs `browser` and the repo has no custom image.
+- **Custom repo images** don't switch: a repository with its own image uses it for every run, so it needs a browser built in if its tickets need one. The README says so, and agents are told when no browser is present.
+- **Wrong classification.** If the Classifier misses `browser`, the Implementation agent says it couldn't take a screenshot. The owner then adds `workshop/needs:browser` and requests changes. The opposite mistake only costs a larger image pull.
+- **Tickets already past classification** (including this one) have no `workshop/needs:browser` label, so their Implementation runs use the base image until the owner adds the label. No backfill.
+- **Debian trixie and `playwright install --with-deps`**: CI hasn't run on this branch yet, because the earlier pushes failed. If 1.64.1 rejects trixie, the `agent-image` job fails before merge. The fallback is to install Chromium's libraries with `apt-get` (Playwright's Debian 12 list, mapped to trixie's `t64` package names) and then run `playwright install --only-shell chromium` without `--with-deps`. Note in the Dockerfile which path was taken.
+- **Disk:** hosts that run browser tickets keep both images, which share the base layers, so the browser image adds roughly 300–400 MB.
+- Out of scope, as before: getting screenshots into the PR (the `run` container has no GitHub access). The environment text tells agents to save screenshots in `/tmp` so `publish`'s `git add -A` doesn't commit them by accident.
 
 ## Review
 
+Design review of the first (single-image) version. Rows 7–9 and "one image for every ticket" were superseded by the owner's PR feedback (two images, Classifier-driven selection), which this revision implements.
+
 | # | Criticism | Fix | Adopted |
 |---|-----------|-----|---------|
-| 1 | Untestable as written: the only check of the Dockerfile was a manual `podman build`, but the Implementation agent's container has no Docker or Podman, and CI only builds images on `main`. A broken install (e.g. trixie not supported) would merge unnoticed and break every run after release. | New `agent-image` CI job that builds the image on every push/PR and runs the screenshot and label checks as the `agent` user. | Yes |
-| 2 | `publish` runs `git add -A`, so a screenshot the agent writes inside `/work/repo` is silently committed and pushed. | Environment text tells agents to save screenshots outside the repo (e.g. /tmp) unless they mean to commit them; noted under Risks. | Yes |
-| 3 | `NODE_PATH` only works for CommonJS `require`; an agent writing an `.mjs` script with `import 'playwright'` gets a resolution error and may conclude Playwright is missing. | Environment text says to use a `.cjs` script and why. | Yes |
-| 4 | The `/dev/shm` risk and the implied sandbox concern were overstated: Playwright already passes `--disable-dev-shm-usage` and disables the Chromium sandbox by default. | Risk rewritten; real remaining concern is the per-agent memory limit. | Yes |
-| 5 | Wrong assumption: "an image not based on ours has no label". Such an image can't run Workshop at all (no `workshop-agent` entrypoint). The realistic no-label case is a custom image built `FROM` an older Workshop image, which keeps lacking a browser until rebuilt. | Body corrected; README sentence telling owners to rebuild custom images. | Yes |
-| 6 | Naming hazard: `Ctx` already has a `labels` field (container labels), so `labels` for image labels in `runSpec` would be confusing. | Design names the result `caps`. | Yes |
-| 7 | Simpler alternative: detect by probing inside the container (`command -v playwright` in the entrypoint, appending to `system.md`) instead of a label. Needs no provider change and reflects what's really installed. | Not adopted. The probe can only be unit-tested by building the image, it ties the system prompt to entrypoint versions baked into custom images, and it gives allocation nothing to match on later. The label is read from the image actually on the host, and the CI job (1) checks that label and install agree. | No |
-| 8 | Gap against the ticket: no Classifier or allocation change. | Kept out, with the reasoning in Approach 4: one image per repo and every host runs the same image, so a classified capability would change nothing. The follow-up is spelled out under Open questions for the owner. | No (deliberate; not blocking) |
-| 9 | Image staleness: `ensureImage` never re-pulls a tag already on a host, so a host might keep an old image. | No change: releases pin the agent image by commit sha, and for custom tags the label is read from the image the host actually runs, so what agents are told always matches what they get. | No (not a problem) |
-
+| 1 | Untestable as written: the only check of the Dockerfile was a manual `podman build`, but the Implementation agent's container has no Docker or Podman, and CI only builds images on `main`. | New `agent-image` CI job that builds the image on every push/PR and runs the screenshot and label checks as the `agent` user. | Yes |
+| 2 | `publish` runs `git add -A`, so a screenshot the agent writes inside `/work/repo` is silently committed and pushed. | Environment text tells agents to save screenshots outside the repo (e.g. /tmp) unless they mean to commit them. | Yes |
+| 3 | `NODE_PATH` only works for CommonJS `require`; an `.mjs` script with `import 'playwright'` fails. | Environment text says to use a `.cjs` script and why. | Yes |
+| 4 | The `/dev/shm` and sandbox risks were overstated. | Risk rewritten; the remaining concern is the per-agent memory limit. | Yes |
+| 5 | Wrong assumption: an image not based on ours can't run Workshop at all; the realistic no-label case is a custom image built `FROM` an older Workshop image. | Body corrected; README note. | Yes |
+| 6 | Naming hazard: `Ctx.labels` already means container labels. | The parsed result is called `caps`. | Yes |
+| 7 | Detect by probing inside the container instead of a label. | Not adopted: untestable without building the image, and gives allocation nothing to match on. | No |
+| 8 | Gap against the ticket: no Classifier or allocation change. | Superseded: now implemented per the owner's review. | Superseded |
+| 9 | `ensureImage` never re-pulls an existing tag. | No change: releases pin images by commit sha. | No |
