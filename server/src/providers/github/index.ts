@@ -63,6 +63,7 @@ export function appManifest(baseUrl: string) {
       contents: 'write',
       issues: 'write',
       pull_requests: 'write',
+      workflows: 'write',
       metadata: 'read',
       checks: 'read',
       statuses: 'read',
@@ -293,11 +294,15 @@ export class GitHubApp implements VcsHost, TicketSource {
   async gitAccess(repo: RepoRef, write: boolean): Promise<GitAccess> {
     const installation_id = await this.installationFor(repo);
     // A token for this one repository, with only the git access this step needs. Expires in an hour.
-    const { data } = await this.app.octokit.request('POST /app/installations/{installation_id}/access_tokens', {
-      installation_id,
-      repositories: [split(repo).repo],
-      permissions: { contents: write ? 'write' : 'read' },
-    });
+    const token = (permissions: Record<string, string>) =>
+      this.app.octokit.request('POST /app/installations/{installation_id}/access_tokens', { installation_id, repositories: [split(repo).repo], permissions });
+    // Pushing changes under .github/workflows needs `workflows`. Installations that haven't accepted it get a 422, so push without it.
+    const { data } = write
+      ? await token({ contents: 'write', workflows: 'write' }).catch((err) => {
+          if (status(err) !== 422) throw err;
+          return token({ contents: 'write' });
+        })
+      : await token({ contents: 'read' });
     return {
       url: `https://x-access-token:${data.token}@github.com/${repo.fullName}.git`,
       cleanUrl: `https://github.com/${repo.fullName}.git`,
