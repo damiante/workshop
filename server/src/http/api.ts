@@ -310,6 +310,15 @@ apiRouter.get('/runs/:id/log', (req, res) => {
   bus.on('topic', onTopic);
 });
 
+/** The run's log as a downloadable JSON Lines file, one entry per line, for analysis outside Workshop. */
+apiRouter.get('/runs/:id/export', (req, res) => {
+  const id = req.params.id;
+  check(getRun(id), 'Run not found.', 404);
+  res.type('application/x-ndjson');
+  res.attachment(`workshop-run-${id}.jsonl`);
+  res.send(readLog(id).map((e) => JSON.stringify(e) + '\n').join(''));
+});
+
 apiRouter.get('/alerts', (_req, res) => {
   res.json(alertViews('1 = 1', 200));
 });

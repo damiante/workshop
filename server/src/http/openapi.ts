@@ -276,6 +276,14 @@ const paths: Record<string, Record<string, Op>> = {
       errors: [404],
     },
   },
+  '/runs/{id}/export': {
+    get: {
+      summary: 'The run log as a downloadable JSON Lines file (application/x-ndjson): one LogEntry per line.',
+      params: ['id'],
+      stream: 'A JSON Lines file of LogEntry objects.',
+      errors: [404],
+    },
+  },
   '/alerts': { get: { summary: 'Recent alerts.', ok: array(ref('AlertView')) } },
   '/alerts/{id}/ack': { post: { summary: 'Acknowledges an alert.', params: ['id'], errors: [403] } },
   '/alerts/ack-all': { post: { summary: 'Acknowledges every open alert.', errors: [403] } },
