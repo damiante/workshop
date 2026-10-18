@@ -17,7 +17,8 @@ const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
-const { getRun } = await import('../src/runs.ts');
+const { bus } = await import('../src/events.ts');
+const { activity, getRun } = await import('../src/runs.ts');
 const { launch, resume } = await import('../src/scheduler/runner.ts');
 const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
 const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
@@ -126,6 +127,47 @@ async function settle(id: string) {
 }
 
 describe('runner', () => {
+  it('publishes runs when the agent finishes, even if its last activity was throttled', async () => {
+    const tool = (command: string) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } });
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [tool('npm test'), tool('git status'), result({ outcome: 'done', summary: 'Done.', tests: 'ok' })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    const topics: string[] = [];
+    const listener = (t: string) => topics.push(t);
+    bus.on('topic', listener);
+    try {
+      await settle(go());
+    } finally {
+      bus.off('topic', listener);
+    }
+    // The second tool call fell inside the 3s throttle window; the runner must still announce it.
+    expect(topics.filter((t) => t === 'runs').length).toBeGreaterThanOrEqual(3);
+  });
+
+  it.each([
+    [false, 'The agent finished.'],
+    [true, 'The agent stopped with an error.'],
+  ])("shows the agent's result on the card before the container exits (is_error %s)", async (isError, text) => {
+    const res = line({ type: 'result', subtype: isError ? 'error_during_execution' : 'success', is_error: isError, errors: ['boom'], usage: { input_tokens: 1, output_tokens: 1 } });
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [res], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+    const seen: string[] = [];
+    let id = '';
+    const listener = (t: string) => {
+      const r = id && getRun(id);
+      if (t === 'runs' && r && r.status === 'running' && activity.get(id)) seen.push(activity.get(id)!);
+    };
+    bus.on('topic', listener);
+    try {
+      id = go();
+      await settle(id);
+    } finally {
+      bus.off('topic', listener);
+    }
+    expect(seen).toContain(text);
+  });
+
   it('implements a ticket and opens a pull request, keeping git credentials away from Claude', async () => {
     fake.env = new FakeEnv({
       prepare: ['Checked out workshop/3-add-dark-mode at abc1234'],
@@ -160,6 +202,40 @@ describe('runner', () => {
     expect(one<{ pr_number: number }>('SELECT pr_number FROM tickets WHERE id = 1')?.pr_number).toBe(7);
     // The run's own rate_limit_event refreshed the allowance reading for free.
     expect(allowanceOf(ids.model).fiveHour).toEqual({ pct: 44, resetsAt: 1791897000_000 });
+  });
+
+  it('records each change in subscription usage during a run, at most every 30 seconds', async () => {
+    const rate = (five: number, seven = 0.07) =>
+      line({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: five, resetsAt: 1791897000 }, seven_day: { utilization: seven, resetsAt: 1792087200 } } } });
+    const lines = [rate(0.44), rate(0.5), rate(0.5), rate(0.6)];
+    // Time moves 31 s after the first and third lines; the second is inside the throttle window.
+    let offset = 0;
+    const realNow = Date.now.bind(Date);
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + offset);
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+    fake.env.follow = async (id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+      if (!id.startsWith('run')) return void (id.startsWith('publish') && onLine({ stream: 'stdout', text: line({ before: '', after: 'def5678', ahead: 1 }) }));
+      lines.forEach((text, i) => {
+        if (i === 1 || i === 3) offset += 31_000;
+        onLine({ stream: 'stdout', text });
+      });
+      onLine({ stream: 'stdout', text: result({ outcome: 'done', summary: 'Done.' }) });
+    };
+    const samples = () => one<{ n: number }>('SELECT COUNT(*) AS n FROM allowance_samples WHERE connection_id = ?', ids.model)!.n;
+    const before = samples();
+    const topics: string[] = [];
+    const listener = (t: string) => topics.push(t);
+    bus.on('topic', listener);
+    try {
+      await settle(go());
+      // 0.44 at once, 0.5 after 31 s, the repeat of 0.5 is not a change, 0.6 after another 31 s.
+      expect(samples() - before).toBe(3);
+      expect(allowanceOf(ids.model).fiveHour).toEqual({ pct: 60, resetsAt: 1791897000_000 });
+      expect(topics.filter((t) => t === 'allowance')).toHaveLength(3);
+    } finally {
+      bus.off('topic', listener);
+      spy.mockRestore();
+    }
   });
 
   describe('environment capabilities', () => {
