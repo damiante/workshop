@@ -1,7 +1,7 @@
 import { getAgent } from '../agents.ts';
 import { clearAlert, raiseAlert } from '../alerts.ts';
 import { allowanceOf, allowanceViews, apiSpendSince, recordProbe } from '../allowance.ts';
-import type { AgentName, Billing, HostView, QueueItem, Settings } from '../api-types.ts';
+import type { AgentName, Billing, HostView, QueueItem, Settings, TicketOrder } from '../api-types.ts';
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
 import { publish } from '../events.ts';
@@ -242,6 +242,14 @@ export function startOfDay(now: number, timeZone: string) {
   return now - minutes * 60_000 - (now % 60_000);
 }
 
+// Fixed list, so the setting never reaches the SQL text.
+const ORDER_SQL: Record<TicketOrder, string> = {
+  'updated-asc': 't.updated_at',
+  'updated-desc': 't.updated_at DESC',
+  'created-asc': 'COALESCE(t.created_at, t.updated_at)',
+  'created-desc': 'COALESCE(t.created_at, t.updated_at) DESC',
+};
+
 /** Every ticket Workshop could work on next, in order, each with the reason it's waiting (if any). */
 export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: { ignoreMode?: boolean } = {}): Candidate[] {
   const hosts = hostLoads();
@@ -249,7 +257,7 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
   const modeReason = opts.ignoreMode ? null : modeBlock(s, new Date(now));
   const spentToday = apiSpendSince(startOfDay(now, s.timezone));
   const repos = new Map(all<RepoRow>('SELECT * FROM repos').map((r) => [r.id, r]));
-  const rows = all<TicketRow>(`${openTicketsSql} ORDER BY t.updated_at`);
+  const rows = all<TicketRow>(`${openTicketsSql} ORDER BY ${ORDER_SQL[s.ticketOrder] ?? ORDER_SQL['updated-asc']}, t.id`);
   // Tickets the Classifier hasn't looked at yet; they hold back lower-priority repos.
   const waiting = rows
     .filter((t) => isAllowedAuthor(t.author) && ticketInScope(t, repos.get(t.repo_id)!) && isUnclassified(labelsOf(t), true, blockersOf(t)))
@@ -276,6 +284,7 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
     out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: conn?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), priority: stepPriority(step), repoPriority: repo.priority });
   }
+  // The sort is stable, so the ticket order setting (from the query) decides ties.
   return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || b.repoPriority - a.repoPriority || a.priority - b.priority);
 }
 

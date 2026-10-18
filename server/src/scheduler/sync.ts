@@ -20,10 +20,11 @@ export async function syncRepo(repo: RepoRow) {
     // Removing workshop/failed is how you ask Workshop to try again.
     const retry = existing && labelsOf(existing).includes(label.failed) && !t.labels.includes(label.failed);
     run(
-      `INSERT INTO tickets (repo_id, number, node_id, title, body, url, author, state, labels, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO tickets (repo_id, number, node_id, title, body, url, author, state, labels, updated_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (repo_id, number) DO UPDATE SET node_id = excluded.node_id, title = excluded.title, body = excluded.body,
-         url = excluded.url, state = excluded.state, labels = excluded.labels, updated_at = excluded.updated_at
+         url = excluded.url, state = excluded.state, labels = excluded.labels, updated_at = excluded.updated_at,
+         created_at = COALESCE(excluded.created_at, tickets.created_at)
          ${retry ? ', failures = 0' : ''}`,
       repo.id,
       t.number,
@@ -35,6 +36,7 @@ export async function syncRepo(repo: RepoRow) {
       t.state,
       JSON.stringify(t.labels),
       t.updatedAt,
+      t.createdAt ?? null,
     );
     const active = existing && t.state === 'closed' ? activeRunId(existing.id) : null;
     if (active) await stopRun(active, 'The ticket was closed.', false);

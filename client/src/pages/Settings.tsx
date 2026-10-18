@@ -1,10 +1,16 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import type { ApiTokenView, LifetimeSpend, NewApiToken, Settings, SpendTotals } from '../../../server/src/api-types.ts';
+import type { ApiTokenView, LifetimeSpend, NewApiToken, Settings, SpendTotals, TicketOrder } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Panel } from '../components/ui.tsx';
 import { ago, money, tokens } from '../format.ts';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const ORDERS: { value: TicketOrder; label: string }[] = [
+  { value: 'updated-asc', label: 'Least recently updated first' },
+  { value: 'updated-desc', label: 'Most recently updated first' },
+  { value: 'created-asc', label: 'Oldest first' },
+  { value: 'created-desc', label: 'Newest first' },
+];
 const ZONES = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : [];
 
 function NumberField({ label, help, value, min, max, step = 1, onChange }: { label: string; help?: ReactNode; value: number; min: number; max: number; step?: number; onChange: (n: number) => void }) {
@@ -261,6 +267,15 @@ export function SettingsPage() {
                 setSaved(false);
               }} placeholder="your-github-username" />
             <span className="help">Workshop only works on tickets opened by these GitHub users, and leaves other people's comments out of what agents read.</span>
+          </label>
+          <label className="field">
+            <span>Work on tickets in this order</span>
+            <select value={draft.ticketOrder} onChange={(e) => set({ ticketOrder: e.target.value as TicketOrder })}>
+              {ORDERS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+            <span className="help">Pushed tickets, higher-priority repositories and work already in progress still go first. This decides the order among the rest.</span>
           </label>
           <NumberField label="Check for changes every (minutes)" value={draft.pollMinutes} min={1} max={60} onChange={(n) => set({ pollMinutes: n })} />
           <NumberField label="Keep run history for (days)" value={draft.retentionDays} min={1} max={365} onChange={(n) => set({ retentionDays: n })} />

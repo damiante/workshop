@@ -4,6 +4,8 @@ export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' |
 
 export type Mode = 'paused' | 'scheduled' | 'always';
 
+export type TicketOrder = 'updated-asc' | 'updated-desc' | 'created-asc' | 'created-desc';
+
 export interface Settings {
   mode: Mode;
   timezone: string;
@@ -19,6 +21,8 @@ export interface Settings {
   pollMinutes: number;
   /** GitHub logins whose tickets Workshop acts on. */
   authors: string[];
+  /** Order of tickets within the same push, repo priority and step. */
+  ticketOrder: TicketOrder;
   retentionDays: number;
 }
 

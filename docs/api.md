@@ -23,6 +23,10 @@ export TOKEN=wks_…
 curl -X PUT $WORKSHOP/api/settings -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"mode":"paused"}'
 
+# Change the ticket order: updated-asc (default), updated-desc, created-asc or created-desc
+curl -X PUT $WORKSHOP/api/settings -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"ticketOrder":"updated-desc"}'
+
 # Read usage: Claude allowance, thresholds and today's API spend against the caps
 curl $WORKSHOP/api/usage -H "Authorization: Bearer $TOKEN"
 

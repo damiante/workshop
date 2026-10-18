@@ -42,6 +42,7 @@ export interface TicketRow {
   push: Push | null;
   push_stage: string | null;
   updated_at: string;
+  created_at: string | null;
 }
 
 export const MAX_ATTEMPTS = 2;

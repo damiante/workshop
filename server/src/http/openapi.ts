@@ -18,6 +18,7 @@ const schemas: Record<string, Schema> = {
   Error: object({ error: str }),
   Ok: object({ ok: bool }),
   Mode: enumOf('paused', 'scheduled', 'always'),
+  TicketOrder: enumOf('updated-asc', 'updated-desc', 'created-asc', 'created-desc'),
   Billing: enumOf('subscription', 'api'),
   Stage: enumOf('design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify'),
   Size: enumOf('xs', 's', 'm', 'l', 'xl'),
@@ -25,6 +26,7 @@ const schemas: Record<string, Schema> = {
   RunStatus: enumOf('starting', 'running', 'publishing', 'paused', 'succeeded', 'failed', 'cancelled', 'lost'),
   Settings: object({
     mode: ref('Mode'),
+    ticketOrder: ref('TicketOrder'),
     timezone: str,
     days: array(int),
     start: str,
