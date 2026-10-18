@@ -17,12 +17,12 @@ The first implementation (commit `8abbb84` on this branch) put Playwright and Ch
 1. **One Dockerfile, two stages.** `agent/Dockerfile` gets a `base` stage (today's content on `main`, unchanged) and a `browser` stage `FROM base`. The browser stage adds the Playwright install from `8abbb84` (pinned `PLAYWRIGHT_VERSION=1.64.1`, `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright` owned by `agent`, `NODE_PATH`), plus `LABEL workshop.capabilities="browser"`. Building `--target base` gives the old image byte for byte. Building `--target browser` gives the browser image. A separate `Dockerfile.browser` built `FROM` a published base tag would need the base pushed first and wouldn't work in the PR's build-only CI job. Stages share the build cache and need nothing extra.
    - The base stage carries no `workshop.capabilities` label, so it declares no capabilities.
 2. **Ship both images.** CI publishes `…/workshop-agent` (base) and `…/workshop-agent-browser`, both tagged `latest` and with the commit sha. The Workshop image pins both, through `WORKSHOP_AGENT_IMAGE` and a new `WORKSHOP_AGENT_BROWSER_IMAGE`. A host pulls the browser image only the first time it runs a browser ticket (`ensureImage` is already lazy).
-3. **Classifier output → ticket label.** `CLASSIFIER_SCHEMA` gets an optional `capabilities` array (enum `["browser"]`). When the Classifier accepts a ticket, `planClassifier` sets the `workshop/needs:browser` label to match the list: it adds the label when `browser` is listed and removes it when it isn't. Ticket state already lives in `workshop/*` labels, so this follows the existing pattern: no migration, the owner sees the label on GitHub and can add or remove it by hand, and a re-classify after requested changes updates it. In delta mode the Classifier lists capabilities for the whole ticket, not just the delta, so a re-classify doesn't drop a browser the ticket still needs.
+3. **Classifier output → ticket label.** `CLASSIFIER_SCHEMA` gets an optional `capabilities` array (enum `["browser"]`). When the Classifier accepts a ticket and lists `browser`, `planClassifier` adds the `workshop/needs:browser` label. **It never removes it.** The owner may have added the label by hand (the documented fix for a missed classification), and a later re-classify that leaves `browser` out must not silently undo that. A wrongly added label only costs a larger image pull, and the owner can remove it. Ticket state already lives in `workshop/*` labels, so this follows the existing pattern: no migration, and the owner sees the label on GitHub and can add or remove it by hand. In delta mode the Classifier lists capabilities for the whole ticket, not just the delta.
 4. **Allocation.** `context()` in `runner.ts` picks the image:
    - a repository with a custom image always uses that image (Workshop can't know what variants it has);
    - otherwise, `implement` runs on a ticket labelled `workshop/needs:browser` use `config.agentBrowserImage`;
    - everything else uses `config.agentImage`.
-   This is a pure function, so it gets unit tests. The image is recomputed whenever `context()` runs (including when Workshop re-attaches after a restart). That's harmless: `prepare` and `publish` behave the same in both images, and a `run` container that is re-attached is never re-created.
+   This is a pure function, so it gets unit tests. The image is recomputed whenever `context()` runs, including when Workshop re-attaches after a restart, so it can change mid-run if the label changed meanwhile. That's harmless for behaviour: `prepare` and `publish` work the same in both images, and a re-attached `run` container is never re-created. But today `ensureImage` runs only once, in `drive()` when the run starts. A `publish` container created after a restart could then name an image the host has never pulled, and `start` would fail. So `ensureImage` moves into `runContainer`, just before `env.start`. It's a cheap `inspect` when the image is already present.
 5. **Reporting stays label-based.** `imageLabels`, `capabilitiesOf` and `environmentText` from `8abbb84` stay. The no-browser text gets one extra sentence so agents on the base image know how a browser could be provided.
 
 ## Changes
@@ -63,7 +63,7 @@ Start from the current branch (`8abbb84`). First merge `origin/main` into it: it
 - `label.needs = (c: Capability) => \`workshop/needs:${c}\``.
 - `LABEL_DEFS`: `{ name: label.needs('browser'), color: '5c6b73', description: 'Workshop: Implementation gets a browser (Playwright) to test this' }`. Check that the description fits GitHub's 100-character limit.
 - `TicketState` gets `needs: Capability[]`, and `parseLabels` fills it.
-- `export function setNeeds(labels: string[], needs: Capability[])`: label edits in the same shape as `setSize` (adds missing labels, removes unlisted ones).
+- `export function addNeeds(labels: string[], needs: Capability[])`: label edits in the same shape as `setSize`, but add-only (`remove` is always empty). It adds `label.needs(c)` for each listed capability the ticket doesn't already have.
 - `export function imageFor(agent: AgentName, state: TicketState, images: { repo: string | null; base: string; browser: string }): string`: the rule in Approach 4.
 
 ### `server/src/workflow/schemas.ts`
@@ -72,14 +72,15 @@ Start from the current branch (`8abbb84`). First merge `origin/main` into it: it
 - `parseResult` (classifier): if present, `capabilities` must be an array of known values. Error: `capabilities must be a list of: browser.`
 
 ### `server/src/workflow/transitions.ts`
-- `planClassifier` accept branch: `combine(setSize(...), moveTo(...), setNeeds(ctx.labels, r.capabilities ?? []))`. When `browser` is listed, append to the comment, before "Next:": `Implementation will run with a browser (Playwright) to test it.`
+- `planClassifier` accept branch: `combine(setSize(...), moveTo(...), addNeeds(ctx.labels, r.capabilities ?? []))`. When `browser` is listed, append to the comment, before "Next:": `Implementation will run with a browser (Playwright) to test it.` If the ticket already has the label and `browser` isn't listed, leave the label and say nothing.
 
 ### `server/src/workflow/prompts.ts`
 - Classifier prompt, new step 7: `7. When accepting, list in capabilities what the Implementation agent needs to test the change: "browser" when it changes a web UI that should be checked in a browser or shown in a screenshot. Leave it empty otherwise, since the browser image is large. In delta mode, list what the whole ticket needs, not only the requested changes.`
-- `environmentText` no-browser branch, after the existing text: `Workshop gives Implementation runs a browser when the ticket has the \`workshop/needs:browser\` label.`
+- `environmentText` no-browser branch: replace the existing text. You have no GitHub access, so you can't add the label yourself. New text: `No browser is installed in this environment. If the task needs one (screenshots, browser tests), do the rest and say in your summary what you couldn't check. Workshop runs Implementation with a browser when the ticket has the \`workshop/needs:browser\` label, so suggest that the owner add it.`
 
 ### `server/src/scheduler/runner.ts`
 - `context()`: `image: imageFor(r.agent, parseLabels(labelsOf(ticket)), { repo: repo.image, base: config.agentImage, browser: config.agentBrowserImage })`.
+- `runContainer`: call `await ctx.env.ensureImage(ctx.image)` inside `if (!id)`, before `ctx.env.start(...)`. Remove the call from `drive()`. `createVolume` stays where it is.
 - The `imageLabels`/`environmentText` lines from `8abbb84` stay as they are.
 
 ### Docs
@@ -106,18 +107,20 @@ Run `npm run typecheck` and `npm test`.
 
 - `server/test/workflow.test.ts`:
   - `parseLabels` reads `needs: ['browser']` from `workshop/needs:browser`.
-  - `setNeeds`: adds the label for `['browser']`, removes it for `[]`, and makes no edit when the labels already match.
+  - `addNeeds`: adds the label for `['browser']`, makes no edit when the label is already there, and never removes it for `[]`.
   - `imageFor`: implement + browser → browser image; implement without browser → base; design (or classifier, merge) + browser → base; a repo image wins in every case.
   - `parseResult('classifier', …)`: accepts `capabilities: ['browser']` and a missing field; rejects `['gpu']` and `'browser'` (not an array).
-  - `planTransition` classifier accept: with `capabilities: ['browser']` it adds `workshop/needs:browser` and the comment mentions the browser. In delta mode with `capabilities: []` on a ticket that has the label, it removes the label.
+  - `planTransition` classifier accept: with `capabilities: ['browser']` it adds `workshop/needs:browser` and the comment mentions the browser. In delta mode with `capabilities: []` on a ticket that has the label (for example one the owner added), it keeps the label.
   - `environmentText([])` mentions `workshop/needs:browser`. The existing capability tests stay.
 - `server/test/pipeline.test.ts`: the started spec's `image` is `config.agentBrowserImage` for an implement run on a ticket labelled `workshop/needs:browser`, and `config.agentImage` without the label. Ticket 1 is already set to `implement`. The existing environment-capability tests stay.
+  - Restart re-attach: a run whose `publish` step container is created after the ticket gained `workshop/needs:browser` calls `ensureImage` with the image it then starts. (Assert that every `start` spec's image was passed to `ensureImage` first.)
 - Images: the `agent-image` CI job checks both targets on every push and PR. The Implementation agent's container has no Docker or Podman, so it should say in its summary that it relied on CI for this.
 
 ## Risks and open questions
 
 - **Custom repo images** don't switch: a repository with its own image uses it for every run, so it needs a browser built in if its tickets need one. The README says so, and agents are told when no browser is present.
-- **Wrong classification.** If the Classifier misses `browser`, the Implementation agent says it couldn't take a screenshot. The owner then adds `workshop/needs:browser` and requests changes. The opposite mistake only costs a larger image pull.
+- **Wrong classification.** If the Classifier misses `browser`, the Implementation agent says it couldn't take a screenshot and suggests the label. The owner then adds `workshop/needs:browser` and requests changes, and a re-classify won't remove it. The opposite mistake only costs a larger image pull. The owner can remove the label, and Workshop won't add it back unless a later classification lists `browser` again.
+- **Repositories enrolled before this change** don't have the `workshop/needs:browser` label defined, because `ensureLabels` runs only on enrolment or enabling. GitHub creates a missing label when it's first added to an issue, so nothing breaks, but the label gets GitHub's default colour and no description until the repository is disabled and enabled again.
 - **Tickets already past classification** (including this one) have no `workshop/needs:browser` label, so their Implementation runs use the base image until the owner adds the label. No backfill.
 - **Debian trixie and `playwright install --with-deps`**: CI hasn't run on this branch yet, because the earlier pushes failed. If 1.64.1 rejects trixie, the `agent-image` job fails before merge. The fallback is to install Chromium's libraries with `apt-get` (Playwright's Debian 12 list, mapped to trixie's `t64` package names) and then run `playwright install --only-shell chromium` without `--with-deps`. Note in the Dockerfile which path was taken.
 - **Disk:** hosts that run browser tickets keep both images, which share the base layers, so the browser image adds roughly 300–400 MB.
@@ -138,3 +141,15 @@ Design review of the first (single-image) version. Rows 7–9 and "one image for
 | 7 | Detect by probing inside the container instead of a label. | Not adopted: untestable without building the image, and gives allocation nothing to match on. | No |
 | 8 | Gap against the ticket: no Classifier or allocation change. | Superseded: now implemented per the owner's review. | Superseded |
 | 9 | `ensureImage` never re-pulls an existing tag. | No change: releases pin images by commit sha. | No |
+
+### Review of the two-image revision
+
+| # | Criticism | Fix | Adopted |
+|---|-----------|-----|---------|
+| 10 | Data loss of an owner decision: `setNeeds` removes `workshop/needs:browser` whenever an accept doesn't list `browser`. The design's own remedy for a missed classification is for the owner to add the label and request changes. The re-classify that follows can then silently strip it, and Implementation runs without a browser again. | Add-only `addNeeds`. The Classifier only ever adds the label, and removing it is the owner's call. Test: delta accept with `[]` keeps the label. | Yes |
+| 11 | Wrong assumption about re-attach. "Recomputing the image is harmless" misses that `ensureImage` runs only once, at run start in `drive()`. If the label changes during a run and Workshop restarts, the `publish` (or repeated `prepare`) container is created from the browser image, which may never have been pulled, and the run fails. | Move `ensureImage` into `runContainer` just before `start`, so every container's image is present. Pipeline test asserts each started image was ensured first. | Yes |
+| 12 | The no-browser text tells agents that the label gets them a browser, but agents have no GitHub access and can't add it. | Text now tells the agent to suggest in its summary that the owner add the label. | Yes |
+| 13 | Repositories enrolled before this change lack the label definition (`ensureLabels` runs only on enable). | Documented as a risk: GitHub creates the label when it's first added, just without the colour and description. Calling `ensureLabels` on every sync costs an API call per repository per cycle for a cosmetic gain. | Partly (documented only) |
+| 14 | Pin the image per run in the `runs` table instead of recomputing it, so a run can't switch images mid-way. | Not adopted: it needs a migration. After #11, a mid-run switch only affects `prepare`/`publish`, which behave identically in both images. | No |
+| 15 | The name `workshop/needs:browser` is close to `workshop/needs-info` and could be confused. | Not adopted: nothing matches labels by prefix (checked `labels.ts`, `gates.ts`, the client), and "needs" reads naturally on GitHub. | No |
+| 16 | Show and toggle the capability in Workshop's ticket UI (`TicketStatePatch`). | Not adopted: the GitHub label already does this, and the ticket view shows labels. A UI toggle can be a follow-up. | No |
