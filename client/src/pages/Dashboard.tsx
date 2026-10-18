@@ -160,7 +160,9 @@ export function Dashboard() {
             {data.alerts.slice(0, 5).map((a) => (
               <li key={a.id} className="spread">
                 <Status tone={a.level === 'error' ? 'error' : a.level === 'warning' ? 'attention' : 'idle'}>{a.message}</Status>
-                <span className="small muted">{clock(a.createdAt)}</span>
+                <span className="small muted">
+                  {a.runId && <Link to={`/runs/${a.runId}`}>View run</Link>} {clock(a.createdAt)}
+                </span>
               </li>
             ))}
           </ul>

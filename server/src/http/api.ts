@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
 import { allowanceViews, apiSpendSince } from '../allowance.ts';
 import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, Overview, Settings, TicketStatePatch, Usage } from '../api-types.ts';
-import { all, run } from '../db.ts';
+import { all, one, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
 import { getRun, logBus, readLog, runView, runViews } from '../runs.ts';
@@ -23,7 +23,15 @@ function alertViews(where: string, limit: number): AlertView[] {
   return all<{ id: number; level: AlertView['level']; kind: string; message: string; ref: string | null; created_at: number; ack_at: number | null }>(
     `SELECT * FROM alerts WHERE ${where} ORDER BY created_at DESC LIMIT ?`,
     limit,
-  ).map((a) => ({ id: a.id, level: a.level, kind: a.kind, message: a.message, ref: a.ref, createdAt: a.created_at, ackAt: a.ack_at }));
+  ).map((a) => ({ id: a.id, level: a.level, kind: a.kind, message: a.message, ref: a.ref, runId: alertRunId(a.ref), createdAt: a.created_at, ackAt: a.ack_at }));
+}
+
+/** The run an alert is about: a `run:` ref names it directly; a `ticket:` ref points at that ticket's latest run. */
+function alertRunId(ref: string | null): string | null {
+  const [type, id] = (ref ?? '').split(':');
+  if (type === 'run') return one<{ id: string }>('SELECT id FROM runs WHERE id = ?', id)?.id ?? null;
+  if (type === 'ticket') return one<{ id: string }>('SELECT id FROM runs WHERE ticket_id = ? ORDER BY started_at DESC LIMIT 1', Number(id))?.id ?? null;
+  return null;
 }
 
 function validTimeZone(tz: unknown) {

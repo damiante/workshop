@@ -226,6 +226,8 @@ export interface AlertView {
   kind: string;
   message: string;
   ref: string | null;
+  /** The run to open for more detail, when the alert is about a run or a ticket that has run. */
+  runId: string | null;
   createdAt: number;
   ackAt: number | null;
 }
