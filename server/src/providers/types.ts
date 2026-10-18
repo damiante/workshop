@@ -52,7 +52,8 @@ export interface TicketSource {
   comments(repo: RepoRef, number: number): Promise<TicketComment[]>;
   setLabels(repo: RepoRef, number: number, add: string[], remove: string[]): Promise<void>;
   comment(repo: RepoRef, number: number, body: string): Promise<void>;
-  close(repo: RepoRef, number: number): Promise<void>;
+  /** Defaults to completed. */
+  close(repo: RepoRef, number: number, reason?: 'completed' | 'not_planned'): Promise<void>;
   ensureLabels(repo: RepoRef, labels: LabelDef[]): Promise<void>;
   /** The tickets this one is blocked by, open and closed. */
   blockers(repo: RepoRef, number: number): Promise<TicketLink[]>;
@@ -98,6 +99,9 @@ export interface VcsHost {
   openPullRequest(repo: RepoRef, p: { branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   updatePullRequest(repo: RepoRef, number: number, body: string): Promise<void>;
   commentOnPullRequest(repo: RepoRef, number: number, body: string): Promise<void>;
+  closePullRequest(repo: RepoRef, number: number): Promise<void>;
+  /** Missing branches are ignored. */
+  deleteBranch(repo: RepoRef, branch: string): Promise<void>;
   pullRequestState(repo: RepoRef, number: number, reviewers: string[]): Promise<PullRequestState>;
   reviewFeedback(repo: RepoRef, number: number, reviewers: string[]): Promise<ReviewFeedback[]>;
   requestReview(repo: RepoRef, number: number, login: string): Promise<void>;
@@ -143,6 +147,8 @@ export interface Environment {
   ping(): Promise<void>;
   describe(): Promise<HostSpecs>;
   ensureImage(image: string): Promise<void>;
+  /** An image's labels; empty when the image isn't on the host. */
+  imageLabels(image: string): Promise<Record<string, string>>;
   createVolume(name: string, labels: Record<string, string>): Promise<void>;
   removeVolume(name: string): Promise<void>;
   /** Creates and starts a container; returns its id. */

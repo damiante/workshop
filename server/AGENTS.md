@@ -12,11 +12,12 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/crypto.ts` | AES-256-GCM `seal`/`unseal` for stored secrets, TOTP, constant-time compare |
 | `src/settings.ts` | Operating settings (one JSON row) plus a key/value store |
 | `src/api-types.ts` | Types shared with the client. **No runtime imports.** |
-| `src/events.ts` | Topic bus plus SSE helper. `publish('runs')` makes browsers refetch run views |
+| `src/events.ts` | Topic bus plus SSE helper. `publish('runs')` makes browsers refetch run views. SSE streams send a visible `ping` event every 15 s |
 | `src/alerts.ts` | `raiseAlert` (de-duplicated by kind and ref) and `clearAlert` |
 | `src/agents.ts` | Agent-class settings, defaults, suggested models |
 | `src/tickets.ts` | Ticket and repo rows, views, `editLabels` (remote first, then local mirror) |
 | `src/runs.ts` | Run rows and views, run log files (`DATA_DIR/runs/<id>.jsonl`), live activity |
+| `src/spend.ts` | Lifetime spend ledger: one row per claude invocation, kept past run cleanup |
 | `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
 | `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |
@@ -43,6 +44,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 
 ## Invariants: don't break these
 
+- **Every state change a view shows must `publish` its topic.** Clock-driven state goes through `clockTopics` in the scheduler tick.
 - **No git credentials in the `run` container.** Tokens go only to `prepare` (read) and `publish` (write), through env vars, never onto the volume. `pipeline.test.ts` checks this.
 - **Secrets never reach the browser.** `toView()` masks them. Edits with an empty secret field keep the stored value.
 - **Exactly one Claude credential per container** (`launchEnv`): with both set, Claude Code would bill the API key.
@@ -74,13 +76,15 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - Podman returns 409 when a volume already exists, where Docker reuses it; `createVolume` ignores 409.
 - SSH hosts run `docker system dial-stdio` remotely (docker-modem), so they need the `docker` CLI. The host key is pinned on first connect (`config.hostKey`).
 - Prompt files reach a created container through `putArchive`, with a small tar writer in `providers/docker/tar.ts`. Names must be under 100 bytes.
+- `imageFor` (in `workflow/labels.ts`) picks the image per run: a repository's own image, else the browser image for Implementation on `workshop/needs:browser` tickets, else the base image.
+- Image capabilities come from the `workshop.capabilities` label (`imageLabels`), read per run and described to the agent in `system.md`.
 
 ## Trying the agent image locally
 
 The git steps need no GitHub: a bare repository on the volume can stand in as the remote.
 
 ```sh
-podman build -t workshop-agent:dev agent
+podman build --target base -t workshop-agent:dev agent
 podman volume create wtest
 podman run --rm -v wtest:/work --entrypoint bash workshop-agent:dev -c \
   'git init -q --bare -b main /work/remote.git && git clone -q /work/remote.git /tmp/s && cd /tmp/s &&

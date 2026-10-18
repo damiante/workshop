@@ -1,10 +1,14 @@
+import type { AddressInfo } from 'node:net';
 import request from 'supertest';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { seedAgents } from '../src/agents.ts';
 import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
 import { initDb, one, run } from '../src/db.ts';
 import { createConnection } from '../src/providers/index.ts';
+import { publish } from '../src/events.ts';
+import { appendLog } from '../src/runs.ts';
+import { saveSettings } from '../src/settings.ts';
 import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
 
@@ -126,6 +130,7 @@ describe('API tokens', () => {
     expect(put.status).toBe(403);
     expect(put.body.error).toBe('This API token is read-only.');
     expect((await request(app).get('/api/usage').set('authorization', `Bearer ${read}`)).status).toBe(200);
+    expect((await request(app).get('/api/usage/lifetime').set('authorization', `Bearer ${read}`)).status).toBe(200);
   });
 
   it('answers an unknown token with JSON 401, not a redirect', async () => {
@@ -151,6 +156,41 @@ describe('API tokens', () => {
     expect((await request(app).delete(`/api/tokens/${writeId}`).set('cookie', cookie)).status).toBe(200);
     expect((await request(app).get('/api/overview').set('authorization', `Bearer ${write}`)).status).toBe(401);
     expect((await request(app).delete(`/api/tokens/${writeId}`).set('cookie', cookie)).status).toBe(404);
+  });
+});
+
+describe('lifetime usage', () => {
+  const ins = (run_id: string, ts: string, model: string, billing: string, i: number, o: number, c: number) =>
+    run('INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)', run_id, Date.parse(ts), model, billing, i, o, c);
+
+  it('is empty before anything is recorded', async () => {
+    const res = await request(app).get('/api/usage/lifetime').set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.since).toBeNull();
+    expect(res.body.total).toEqual({ runs: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
+    expect(res.body.byModel).toEqual([]);
+  });
+
+  it('totals by billing, model and month in the settings time zone', async () => {
+    run('DELETE FROM spend');
+    saveSettings({ timezone: 'Australia/Sydney' });
+    ins('a', '2026-09-30T20:00:00Z', 'opus', 'subscription', 100, 10, 1); // 1 Oct in Sydney
+    ins('a', '2026-10-02T00:00:00Z', 'opus', 'subscription', 50, 5, 0.5); // same run, resumed
+    ins('b', '2026-10-03T00:00:00Z', 'sonnet', 'api', 20, 2, 0.25);
+    ins('c', '2026-08-15T00:00:00Z', 'sonnet', 'subscription', 10, 1, 0.1);
+    const res = await request(app).get('/api/usage/lifetime').set('cookie', cookie);
+    const b = res.body;
+    expect(b.since).toBe(Date.parse('2026-08-15T00:00:00Z'));
+    expect(b.total).toMatchObject({ runs: 3, inputTokens: 180, outputTokens: 18 });
+    expect(b.total.costUsd).toBeCloseTo(1.85);
+    expect(b.subscription).toMatchObject({ runs: 2, inputTokens: 160 });
+    expect(b.api).toMatchObject({ runs: 1, inputTokens: 20, costUsd: 0.25 });
+    expect(b.byModel.map((m: { model: string }) => m.model)).toEqual(['opus', 'sonnet']);
+    expect(b.byModel[0]).toMatchObject({ runs: 1, inputTokens: 150 });
+    expect(b.byMonth.map((m: { month: string }) => m.month)).toEqual(['2026-10', '2026-08']);
+    expect(b.byMonth[0]).toMatchObject({ runs: 2, inputTokens: 170 });
+    run('DELETE FROM spend');
+    saveSettings({ timezone: 'UTC' });
   });
 });
 
@@ -219,6 +259,7 @@ describe('OpenAPI', () => {
     ['/overview', 'Overview'],
     ['/settings', 'Settings'],
     ['/usage', 'Usage'],
+    ['/usage/lifetime', 'LifetimeSpend'],
   ])('%s matches its schema fields', async (path, name) => {
     const res = await request(app).get(`/api${path}`).set('cookie', cookie);
     const props = Object.keys((OPENAPI.components.schemas[name] as { properties: object }).properties);
@@ -381,5 +422,102 @@ describe('nominating tickets', () => {
     const refused = await request(app).post(`/api/tickets/${id}/push`).set('cookie', cookie).send({ scope: 'stage' });
     expect(refused.status).toBe(409);
     expect(refused.body.error).toMatch(/Nominate this ticket first/);
+  });
+});
+
+describe('live streams', () => {
+  let base = '';
+  let server: ReturnType<typeof app.listen>;
+  let ticket = 0;
+  beforeAll(async () => {
+    server = app.listen(0);
+    await new Promise((r) => server.once('listening', r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
+    const conn = createConnection('vcs', 'github', 'live', { appId: '1' }, {});
+    const repo = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (?, 'me/live', 'main', 'u', 1)", conn).lastInsertRowid);
+    ticket = Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 1, 't', '', 'u', 'Damiante', 'open', '[]', '2026-10-13T00:00:00Z')", repo).lastInsertRowid);
+  });
+  afterAll(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+
+  const addRun = (id: string, status: string, lines: number) => {
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, 'design', 1, 'm', 'subscription', ?, 0)", id, ticket, status);
+    for (let i = 0; i < lines; i++) appendLog(id, { step: 'run', stream: 'stdout', text: `line ${i}` });
+  };
+  const open = async (path: string) => {
+    const ctl = new AbortController();
+    const res = await fetch(base + path, { headers: { cookie }, signal: ctl.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let pending: ReturnType<typeof reader.read> | undefined;
+    return {
+      res,
+      abort: () => ctl.abort(),
+      /** Reads until the stream ends or `until` matches; returns what was read. */
+      async read(until?: RegExp) {
+        let text = '';
+        for (;;) {
+          pending ??= reader.read(); // a read that timed out is kept, so it doesn't swallow the next chunk
+          const part = await Promise.race([pending, new Promise<null>((r) => setTimeout(() => r(null), 300))]);
+          if (!part) return { text, ended: false };
+          pending = undefined;
+          if (part.done) return { text, ended: true };
+          text += decoder.decode(part.value);
+          if (until?.test(text)) return { text, ended: false };
+        }
+      },
+    };
+  };
+
+  it('forbids caching API responses', async () => {
+    expect((await request(app).get('/api/overview').set('cookie', cookie)).headers['cache-control']).toBe('no-store');
+  });
+
+  it('sends a visible ping when the event stream opens', async () => {
+    const s = await open('/events');
+    expect(s.res.headers.get('content-type')).toBe('text/event-stream');
+    expect(s.res.headers.get('cache-control')).toContain('no-transform');
+    expect((await s.read(/event: ping/)).text).toContain('event: ping\ndata: {}');
+    publish('runs');
+    expect((await s.read(/"runs"/)).text).toContain('data: {"topic":"runs"}');
+    s.abort();
+  });
+
+  it('replays a finished run log, then ends the stream', async () => {
+    addRun('live-done', 'succeeded', 2);
+    const s = await open('/runs/live-done/log');
+    const { text, ended } = await s.read();
+    expect(text).toContain('line 0');
+    expect(text).toContain('line 1');
+    expect(text.trimEnd().endsWith('data: {}')).toBe(true);
+    expect(text).toContain('event: end');
+    expect(ended).toBe(true);
+  });
+
+  it('resumes from ?after= and Last-Event-ID', async () => {
+    const a = await (await open('/runs/live-done/log?after=0')).read();
+    expect(a.text).not.toContain('line 0');
+    expect(a.text).toContain('line 1');
+    const ctl = await fetch(`${base}/runs/live-done/log?after=0`, { headers: { cookie, 'last-event-id': '1' } });
+    expect(await ctl.text()).not.toContain('line 1');
+    const junk = await (await open('/runs/live-done/log?after=abc')).read();
+    expect(junk.text).toContain('line 0');
+  });
+
+  it('keeps an active run log open, then ends it when the run finishes', async () => {
+    addRun('live-active', 'running', 1);
+    const s = await open('/runs/live-active/log');
+    const first = await s.read();
+    expect(first.text).toContain('line 0');
+    expect(first.ended).toBe(false);
+    appendLog('live-active', { step: 'run', stream: 'stdout', text: 'tail' });
+    run("UPDATE runs SET status = 'succeeded' WHERE id = 'live-active'");
+    publish('runs');
+    const rest = await s.read();
+    expect(rest.text).toContain('tail');
+    expect(rest.text).toContain('event: end');
+    expect(rest.ended).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import type { AgentName, Size } from '../api-types.ts';
-import { SIZES } from './labels.ts';
+import { CAPABILITIES, SIZES, type Capability } from './labels.ts';
 
 export interface ClassifierResult {
   decision: 'accept' | 'reject' | 'needs_info' | 'blocked';
@@ -7,6 +7,7 @@ export interface ClassifierResult {
   reason: string;
   questions?: string[];
   blocked_by?: number[];
+  capabilities?: Capability[];
 }
 
 export interface WorkResult {
@@ -27,6 +28,7 @@ const CLASSIFIER_SCHEMA = {
     size: { type: 'string', enum: SIZES, description: 'Required when decision is accept.' },
     reason: { type: 'string', description: 'One or two sentences explaining the decision and size.' },
     questions,
+    capabilities: { type: 'array', items: { type: 'string', enum: CAPABILITIES }, description: "What the Implementation agent's container needs to test the change (accept only): browser for a web UI change that needs a screenshot or a browser test. Empty when nothing extra is needed." },
     blocked_by: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'Numbers of the open tickets listed in the task that must be finished first (blocked only).' },
   },
   required: ['decision', 'reason'],
@@ -62,6 +64,7 @@ export function parseResult(agent: AgentName, value: unknown): AgentResult | str
       const b = v.blocked_by;
       if (!Array.isArray(b) || !b.length || !b.every((n) => Number.isInteger(n) && n > 0)) return 'blocked requires blocked_by: the numbers of the tickets this one waits for.';
     }
+    if (v.capabilities !== undefined && !(Array.isArray(v.capabilities) && v.capabilities.every((c) => CAPABILITIES.includes(c as Capability)))) return `capabilities must be a list of: ${CAPABILITIES.join(', ')}.`;
     if (typeof v.reason !== 'string') return 'reason is required.';
     if (v.decision === 'accept' && !SIZES.includes(v.size as Size)) return 'size (xs–xl) is required to accept a ticket.';
     return v as unknown as ClassifierResult;

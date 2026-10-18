@@ -53,6 +53,15 @@ const schemas: Record<string, Schema> = {
     apiRunCapUsd: num,
     apiDailyCapUsd: num,
   }),
+  SpendTotals: object({ runs: int, inputTokens: int, outputTokens: int, costUsd: num }),
+  LifetimeSpend: object({
+    since: nullable(int),
+    total: ref('SpendTotals'),
+    subscription: ref('SpendTotals'),
+    api: ref('SpendTotals'),
+    byModel: array({ allOf: [ref('SpendTotals'), object({ model: str })] }),
+    byMonth: array({ allOf: [ref('SpendTotals'), object({ month: str })] }),
+  }),
   RunView: object({
     id: str,
     ticketId: int,
@@ -197,6 +206,7 @@ function operation(method: string, op: Op) {
 const paths: Record<string, Record<string, Op>> = {
   '/overview': { get: { summary: 'Status: mode, running agents, queue, hosts, allowance and open alerts.', ok: ref('Overview') } },
   '/usage': { get: { summary: 'Claude allowance per connection, the thresholds, and today\'s API spend against the caps.', ok: ref('Usage') } },
+  '/usage/lifetime': { get: { summary: "Lifetime token use and token-equivalent cost of Workshop's agent runs, by billing, model and month.", ok: ref('LifetimeSpend') } },
   '/openapi.json': { get: { summary: 'This document.', ok: { type: 'object' } } },
   '/settings': {
     get: { summary: 'Operating settings.', ok: ref('Settings') },
@@ -260,7 +270,7 @@ const paths: Record<string, Record<string, Op>> = {
   '/runs/{id}/stop': { post: { summary: 'Stops a run.', params: ['id'], ok: ref('RunView'), errors: [403, 404] } },
   '/runs/{id}/log': {
     get: {
-      summary: 'The run log as server-sent events: everything so far, then live lines. Each event is a LogEntry; the event id is the line index (send Last-Event-ID to resume).',
+      summary: 'The run log as server-sent events: everything so far, then live lines. Each event is a LogEntry; the event id is the line index (send Last-Event-ID or ?after=<index> to resume). Once the run is no longer active the stream sends an `end` event and closes.',
       params: ['id'],
       stream: 'A stream of LogEntry JSON objects.',
       errors: [404],
@@ -269,7 +279,7 @@ const paths: Record<string, Record<string, Op>> = {
   '/alerts': { get: { summary: 'Recent alerts.', ok: array(ref('AlertView')) } },
   '/alerts/{id}/ack': { post: { summary: 'Acknowledges an alert.', params: ['id'], errors: [403] } },
   '/alerts/ack-all': { post: { summary: 'Acknowledges every open alert.', errors: [403] } },
-  '/events': { get: { summary: 'Server-sent events naming the topics whose data changed ({"topic":"runs"}).', stream: 'A stream of {"topic": string} objects.' } },
+  '/events': { get: { summary: 'Server-sent events naming the topics whose data changed ({"topic":"runs"}), plus a `ping` event when it opens and every 15 seconds.', stream: 'A stream of {"topic": string} objects.' } },
 };
 
 export const OPENAPI = {

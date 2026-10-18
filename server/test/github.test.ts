@@ -80,3 +80,36 @@ describe('GitHub ensureLabels', () => {
     expect(request).toHaveBeenCalledOnce();
   });
 });
+
+describe('GitHub git access', () => {
+  function gh(grantsWorkflows: boolean) {
+    const app = new GitHubApp({ appId: 1, slug: 'workshop', owner: 'me', htmlUrl: '', installations: [1] }, { privateKey: 'unused' });
+    const request = vi.fn(async (_route: string, params: { permissions: Record<string, string> }) => {
+      if (params.permissions.workflows && !grantsWorkflows) throw Object.assign(new Error('The permissions requested are not granted to this installation.'), { status: 422 });
+      return { data: { token: 't' } };
+    });
+    const priv = app as unknown as { app: { octokit: { request: typeof request } }; installationFor: () => unknown; commitIdentity: () => unknown };
+    priv.app = { octokit: { request } };
+    vi.spyOn(priv, 'installationFor').mockResolvedValue(1);
+    vi.spyOn(priv, 'commitIdentity').mockResolvedValue({ name: 'workshop[bot]', email: 'x' });
+    return { app, perms: () => request.mock.calls.map(([, p]) => p.permissions) };
+  }
+
+  it('asks for workflows when pushing, so agents can change CI files', async () => {
+    const { app, perms } = gh(true);
+    await app.gitAccess(repo, true);
+    expect(perms()).toEqual([{ contents: 'write', workflows: 'write' }]);
+  });
+
+  it("still pushes when the installation hasn't accepted workflows", async () => {
+    const { app, perms } = gh(false);
+    await expect(app.gitAccess(repo, true)).resolves.toMatchObject({ url: expect.stringContaining('x-access-token:t@') });
+    expect(perms()).toEqual([{ contents: 'write', workflows: 'write' }, { contents: 'write' }]);
+  });
+
+  it('reads with contents only', async () => {
+    const { app, perms } = gh(true);
+    await app.gitAccess(repo, false);
+    expect(perms()).toEqual([{ contents: 'read' }]);
+  });
+});

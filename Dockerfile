@@ -28,15 +28,17 @@ RUN npm ci --omit=dev --workspace server --no-audit --no-fund && npm cache clean
 COPY server/src server/src
 COPY --from=build /app/client/dist client/dist
 
-# Set by CI: the app version shown in the UI, and the agent image built from the
+# Set by CI: the app version shown in the UI, and the agent images built from the
 # same commit, so the server and the agent containers always speak the same protocol.
 ARG APP_VERSION=dev
 ARG AGENT_IMAGE=ghcr.io/damiante/workshop-agent:latest
+ARG AGENT_BROWSER_IMAGE=ghcr.io/damiante/workshop-agent-browser:latest
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     PORT=3000 \
     APP_VERSION=$APP_VERSION \
-    WORKSHOP_AGENT_IMAGE=$AGENT_IMAGE
+    WORKSHOP_AGENT_IMAGE=$AGENT_IMAGE \
+    WORKSHOP_AGENT_BROWSER_IMAGE=$AGENT_BROWSER_IMAGE
 
 # Database and run logs live in /data: mount a volume there.
 RUN mkdir -p /data && chown node:node /data

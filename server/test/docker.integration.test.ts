@@ -11,6 +11,12 @@ describe.skipIf(!socketPath)('DockerEnvironment against a real engine', () => {
   const volume = `workshop-test-${Date.now()}`;
   afterAll(() => env.removeVolume(volume)); // also when the test fails
 
+  it('reads image labels, and returns none for an image the host lacks', async () => {
+    await env.ensureImage(IMAGE);
+    expect(typeof (await env.imageLabels(IMAGE))).toBe('object');
+    expect(await env.imageLabels('workshop-test/missing:none')).toEqual({});
+  });
+
   it('writes files into a volume, streams both outputs (long lines intact), and re-attaches by skipping lines', async () => {
     await env.ensureImage(IMAGE);
     await env.createVolume(volume, { 'workshop.test': '1' });

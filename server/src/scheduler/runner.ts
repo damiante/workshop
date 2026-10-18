@@ -12,6 +12,7 @@ import { environmentOf, getConnection, modelsOf } from '../providers/index.ts';
 import type { ContainerState, Environment, StepSpec } from '../providers/types.ts';
 import { ACTIVE_STATUSES, activity, appendLog, getRun, linesFrom, readLog, type RunRow } from '../runs.ts';
 import { getSettings } from '../settings.ts';
+import { recordSpend } from '../spend.ts';
 import {
   branchOf,
   docPathOf,
@@ -30,8 +31,8 @@ import {
   type RepoRow,
   type TicketRow,
 } from '../tickets.ts';
-import { label, parseLabels } from '../workflow/labels.ts';
-import { AGENT_INFO, protocolText, taskPrompt } from '../workflow/prompts.ts';
+import { imageFor, label, parseLabels } from '../workflow/labels.ts';
+import { AGENT_INFO, capabilitiesOf, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
 import { joinRefs } from './gates.ts';
@@ -45,6 +46,7 @@ type StepName = 'prepare' | 'run' | 'publish';
 
 class HostUnreachable extends Error {}
 
+const USAGE_RECORD_MS = 30_000;
 const driving = new Set<string>();
 export const isDriving = (id: string) => driving.has(id);
 
@@ -82,7 +84,7 @@ function context(r: RunRow): Ctx {
     repo,
     env: environmentOf(conn),
     host: { name: conn.name, cfg: conn.config as unknown as DockerConfig },
-    image: repo.image || config.agentImage,
+    image: imageFor(r.agent, parseLabels(labelsOf(ticket)), { repo: repo.image || null, base: config.agentImage, browser: config.agentBrowserImage }),
     labels: { 'workshop.instance': config.instance, 'workshop.run': r.id, 'workshop.ticket': `${repo.full_name}#${ticket.number}`, 'workshop.agent': r.agent },
   };
 }
@@ -104,6 +106,7 @@ async function runContainer(
   if (!id) {
     const spec = await makeSpec();
     const memoryGb = ctx.host.cfg.memoryGb;
+    await ctx.env.ensureImage(ctx.image);
     id = await ctx.env.start({
       ...spec,
       image: ctx.image,
@@ -189,7 +192,8 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
             t.id,
           ).filter((o) => isAllowedAuthor(o.author))
         : undefined;
-    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}`;
+    const caps = capabilitiesOf(await ctx.env.imageLabels(ctx.image).catch(() => ({})));
+    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}\n\n${environmentText(caps)}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
       mode: r.mode,
@@ -248,32 +252,62 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   const name = AGENT_INFO[r.agent].label;
   const claude: ClaudeRun = {};
   let lastPublished = 0;
-  const state = await runContainer(
+  let recorded = '';
+  let recordedAt = 0;
+  const recordUsage = () => {
+    if (!claude.usage || r.billing !== 'subscription' || !r.model_connection_id) return;
+    const reading = JSON.stringify(claude.usage);
+    if (reading === recorded) return;
+    recorded = reading;
+    recordedAt = Date.now();
+    recordProbe(r.model_connection_id, claude.usage.fiveHour, claude.usage.sevenDay);
+  };
+  let trailing: NodeJS.Timeout | undefined;
+  const running = runContainer(
     ctx,
     'run',
     () => runSpec(ctx, agent),
     (text) => {
       const before = claude.activity;
-      const hadUsage = Boolean(claude.usage);
+      const hadResult = !!claude.result;
       readClaudeLine(claude, text);
-      // Every run reports current subscription usage: a free, fresh reading for the allowance gate.
-      if (!hadUsage && claude.usage && r.billing === 'subscription' && r.model_connection_id) {
-        recordProbe(r.model_connection_id, claude.usage.fiveHour, claude.usage.sevenDay);
-      }
-      if (claude.activity && claude.activity !== before) {
+      // Every run reports current subscription usage: a free, fresh reading for the allowance gate and
+      // the usage bars. Recorded whenever it changes, at most every 30 seconds.
+      if (Date.now() - recordedAt >= USAGE_RECORD_MS) recordUsage();
+      if (claude.result && !hadResult) {
+        // Say what the log says, the moment it says it: the container may take a while to exit.
+        activity.set(r.id, claude.result.isError ? 'The agent stopped with an error.' : 'The agent finished.');
+        clearTimeout(trailing);
+        trailing = undefined;
+        lastPublished = Date.now();
+        publish('runs');
+      } else if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
-        if (Date.now() - lastPublished > 3000) {
+        // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
+        const wait = lastPublished + 3000 - Date.now();
+        if (wait <= 0) {
           lastPublished = Date.now();
           publish('runs');
+        } else if (!trailing) {
+          trailing = setTimeout(() => {
+            trailing = undefined;
+            lastPublished = Date.now();
+            publish('runs');
+          }, wait);
         }
       }
     },
     agent.timeout_min * 60_000,
   );
+  // Record what the run reported even if the container failed.
+  const state = await running.finally(recordUsage);
+  clearTimeout(trailing);
   activity.delete(r.id);
+  publish('runs');
   if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
   const res = claude.result;
-  setRun(r.id, { exit_code: state.exitCode, input_tokens: res?.inputTokens ?? null, output_tokens: res?.outputTokens ?? null, cost_usd: res?.costUsd ?? null });
+  setRun(r.id, { exit_code: state.exitCode });
+  if (res) recordSpend(r, res);
 
   if (claude.limit && r.model_connection_id) recordLimit(r.model_connection_id, claude.limit.resetsAt ?? Date.now() + 3600_000);
   if (state.oomKilled) {
@@ -400,7 +434,6 @@ export async function drive(runId: string) {
     if (r.status === 'starting') {
       await markRunning(ctx.ticket, true);
       if (!r.container_id) {
-        await ctx.env.ensureImage(ctx.image);
         await ctx.env.createVolume(r.volume!, ctx.labels);
       }
       const state = await runContainer(ctx, 'prepare', () => prepareSpec(ctx));

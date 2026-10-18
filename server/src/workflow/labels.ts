@@ -4,7 +4,11 @@ import type { LabelDef } from '../providers/types.ts';
 export const SIZES: Size[] = ['xs', 's', 'm', 'l', 'xl'];
 export const STAGES: Stage[] = ['design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify'];
 
+export const CAPABILITIES = ['browser'] as const;
+export type Capability = (typeof CAPABILITIES)[number];
+
 export const label = {
+  needs: (c: Capability) => `workshop/needs:${c}`,
   size: (size: Size) => `workshop/size:${size}`,
   stage: (stage: Stage) => `workshop/stage:${stage}`,
   needsInfo: 'workshop/needs-info',
@@ -26,6 +30,7 @@ const STAGE_TEXT: Record<Stage, string> = {
 export const LABEL_DEFS: LabelDef[] = [
   ...SIZES.map((size) => ({ name: label.size(size), color: '8d7b68', description: `Workshop: size ${size.toUpperCase()}` })),
   ...STAGES.map((stage) => ({ name: label.stage(stage), color: '5c6b73', description: `Workshop: ${STAGE_TEXT[stage]}` })),
+  { name: label.needs('browser'), color: '5c6b73', description: 'Workshop: Implementation gets a browser (Playwright) to test this' },
   { name: label.needsInfo, color: 'b38b42', description: 'Workshop: question for you. Reply, then remove this label' },
   { name: label.skip, color: '9e9e9e', description: 'Workshop: not suitable. Remove to classify again' },
   { name: label.failed, color: 'a0503f', description: 'Workshop: stopped. Remove to retry' },
@@ -39,6 +44,7 @@ export interface TicketState {
   needsInfo: boolean;
   skip: boolean;
   failed: boolean;
+  needs: Capability[];
 }
 
 export function parseLabels(labels: string[]): TicketState {
@@ -50,6 +56,7 @@ export function parseLabels(labels: string[]): TicketState {
     needsInfo: labels.includes(label.needsInfo),
     skip: labels.includes(label.skip),
     failed: labels.includes(label.failed),
+    needs: CAPABILITIES.filter((c) => labels.includes(label.needs(c))),
   };
 }
 
@@ -112,6 +119,17 @@ export function setSize(labels: string[], size: Size) {
     add: labels.includes(target) ? [] : [target],
     remove: SIZES.map(label.size).filter((name) => name !== target && labels.includes(name)),
   };
+}
+
+/** Adds the label for each listed capability the ticket lacks. Never removes one: the owner may have added it by hand. */
+export function addNeeds(labels: string[], needs: Capability[]) {
+  return { add: needs.map(label.needs).filter((name) => !labels.includes(name)), remove: [] as string[] };
+}
+
+/** The image for a run: a repository's own image always wins; Implementation on a ticket that needs a browser gets the browser image. */
+export function imageFor(agent: AgentName, state: TicketState, images: { repo: string | null; base: string; browser: string }): string {
+  if (images.repo) return images.repo;
+  return agent === 'implement' && state.needs.includes('browser') ? images.browser : images.base;
 }
 
 /** Label edits that apply `patch`, keeping one stage and one size label at most. Fields left out stay as they are. */

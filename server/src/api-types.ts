@@ -250,6 +250,26 @@ export interface Usage {
   apiDailyCapUsd: number;
 }
 
+export interface SpendTotals {
+  runs: number;
+  /** Includes cache reads and writes, as runs report it. */
+  inputTokens: number;
+  outputTokens: number;
+  /** Claude Code's token-equivalent cost; for subscription runs it isn't billed. */
+  costUsd: number;
+}
+
+export interface LifetimeSpend {
+  /** Earliest recorded usage; null when nothing is recorded. */
+  since: number | null;
+  total: SpendTotals;
+  subscription: SpendTotals;
+  api: SpendTotals;
+  byModel: (SpendTotals & { model: string })[];
+  /** 'YYYY-MM' in the settings time zone, newest first. */
+  byMonth: (SpendTotals & { month: string })[];
+}
+
 export type TokenScope = 'read' | 'write';
 
 export interface ApiTokenView {
