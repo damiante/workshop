@@ -143,6 +143,8 @@ export interface Environment {
   ping(): Promise<void>;
   describe(): Promise<HostSpecs>;
   ensureImage(image: string): Promise<void>;
+  /** An image's labels; empty when the image isn't on the host. */
+  imageLabels(image: string): Promise<Record<string, string>>;
   createVolume(name: string, labels: Record<string, string>): Promise<void>;
   removeVolume(name: string): Promise<void>;
   /** Creates and starts a container; returns its id. */

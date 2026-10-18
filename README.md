@@ -85,7 +85,7 @@ Add each machine that should run agents under **Agent hosts**. Workshop pulls th
 
 **Agents at once** (default 1) and the **per-agent CPU and memory** limits control capacity. The connection check shows the machine's CPUs and memory and how many agents would fit.
 
-Repositories that need other toolchains (Android SDK, Ruby, Go…) can use their own image. Build it `FROM ghcr.io/damiante/workshop-agent` and set it on the repository (see step 4).
+Repositories that need other toolchains (Android SDK, Ruby, Go…) can use their own image. Build it `FROM ghcr.io/damiante/workshop-agent` and set it on the repository (see step 4). The default image includes Playwright with headless Chromium, and an image built `FROM` it keeps the `workshop.capabilities` label that tells agents what the image can do. A custom image built `FROM` an older Workshop image has no browser until it is rebuilt; agents are told so.
 
 ### 3. Claude
 

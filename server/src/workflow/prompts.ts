@@ -150,3 +150,20 @@ export function taskPrompt(c: TaskContext): string {
   parts.push('', '## Your task', taskLine(c));
   return parts.join('\n');
 }
+
+export const CAPABILITY_LABEL = 'workshop.capabilities';
+
+/** The capabilities an image declares in its `workshop.capabilities` label (comma-separated). */
+export function capabilitiesOf(labels: Record<string, string>): string[] {
+  const parts = (labels[CAPABILITY_LABEL] ?? '').split(',').map((c) => c.trim().toLowerCase()).filter(Boolean);
+  return [...new Set(parts)];
+}
+
+/** What the agent's container can do, for the system prompt. */
+export function environmentText(caps: string[]): string {
+  const browser = caps.includes('browser')
+    ? 'A headless Chromium is available through Playwright (installed globally; browsers in $PLAYWRIGHT_BROWSERS_PATH). For a screenshot, start the app and run `playwright screenshot --full-page <url> <file>.png`; for scripted checks, `require(\'playwright\')` from a CommonJS script (`.cjs`: the global install resolves through NODE_PATH, which `import` ignores). If the repository pins its own Playwright version, run `npx playwright install chromium` first. Everything left under /work/repo is committed and pushed when you finish, so save screenshots outside it (for example /tmp) unless you mean to commit them.'
+    : 'No browser is installed in this environment. If the task needs one (screenshots, browser tests), do the rest and say in your summary what you couldn\'t check.';
+  const other = caps.filter((c) => c !== 'browser');
+  return `## Environment\n\n${browser}${other.length ? `\n\nOther capabilities declared by this image: ${other.join(', ')}.` : ''}`;
+}

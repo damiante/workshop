@@ -1,7 +1,8 @@
 name: Build
 
 # Every push and pull request is type-checked and tested (including the branches
-# Workshop's own agents push). Images are only built and published from main.
+# Workshop's own agents push). The agent image is built and smoke-tested everywhere;
+# images are only published from main.
 on:
   push:
   pull_request:
@@ -25,6 +26,24 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: bash -n agent/entrypoint.sh
+
+  agent-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: agent
+          load: true
+          push: false
+          tags: workshop-agent:ci
+          cache-from: type=gha,scope=agent
+      # Runs as the unprivileged agent user, so this proves it can launch the browser.
+      - name: Take a screenshot
+        run: docker run --rm --entrypoint bash workshop-agent:ci -c 'cd /tmp && playwright screenshot --full-page "data:text/html,<h1>hi</h1>" s.png && test -s s.png && node -e "require(\"playwright\")"'
+      - name: Check the capabilities label
+        run: test "$(docker image inspect workshop-agent:ci --format '{{index .Config.Labels "workshop.capabilities"}}')" = browser
 
   images:
     needs: test

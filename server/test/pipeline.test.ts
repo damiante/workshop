@@ -39,7 +39,9 @@ class FakeEnv {
     this.script = script;
   }
   ping = async () => {};
+  labels: Record<string, string> = {};
   ensureImage = async () => {};
+  imageLabels = async (_image: string) => this.labels;
   createVolume = async () => {};
   removeVolume = async () => {};
   remove = async () => {};
@@ -151,6 +153,30 @@ describe('runner', () => {
     expect(one<{ pr_number: number }>('SELECT pr_number FROM tickets WHERE id = 1')?.pr_number).toBe(7);
     // The run's own rate_limit_event refreshed the allowance reading for free.
     expect(allowanceOf(ids.model).fiveHour).toEqual({ pct: 44, resetsAt: 1791897000_000 });
+  });
+
+  describe('environment capabilities', () => {
+    const runWith = async (setup: (env: FakeEnv) => void) => {
+      fake.env = new FakeEnv({
+        prepare: ['Checked out workshop/3-add-dark-mode at abc1234'],
+        run: [line({ type: 'system', subtype: 'init', session_id: 's' }), RATE, result({ outcome: 'done', summary: 'ok', tests: 'ok' })],
+        publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+      });
+      setup(fake.env);
+      await settle(go());
+      return fake.env.spec('run')!.files!['.workshop/system.md'];
+    };
+
+    it('tells the agent how to take screenshots when the image declares a browser', async () => {
+      expect(await runWith((e) => (e.labels = { 'workshop.capabilities': 'browser' }))).toContain('playwright screenshot');
+    });
+    it('says no browser is installed when the image declares nothing', async () => {
+      expect(await runWith(() => {})).toContain('No browser is installed');
+    });
+    it('still runs when the labels cannot be read', async () => {
+      const system = await runWith((e) => (e.imageLabels = async () => { throw new Error('boom'); }));
+      expect(system).toContain('No browser is installed');
+    });
   });
 
   it('fails when the implementation commits nothing', async () => {

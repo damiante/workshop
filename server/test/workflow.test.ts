@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { branchFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
 import { parseResult } from '../src/workflow/schemas.ts';
 import { planTransition, type PlanContext } from '../src/workflow/transitions.ts';
-import { taskPrompt } from '../src/workflow/prompts.ts';
+import { capabilitiesOf, environmentText, taskPrompt } from '../src/workflow/prompts.ts';
 
 const step = (labels: string[], open = true) => nextStep(parseLabels(labels), open);
 
@@ -223,5 +223,19 @@ describe('stateEdits', () => {
 
   it('gives no edits when the patch matches the labels', () => {
     expect(stateEdits(labels, { stage: 'design', size: 'm', skip: false })).toEqual({ add: [], remove: [] });
+  });
+});
+
+describe('capabilities', () => {
+  it('parses the capabilities label', () => {
+    expect(capabilitiesOf({})).toEqual([]);
+    expect(capabilitiesOf({ 'workshop.capabilities': ' Browser, ,gpu,browser', other: 'x' })).toEqual(['browser', 'gpu']);
+    expect(capabilitiesOf({ other: 'browser' })).toEqual([]);
+  });
+
+  it('describes the environment to the agent', () => {
+    expect(environmentText(['browser'])).toContain('playwright screenshot');
+    expect(environmentText([])).toContain('No browser is installed');
+    expect(environmentText(['browser', 'gpu'])).toContain('gpu');
   });
 });

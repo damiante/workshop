@@ -31,7 +31,7 @@ import {
   type TicketRow,
 } from '../tickets.ts';
 import { label, parseLabels } from '../workflow/labels.ts';
-import { AGENT_INFO, protocolText, taskPrompt } from '../workflow/prompts.ts';
+import { AGENT_INFO, capabilitiesOf, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
 import { joinRefs } from './gates.ts';
@@ -189,7 +189,8 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
             t.id,
           ).filter((o) => isAllowedAuthor(o.author))
         : undefined;
-    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}`;
+    const caps = capabilitiesOf(await ctx.env.imageLabels(ctx.image).catch(() => ({})));
+    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}\n\n${environmentText(caps)}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
       mode: r.mode,

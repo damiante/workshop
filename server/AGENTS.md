@@ -74,6 +74,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - Podman returns 409 when a volume already exists, where Docker reuses it; `createVolume` ignores 409.
 - SSH hosts run `docker system dial-stdio` remotely (docker-modem), so they need the `docker` CLI. The host key is pinned on first connect (`config.hostKey`).
 - Prompt files reach a created container through `putArchive`, with a small tar writer in `providers/docker/tar.ts`. Names must be under 100 bytes.
+- Image capabilities come from the `workshop.capabilities` label (`imageLabels`), read per run and described to the agent in `system.md`.
 
 ## Trying the agent image locally
 
