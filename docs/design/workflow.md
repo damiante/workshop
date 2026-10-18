@@ -10,6 +10,7 @@ Workshop stores a ticket's state in labels on the issue, all prefixed `workshop/
 |---|---|
 | *(no workshop labels)* | New: classify next |
 | `workshop/size:xs` … `workshop/size:xl` | Set by the Classifier (the latest classification wins) |
+| `workshop/needs:browser` | Set by the Classifier (or you): Implementation runs in the browser image |
 | `workshop/stage:design` | Design next |
 | `workshop/stage:design-review` | Design adversary next |
 | `workshop/stage:implement` | Implementation next |

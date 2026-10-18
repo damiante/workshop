@@ -1,7 +1,11 @@
-# Workshop agent image: Claude Code plus common build toolchains (Node 24, Python 3, C toolchain).
-# A repository that needs other toolchains can use its own image built FROM this one
-# (set it on the repository in Workshop's Connections page).
-FROM node:24-trixie-slim
+# Workshop agent images: Claude Code plus common build toolchains (Node 24, Python 3, C toolchain).
+# Two targets: `base` (the default for every run) and `browser` (base plus Playwright with headless
+# Chromium, used for Implementation runs on tickets labelled workshop/needs:browser). With no
+# --target Docker builds the last stage, browser, so build the base image with `--target base`.
+# A repository that needs other toolchains can use its own image built FROM one of these
+# (set it on the repository in Workshop's Connections page). Images built FROM the browser image keep
+# its workshop.capabilities label, which Workshop reads and reports to the agent.
+FROM node:24-trixie-slim AS base
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -28,3 +32,18 @@ ENV PATH=/home/agent/.local/bin:$PATH \
     CLAUDE_CONFIG_DIR=/work/.claude \
     DISABLE_AUTOUPDATER=1
 ENTRYPOINT ["workshop-agent"]
+
+# The browser image: the base image plus Playwright with headless Chromium, for screenshots and
+# browser tests. Browsers live outside $HOME at a fixed path, owned by agent, so a repository pinned
+# to another Playwright version can install its own build there.
+FROM base AS browser
+USER root
+ARG PLAYWRIGHT_VERSION=1.64.1
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN npm install -g playwright@${PLAYWRIGHT_VERSION} \
+ && playwright install --with-deps --only-shell chromium \
+ && rm -rf /var/lib/apt/lists/* /root/.npm \
+ && chown -R agent:agent /opt/ms-playwright
+USER agent
+ENV NODE_PATH=/usr/local/lib/node_modules
+LABEL workshop.capabilities="browser"

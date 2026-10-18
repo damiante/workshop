@@ -30,8 +30,8 @@ import {
   type RepoRow,
   type TicketRow,
 } from '../tickets.ts';
-import { label, parseLabels } from '../workflow/labels.ts';
-import { AGENT_INFO, protocolText, taskPrompt } from '../workflow/prompts.ts';
+import { imageFor, label, parseLabels } from '../workflow/labels.ts';
+import { AGENT_INFO, capabilitiesOf, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
 import { joinRefs } from './gates.ts';
@@ -82,7 +82,7 @@ function context(r: RunRow): Ctx {
     repo,
     env: environmentOf(conn),
     host: { name: conn.name, cfg: conn.config as unknown as DockerConfig },
-    image: repo.image || config.agentImage,
+    image: imageFor(r.agent, parseLabels(labelsOf(ticket)), { repo: repo.image || null, base: config.agentImage, browser: config.agentBrowserImage }),
     labels: { 'workshop.instance': config.instance, 'workshop.run': r.id, 'workshop.ticket': `${repo.full_name}#${ticket.number}`, 'workshop.agent': r.agent },
   };
 }
@@ -104,6 +104,7 @@ async function runContainer(
   if (!id) {
     const spec = await makeSpec();
     const memoryGb = ctx.host.cfg.memoryGb;
+    await ctx.env.ensureImage(ctx.image);
     id = await ctx.env.start({
       ...spec,
       image: ctx.image,
@@ -189,7 +190,8 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
             t.id,
           ).filter((o) => isAllowedAuthor(o.author))
         : undefined;
-    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}`;
+    const caps = capabilitiesOf(await ctx.env.imageLabels(ctx.image).catch(() => ({})));
+    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}\n\n${environmentText(caps)}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
       mode: r.mode,
@@ -400,7 +402,6 @@ export async function drive(runId: string) {
     if (r.status === 'starting') {
       await markRunning(ctx.ticket, true);
       if (!r.container_id) {
-        await ctx.env.ensureImage(ctx.image);
         await ctx.env.createVolume(r.volume!, ctx.labels);
       }
       const state = await runContainer(ctx, 'prepare', () => prepareSpec(ctx));

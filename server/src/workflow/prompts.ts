@@ -24,6 +24,7 @@ export const DEFAULT_PROMPTS: Record<AgentName, string> = {
 4. Decline (decision "reject") when the ticket isn't actionable code work: a question or discussion, too little information to act on, technically infeasible, or a duplicate.
 5. If one specific answer from the owner would make it actionable, use "needs_info" with that question instead of declining.
 6. Use "blocked" when any part of the ticket asks for something another open ticket will build, so doing this one first would mean building that part twice or leaving it out. One sentence is enough: "expose this on the API" while another ticket is "Develop an API" means blocked by that ticket. This holds even if the repository already has something similar (such as the internal routes the web UI calls): the owner opened that other ticket because what exists isn't what they mean. List those ticket numbers in blocked_by, and name what each one provides in your reason. Don't use it when the tickets only touch the same area and either order works, or when the owner has said in a comment not to wait.
+7. When accepting, list in capabilities what the Implementation agent needs to test the change: "browser" when it changes a web UI that should be checked in a browser or shown in a screenshot. Leave it empty otherwise, since the browser image is large. In delta mode, list what the whole ticket needs, not only the requested changes.
 
 In delta mode, changes were requested on an existing pull request: size only the requested changes, relative to what is already on the branch.`,
 
@@ -149,4 +150,21 @@ export function taskPrompt(c: TaskContext): string {
   }
   parts.push('', '## Your task', taskLine(c));
   return parts.join('\n');
+}
+
+export const CAPABILITY_LABEL = 'workshop.capabilities';
+
+/** The capabilities an image declares in its `workshop.capabilities` label (comma-separated). */
+export function capabilitiesOf(labels: Record<string, string>): string[] {
+  const parts = (labels[CAPABILITY_LABEL] ?? '').split(',').map((c) => c.trim().toLowerCase()).filter(Boolean);
+  return [...new Set(parts)];
+}
+
+/** What the agent's container can do, for the system prompt. */
+export function environmentText(caps: string[]): string {
+  const browser = caps.includes('browser')
+    ? 'A headless Chromium is available through Playwright (installed globally; browsers in $PLAYWRIGHT_BROWSERS_PATH). For a screenshot, start the app and run `playwright screenshot --full-page <url> <file>.png`; for scripted checks, `require(\'playwright\')` from a CommonJS script (`.cjs`: the global install resolves through NODE_PATH, which `import` ignores). If the repository pins its own Playwright version, run `npx playwright install chromium` first. Everything left under /work/repo is committed and pushed when you finish, so save screenshots outside it (for example /tmp) unless you mean to commit them.'
+    : 'No browser is installed in this environment. If the task needs one (screenshots, browser tests), do the rest and say in your summary what you couldn\'t check. Workshop runs Implementation with a browser when the ticket has the `workshop/needs:browser` label, so suggest that the owner add it.';
+  const other = caps.filter((c) => c !== 'browser');
+  return `## Environment\n\n${browser}${other.length ? `\n\nOther capabilities declared by this image: ${other.join(', ')}.` : ''}`;
 }

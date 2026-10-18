@@ -85,7 +85,7 @@ Add each machine that should run agents under **Agent hosts**. Workshop pulls th
 
 **Agents at once** (default 1) and the **per-agent CPU and memory** limits control capacity. The connection check shows the machine's CPUs and memory and how many agents would fit.
 
-Repositories that need other toolchains (Android SDK, Ruby, Go…) can use their own image. Build it `FROM ghcr.io/damiante/workshop-agent` and set it on the repository (see step 4).
+Repositories that need other toolchains (Android SDK, Ruby, Go…) can use their own image. Build it `FROM ghcr.io/damiante/workshop-agent` and set it on the repository (see step 4). Workshop has two images, `workshop-agent` and `workshop-agent-browser` (the same plus Playwright with headless Chromium). Implementation runs on tickets labelled `workshop/needs:browser` use the browser image; the Classifier sets that label, and you can set it yourself. A repository's custom image is used for every run, so build it `FROM` the browser image if its tickets need a browser. The browser image's `workshop.capabilities` label tells agents what they have; agents on an image without a browser are told so.
 
 ### 3. Claude
 
@@ -130,6 +130,7 @@ Scripts can do the same, launch agents and read usage over HTTP with an API toke
 | `PORT` | | `3000` | Port inside the container |
 | `DATA_DIR` | | `/data` | Database and run logs |
 | `WORKSHOP_AGENT_IMAGE` | | set at build | Agent image; each release pins the one built from the same commit |
+| `WORKSHOP_AGENT_BROWSER_IMAGE` | | set at build | Agent image with a browser, used for Implementation on `workshop/needs:browser` tickets |
 | `TRUST_PROXY` | | `loopback, linklocal, uniquelocal` | Which proxies' `X-Forwarded-*` headers to trust ([Express syntax](https://expressjs.com/en/guide/behind-proxies.html)) |
 | `WORKSHOP_RESET_TOTP` | | | Set to `1` to remove the authenticator (lost phone). Remove it again after signing in |
 | `WORKSHOP_INSTANCE` | | `workshop` | Label value that tells this Workshop's containers apart on a shared host |
@@ -160,8 +161,8 @@ npm run typecheck
 npm run build && npm start      # production build, everything on :3000
 ```
 
-- **Agent image:** `podman build -t workshop-agent:dev agent` (or `docker build`); point `WORKSHOP_AGENT_IMAGE` at it. The `prepare` and `publish` steps can be tried against a local bare repository; the agent image section of [server/AGENTS.md](server/AGENTS.md) explains how.
+- **Agent image:** `podman build --target base -t workshop-agent:dev agent` and `podman build --target browser -t workshop-agent-browser:dev agent` (or `docker build`); point `WORKSHOP_AGENT_IMAGE` and `WORKSHOP_AGENT_BROWSER_IMAGE` at them. The `prepare` and `publish` steps can be tried against a local bare repository; the agent image section of [server/AGENTS.md](server/AGENTS.md) explains how.
 - **Docker integration test** (real engine): `WORKSHOP_TEST_DOCKER_SOCKET=/var/run/docker.sock npm test --workspace server`.
-- **CI:** [.github/workflows/build.yml](.github/workflows/build.yml) type-checks, tests and builds every push and pull request. Pushes to `main` publish `ghcr.io/<owner>/workshop` and `ghcr.io/<owner>/workshop-agent`. Make the **workshop-agent** package public in GitHub's package settings, because agent hosts pull it without credentials.
+- **CI:** [.github/workflows/build.yml](.github/workflows/build.yml) type-checks, tests and builds every push and pull request. Pushes to `main` publish `ghcr.io/<owner>/workshop` and `ghcr.io/<owner>/workshop-agent` and `ghcr.io/<owner>/workshop-agent-browser`. Make both agent packages public in GitHub's package settings, because agent hosts pull it without credentials.
 
 Contributor and agent notes: [AGENTS.md](AGENTS.md), [server/AGENTS.md](server/AGENTS.md), [client/AGENTS.md](client/AGENTS.md).

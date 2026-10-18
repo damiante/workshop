@@ -14,6 +14,7 @@ export const config = {
   dataDir: path.resolve(process.env.DATA_DIR ?? 'data'),
   password,
   secretKey: required('WORKSHOP_SECRET_KEY'),
+  agentBrowserImage: process.env.WORKSHOP_AGENT_BROWSER_IMAGE ?? 'ghcr.io/damiante/workshop-agent-browser:latest',
   agentImage: process.env.WORKSHOP_AGENT_IMAGE ?? 'ghcr.io/damiante/workshop-agent:latest',
   // Only honour X-Forwarded-* from proxies on private networks, so a directly exposed
   // instance can't be fooled into per-IP lockout bypass by a spoofed header.

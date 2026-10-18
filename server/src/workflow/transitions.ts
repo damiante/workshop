@@ -1,6 +1,6 @@
 import type { AgentName } from '../api-types.ts';
 import { joinRefs } from '../scheduler/gates.ts';
-import { label, moveTo, setSize, stageAfterClassify, stageAfterDesign, type TicketState } from './labels.ts';
+import { addNeeds, label, moveTo, setSize, stageAfterClassify, stageAfterDesign, type TicketState } from './labels.ts';
 import type { AgentResult, ClassifierResult, WorkResult } from './schemas.ts';
 
 /** Everything Workshop should do after a successful agent run. Pure, so every transition is unit-tested. */
@@ -87,8 +87,8 @@ function planClassifier(ctx: PlanContext, r: ClassifierResult): Plan {
   const next = stageAfterClassify(size);
   const what = ctx.mode === 'delta' ? 'the requested changes' : 'this ticket';
   return {
-    ...combine(setSize(ctx.labels, size), moveTo(ctx.labels, next)),
+    ...combine(setSize(ctx.labels, size), moveTo(ctx.labels, next), addNeeds(ctx.labels, r.capabilities ?? [])),
     createBranch: ctx.mode === 'normal',
-    comment: `Workshop sized ${what} **${size.toUpperCase()}**: ${r.reason}\n\nNext: ${NEXT_TEXT[next]}.`,
+    comment: `Workshop sized ${what} **${size.toUpperCase()}**: ${r.reason}\n\n${r.capabilities?.includes('browser') ? '\n\nImplementation will run with a browser (Playwright) to test it.' : ''}\n\nNext: ${NEXT_TEXT[next]}.`,
   };
 }
