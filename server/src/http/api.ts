@@ -10,6 +10,7 @@ import { pushRefusal, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings } from '../settings.ts';
+import { lifetimeSpend } from '../spend.ts';
 import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
@@ -51,6 +52,10 @@ apiRouter.get('/overview', (_req, res) => {
     alerts: alertViews('ack_at IS NULL', 20),
   };
   res.json(overview);
+});
+
+apiRouter.get('/usage/lifetime', (_req, res) => {
+  res.json(lifetimeSpend(getSettings().timezone));
 });
 
 apiRouter.get('/usage', (_req, res) => {

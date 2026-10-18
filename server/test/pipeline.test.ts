@@ -13,12 +13,13 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
 
 const { seedAgents, updateAgent } = await import('../src/agents.ts');
 const { allowanceOf, recordProbe } = await import('../src/allowance.ts');
+const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
-const { initDb, one, run } = await import('../src/db.ts');
+const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
 const { bus } = await import('../src/events.ts');
 const { activity, getRun } = await import('../src/runs.ts');
-const { launch } = await import('../src/scheduler/runner.ts');
+const { launch, resume } = await import('../src/scheduler/runner.ts');
 const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
 const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
@@ -40,7 +41,12 @@ class FakeEnv {
     this.script = script;
   }
   ping = async () => {};
-  ensureImage = async () => {};
+  labels: Record<string, string> = {};
+  ensured: string[] = [];
+  ensureImage = async (image: string) => {
+    this.ensured.push(image);
+  };
+  imageLabels = async (_image: string) => this.labels;
   createVolume = async () => {};
   removeVolume = async () => {};
   remove = async () => {};
@@ -78,7 +84,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.tickets = {
@@ -89,6 +95,7 @@ beforeEach(() => {
     ],
     setLabels: vi.fn(async () => {}),
     comment: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
     blockers: vi.fn(async () => []),
     addBlocker: vi.fn(async (_repo: unknown, _n: number, blocker: number) => ({ repo: 'me/app', number: blocker, state: 'open', url: '' })),
   };
@@ -104,6 +111,8 @@ beforeEach(() => {
     findPullRequest: vi.fn(async () => null),
     openPullRequest: vi.fn(async () => ({ number: 7, url: 'https://github.com/me/app/pull/7' })),
     commentOnPullRequest: vi.fn(async () => {}),
+    closePullRequest: vi.fn(async () => {}),
+    deleteBranch: vi.fn(async () => {}),
     requestReview: vi.fn(async () => {}),
     createBranch: vi.fn(async () => {}),
   };
@@ -229,6 +238,69 @@ describe('runner', () => {
     }
   });
 
+  describe('environment capabilities', () => {
+    const runWith = async (setup: (env: FakeEnv) => void) => {
+      fake.env = new FakeEnv({
+        prepare: ['Checked out workshop/3-add-dark-mode at abc1234'],
+        run: [line({ type: 'system', subtype: 'init', session_id: 's' }), RATE, result({ outcome: 'done', summary: 'ok', tests: 'ok' })],
+        publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+      });
+      setup(fake.env);
+      await settle(go());
+      return fake.env.spec('run')!.files!['.workshop/system.md'];
+    };
+
+    it('tells the agent how to take screenshots when the image declares a browser', async () => {
+      expect(await runWith((e) => (e.labels = { 'workshop.capabilities': 'browser' }))).toContain('playwright screenshot');
+    });
+    it('says no browser is installed when the image declares nothing', async () => {
+      expect(await runWith(() => {})).toContain('No browser is installed');
+    });
+    it('still runs when the labels cannot be read', async () => {
+      const system = await runWith((e) => (e.imageLabels = async () => { throw new Error('boom'); }));
+      expect(system).toContain('No browser is installed');
+    });
+  });
+
+  describe('image choice', () => {
+    const script = () =>
+      new FakeEnv({
+        prepare: ['ok'],
+        run: [result({ outcome: 'done', summary: 'ok', tests: 'ok' })],
+        publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+      });
+    const setLabels = (...extra: string[]) => run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('implement'), ...extra]));
+
+    it('uses the browser image for implementation on a ticket that needs one, pulling it before each start', async () => {
+      setLabels(label.needs('browser'));
+      fake.env = script();
+      await settle(go());
+      expect(fake.env.started.map((s: StepSpec) => s.image)).toEqual([config.agentBrowserImage, config.agentBrowserImage, config.agentBrowserImage]);
+      expect(fake.env.ensured).toContain(config.agentBrowserImage);
+    });
+    it('uses the base image without the label, and for other agents', async () => {
+      fake.env = script();
+      await settle(go());
+      expect(new Set(fake.env.started.map((s: StepSpec) => s.image))).toEqual(new Set([config.agentImage]));
+      setLabels(label.needs('browser'));
+      fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'reject', reason: 'no' })] });
+      await settle(go('classifier'));
+      expect(new Set(fake.env.started.map((s: StepSpec) => s.image))).toEqual(new Set([config.agentImage]));
+    });
+    it('pulls the image before starting every container', async () => {
+      setLabels(label.needs('browser'));
+      fake.env = script();
+      const order: string[] = [];
+      const ensure = fake.env.ensureImage;
+      const start = fake.env.start;
+      fake.env.ensureImage = async (i: string) => (order.push(`pull ${i}`), ensure(i));
+      fake.env.start = async (s: StepSpec) => (order.push(`start ${s.image}`), start(s));
+      await settle(go());
+      expect(order.length).toBeGreaterThan(0);
+      order.forEach((o, i) => { if (o.startsWith('start ')) expect(order[i - 1]).toBe(`pull ${o.slice(6)}`); });
+    });
+  });
+
   it('fails when the implementation commits nothing', async () => {
     fake.env = new FakeEnv({
       prepare: ['ok'],
@@ -275,6 +347,42 @@ describe('runner', () => {
     expect(r).toMatchObject({ status: 'paused', resets_at: 1791897000_000, step: 'run' });
     expect(fake.env.spec('publish')).toBeUndefined();
     expect(one<{ failures: number }>('SELECT failures FROM tickets WHERE id = 1')?.failures).toBe(0);
+  });
+
+  it('records each claude invocation in the spend ledger, which outlives the run', async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [line({ type: 'result', subtype: 'success', is_error: false, structured_output: { outcome: 'done', summary: 'Done.' }, total_cost_usd: 0.25, usage: { input_tokens: 10, output_tokens: 5 } })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    const r = await settle(go());
+    expect(r).toMatchObject({ status: 'succeeded', input_tokens: 10, output_tokens: 5, cost_usd: 0.25 });
+    const rows = all<object>('SELECT model, billing, input_tokens, output_tokens, cost_usd FROM spend WHERE run_id = ?', r.id);
+    expect(rows).toEqual([{ model: 'claude-sonnet-5-5', billing: 'subscription', input_tokens: 10, output_tokens: 5, cost_usd: 0.25 }]);
+    run('DELETE FROM runs WHERE id = ?', r.id);
+    expect(all('SELECT id FROM spend WHERE run_id = ?', r.id)).toHaveLength(1);
+  });
+
+  it('adds up a paused run and its resume', async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [
+        line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1791897000 } }),
+        line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Usage limit reached'], total_cost_usd: 0.1, usage: { input_tokens: 4, output_tokens: 2 } }),
+      ],
+    });
+    const id = go();
+    expect((await settle(id)).status).toBe('paused');
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [line({ type: 'result', subtype: 'success', is_error: false, structured_output: { outcome: 'done', summary: 'Done.' }, total_cost_usd: 0.25, usage: { input_tokens: 10, output_tokens: 5 } })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    resume(id);
+    await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+    expect(getRun(id)).toMatchObject({ input_tokens: 14, output_tokens: 7 });
+    expect(getRun(id)!.cost_usd).toBeCloseTo(0.35);
+    expect(all('SELECT id FROM spend WHERE run_id = ?', id)).toHaveLength(2);
   });
 
   it('labels the ticket failed after the second failed attempt', async () => {
@@ -410,8 +518,13 @@ describe('sync', () => {
     fake.tickets.listChanged = async () => [];
     fake.vcs.pullRequestState = async () => pr({ state: 'closed' });
     await syncRepo(repo());
-    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.skip], [label.stage('pr-review')]);
+    expect(fake.tickets.close).toHaveBeenCalledWith(expect.anything(), 3, 'not_planned');
+    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], expect.arrayContaining([label.stage('pr-review')]));
+    expect(fake.tickets.setLabels).not.toHaveBeenCalledWith(expect.anything(), 3, [label.skip], expect.anything());
     expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('closed without merging'));
+    expect(one<{ state: string; pr_status: string }>('SELECT state, pr_status FROM tickets WHERE id = 1')).toEqual({ state: 'closed', pr_status: 'closed' });
+    expect(fake.vcs.closePullRequest).not.toHaveBeenCalled();
+    expect(fake.vcs.deleteBranch).not.toHaveBeenCalled();
   });
 
   it.each(['pr-review', 'merge'] as const)('tidies up when you merge the pull request yourself at %s, even though GitHub already closed the issue', async (stage) => {
@@ -423,12 +536,59 @@ describe('sync', () => {
     expect(one<{ pr_status: string }>('SELECT pr_status FROM tickets WHERE id = 1')?.pr_status).toBe('merged');
   });
 
-  it('drops the stage when you close the issue without merging', async () => {
-    fake.tickets.listChanged = async () => [remote({ state: 'closed' })];
-    fake.vcs.pullRequestState = async () => pr({ decision: 'approved' });
-    await syncRepo(repo());
-    expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], [label.stage('pr-review')]);
-    expect(fake.tickets.comment).not.toHaveBeenCalled();
+  describe('when you close the issue', () => {
+    const branch = 'workshop/3-add-dark-mode';
+    beforeEach(() => {
+      run('UPDATE tickets SET branch = ? WHERE id = 1', branch);
+      fake.tickets.listChanged = async () => [remote({ state: 'closed' })];
+    });
+
+    it('closes the open pull request, deletes the branch and clears the stage', async () => {
+      fake.vcs.pullRequestState = async () => pr({ decision: 'approved' });
+      await syncRepo(repo());
+      expect(fake.vcs.commentOnPullRequest).toHaveBeenCalledWith(expect.anything(), 7, expect.stringContaining('issue was closed'));
+      expect(fake.vcs.closePullRequest).toHaveBeenCalledWith(expect.anything(), 7);
+      expect(fake.vcs.deleteBranch).toHaveBeenCalledWith(expect.anything(), branch);
+      expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], expect.arrayContaining([label.stage('pr-review')]));
+      expect(fake.tickets.comment).not.toHaveBeenCalled();
+    });
+
+    it('clears labels and deletes the branch at implement with needs-info and no pull request', async () => {
+      const labels = [label.size('s'), label.stage('implement'), label.needsInfo];
+      run('UPDATE tickets SET pr_number = NULL, labels = ? WHERE id = 1', JSON.stringify(labels));
+      fake.tickets.listChanged = async () => [remote({ state: 'closed', labels })];
+      await syncRepo(repo());
+      expect(fake.vcs.deleteBranch).toHaveBeenCalledWith(expect.anything(), branch);
+      expect(fake.vcs.closePullRequest).not.toHaveBeenCalled();
+      expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [], expect.arrayContaining([label.stage('implement'), label.needsInfo]));
+    });
+
+    it('treats a merged pull request as a merge', async () => {
+      fake.vcs.pullRequestState = async () => pr({ state: 'merged' });
+      await syncRepo(repo());
+      expect(one<{ pr_status: string }>('SELECT pr_status FROM tickets WHERE id = 1')?.pr_status).toBe('merged');
+      expect(fake.vcs.closePullRequest).not.toHaveBeenCalled();
+      expect(fake.vcs.deleteBranch).not.toHaveBeenCalled();
+    });
+
+    it('raises an alert and finishes the sync when the cleanup fails', async () => {
+      fake.vcs.pullRequestState = async () => pr({});
+      fake.vcs.closePullRequest = vi.fn(async () => {
+        throw new Error('boom');
+      });
+      const before = repo().synced_at;
+      await syncRepo(repo());
+      expect(one<{ message: string }>("SELECT message FROM alerts WHERE kind = 'close-cleanup' AND ack_at IS NULL")?.message).toContain('boom');
+      expect(repo().synced_at).not.toBe(before);
+    });
+
+    it('does nothing for a ticket that was already closed', async () => {
+      run("UPDATE tickets SET state = 'closed', labels = '[]' WHERE id = 1");
+      fake.tickets.listChanged = async () => [remote({ state: 'closed', labels: [] })];
+      await syncRepo(repo());
+      expect(fake.vcs.closePullRequest).not.toHaveBeenCalled();
+      expect(fake.vcs.deleteBranch).not.toHaveBeenCalled();
+    });
   });
 
   it('resets the failure count when you remove workshop/failed', async () => {

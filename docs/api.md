@@ -26,6 +26,9 @@ curl -X PUT $WORKSHOP/api/settings -H "Authorization: Bearer $TOKEN" \
 # Read usage: Claude allowance, thresholds and today's API spend against the caps
 curl $WORKSHOP/api/usage -H "Authorization: Bearer $TOKEN"
 
+# Lifetime token use and token-equivalent cost
+curl $WORKSHOP/api/usage/lifetime -H "Authorization: Bearer $TOKEN"
+
 # Start an agent on a ticket now (ticket id from GET /api/tickets)
 curl -X POST $WORKSHOP/api/tickets/12/launch -H "Authorization: Bearer $TOKEN"
 

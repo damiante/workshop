@@ -63,6 +63,7 @@ export function appManifest(baseUrl: string) {
       contents: 'write',
       issues: 'write',
       pull_requests: 'write',
+      workflows: 'write',
       metadata: 'read',
       checks: 'read',
       statuses: 'read',
@@ -245,10 +246,10 @@ export class GitHubApp implements VcsHost, TicketSource {
     await kit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', { ...split(repo), issue_number: number, body });
   }
 
-  async close(repo: RepoRef, number: number) {
+  async close(repo: RepoRef, number: number, reason: 'completed' | 'not_planned' = 'completed') {
     const kit = await this.kit(repo);
     try {
-      await kit.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', { ...split(repo), issue_number: number, state: 'closed', state_reason: 'completed' });
+      await kit.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', { ...split(repo), issue_number: number, state: 'closed', state_reason: reason });
     } catch (err) {
       // A merged PR's "Closes #n" can close the issue a moment before we do; GitHub rejects the second close.
       if ((err as { status?: number }).status !== 422) throw err;
@@ -293,11 +294,15 @@ export class GitHubApp implements VcsHost, TicketSource {
   async gitAccess(repo: RepoRef, write: boolean): Promise<GitAccess> {
     const installation_id = await this.installationFor(repo);
     // A token for this one repository, with only the git access this step needs. Expires in an hour.
-    const { data } = await this.app.octokit.request('POST /app/installations/{installation_id}/access_tokens', {
-      installation_id,
-      repositories: [split(repo).repo],
-      permissions: { contents: write ? 'write' : 'read' },
-    });
+    const token = (permissions: Record<string, string>) =>
+      this.app.octokit.request('POST /app/installations/{installation_id}/access_tokens', { installation_id, repositories: [split(repo).repo], permissions });
+    // Pushing changes under .github/workflows needs `workflows`. Installations that haven't accepted it get a 422, so push without it.
+    const { data } = write
+      ? await token({ contents: 'write', workflows: 'write' }).catch((err) => {
+          if (status(err) !== 422) throw err;
+          return token({ contents: 'write' });
+        })
+      : await token({ contents: 'read' });
     return {
       url: `https://x-access-token:${data.token}@github.com/${repo.fullName}.git`,
       cleanUrl: `https://github.com/${repo.fullName}.git`,
@@ -338,6 +343,20 @@ export class GitHubApp implements VcsHost, TicketSource {
 
   async commentOnPullRequest(repo: RepoRef, number: number, body: string) {
     await this.comment(repo, number, body); // a pull request is an issue on GitHub
+  }
+
+  async closePullRequest(repo: RepoRef, number: number) {
+    const kit = await this.kit(repo);
+    await kit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', { ...split(repo), pull_number: number, state: 'closed' });
+  }
+
+  async deleteBranch(repo: RepoRef, branch: string) {
+    const kit = await this.kit(repo);
+    try {
+      await kit.request('DELETE /repos/{owner}/{repo}/git/refs/{ref}', { ...split(repo), ref: `heads/${branch}` });
+    } catch (err) {
+      if (status(err) !== 404 && status(err) !== 422) throw err; // already gone
+    }
   }
 
   async pullRequestState(repo: RepoRef, number: number, reviewers: string[]): Promise<PullRequestState> {

@@ -10,6 +10,7 @@ Workshop stores a ticket's state in labels on the issue, all prefixed `workshop/
 |---|---|
 | *(no workshop labels)* | New: classify next |
 | `workshop/size:xs` … `workshop/size:xl` | Set by the Classifier (the latest classification wins) |
+| `workshop/needs:browser` | Set by the Classifier (or you): Implementation runs in the browser image |
 | `workshop/stage:design` | Design next |
 | `workshop/stage:design-review` | Design adversary next |
 | `workshop/stage:implement` | Implementation next |
@@ -68,7 +69,8 @@ Each sync checks every pull request waiting on you. Only a formal review counts 
 - **Approved:** `stage:merge`.
 - **Dependencies:** a ticket that GitHub shows as blocked by an open issue starts no agent at any stage, and an approved pull request isn't merged through the API. The queue says "Depends on #2". Every sync re-reads the blockers of held tickets, because closing a blocker may not change the blocked ticket's update time.
 - **Changes requested:** `stage:reclassify`. The Classifier sizes just the requested changes, then the usual route runs on the same branch. Agents receive your review comments, with file and line. The Implementation agent comments on the existing pull request instead of opening a new one, and your review is requested again.
-- **Pull request closed without merging:** Workshop stops. It adds `workshop/skip` and comments; removing the label starts again from classification.
+- **Pull request closed without merging:** Workshop closes the issue as not planned and comments; reopen the issue to start again from classification.
+- **Issue closed by you:** Workshop stops any run, clears its labels, closes its open pull request and deletes the branch it created.
 - **Merged by you:** the ticket is closed and its stage cleared.
 
 ## Merging

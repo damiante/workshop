@@ -20,7 +20,7 @@ npm run build         # client bundle
 npm run dev:server    # :3000, reads ../.env (see .env.example)
 npm run dev:client    # :5173, proxies /api to :3000
 WORKSHOP_TEST_DOCKER_SOCKET=/var/run/docker.sock npm test --workspace server   # plus the real-Docker test
-podman build -t workshop-agent:dev agent && podman build -t workshop:dev .      # images (docker works too)
+podman build --target base -t workshop-agent:dev agent && podman build -t workshop:dev .      # images (docker works too)
 ```
 
 Run `npm run typecheck` and `npm test` before finishing. Vitest doesn't type-check, and the strict `tsc` settings catch things it won't.

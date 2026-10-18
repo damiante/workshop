@@ -69,7 +69,7 @@ The dashboard shows a checklist until these are done. Everything happens on the 
 
 Click **Create the GitHub App**. GitHub opens a pre-filled page; click **Create GitHub App** and you're sent back to Workshop. Then click **Install on an account or organisation**, choose an account (your own, or an organisation you own), and pick repositories. Repeat for each organisation.
 
-- **Permissions requested:** contents, issues and pull requests (read and write); checks, statuses and metadata (read). Not Workflows, so agents can't change your CI files; grant it on GitHub if you want them to.
+- **Permissions requested:** contents, issues, pull requests and workflows (read and write); checks, statuses and metadata (read). Workflows lets agents push changes to `.github/workflows`, which means they can change your CI and anything it can reach, such as Actions secrets. Apps created before this was added need Workflows granted in the App's settings, and the installation's owner has to accept it. Until then, agents push without it, and GitHub rejects any push that touches workflow files.
 - **"Public" App:** GitHub only lets a private App be installed on the account that owns it, so the App is public-installable. Anyone who found its link could install it on *their* repositories, which would only give *your* Workshop access to them. Workshop ignores installations that didn't come back through its own Install button (you can approve others by hand).
 - **Redirects:** GitHub sends your browser back to the address you used to open Workshop, so it doesn't need to be reachable from GitHub itself. If GitHub refuses an `http://` LAN address during setup, do the one-time setup through an HTTPS address. Alternatively, create an App by hand and use **Use an existing App instead** (App ID plus a private key).
 
@@ -85,7 +85,7 @@ Add each machine that should run agents under **Agent hosts**. Workshop pulls th
 
 **Agents at once** (default 1) and the **per-agent CPU and memory** limits control capacity. The connection check shows the machine's CPUs and memory and how many agents would fit.
 
-Repositories that need other toolchains (Android SDK, Ruby, Go…) can use their own image. Build it `FROM ghcr.io/damiante/workshop-agent` and set it on the repository (see step 4).
+Repositories that need other toolchains (Android SDK, Ruby, Go…) can use their own image. Build it `FROM ghcr.io/damiante/workshop-agent` and set it on the repository (see step 4). Workshop has two images, `workshop-agent` and `workshop-agent-browser` (the same plus Playwright with headless Chromium). Implementation runs on tickets labelled `workshop/needs:browser` use the browser image; the Classifier sets that label, and you can set it yourself. A repository's custom image is used for every run, so build it `FROM` the browser image if its tickets need a browser. The browser image's `workshop.capabilities` label tells agents what they have; agents on an image without a browser are told so.
 
 ### 3. Claude
 
@@ -114,7 +114,7 @@ Scripts can do the same, launch agents and read usage over HTTP with an API toke
 
 - **Needs you** on the dashboard lists questions to answer, pull requests to review, and tickets that stopped after failures.
 - **Answer a question:** reply on the issue, then remove `workshop/needs-info`.
-- **Review:** approve the pull request on GitHub to merge it, or request changes. Plain comments don't count. You can also merge it yourself on GitHub; Workshop notices at its next check and tidies up the labels. Closing the issue stops work on it.
+- **Review:** approve the pull request on GitHub to merge it, or request changes. Plain comments don't count. You can also merge it yourself on GitHub; Workshop notices at its next check and tidies up the labels. Closing the issue stops work on it, and Workshop closes its pull request and deletes its branch. Closing the pull request closes the issue as not planned.
 - **A ticket that failed twice** gets `workshop/failed` and a comment with the error. Fix what's needed and remove the label to retry.
 - **Watch an agent:** click a running agent to see its live transcript (its messages, every command and file it touched, and its to-do list). **Stop** kills it and labels the ticket `workshop/failed` so it won't restart until you remove the label.
 - **Usage limits:** if an agent hits your limit mid-run, it's paused rather than failed, and resumes in the same session after the window resets.
@@ -130,6 +130,7 @@ Scripts can do the same, launch agents and read usage over HTTP with an API toke
 | `PORT` | | `3000` | Port inside the container |
 | `DATA_DIR` | | `/data` | Database and run logs |
 | `WORKSHOP_AGENT_IMAGE` | | set at build | Agent image; each release pins the one built from the same commit |
+| `WORKSHOP_AGENT_BROWSER_IMAGE` | | set at build | Agent image with a browser, used for Implementation on `workshop/needs:browser` tickets |
 | `TRUST_PROXY` | | `loopback, linklocal, uniquelocal` | Which proxies' `X-Forwarded-*` headers to trust ([Express syntax](https://expressjs.com/en/guide/behind-proxies.html)) |
 | `WORKSHOP_RESET_TOTP` | | | Set to `1` to remove the authenticator (lost phone). Remove it again after signing in |
 | `WORKSHOP_INSTANCE` | | `workshop` | Label value that tells this Workshop's containers apart on a shared host |
@@ -160,8 +161,8 @@ npm run typecheck
 npm run build && npm start      # production build, everything on :3000
 ```
 
-- **Agent image:** `podman build -t workshop-agent:dev agent` (or `docker build`); point `WORKSHOP_AGENT_IMAGE` at it. The `prepare` and `publish` steps can be tried against a local bare repository; the agent image section of [server/AGENTS.md](server/AGENTS.md) explains how.
+- **Agent image:** `podman build --target base -t workshop-agent:dev agent` and `podman build --target browser -t workshop-agent-browser:dev agent` (or `docker build`); point `WORKSHOP_AGENT_IMAGE` and `WORKSHOP_AGENT_BROWSER_IMAGE` at them. The `prepare` and `publish` steps can be tried against a local bare repository; the agent image section of [server/AGENTS.md](server/AGENTS.md) explains how.
 - **Docker integration test** (real engine): `WORKSHOP_TEST_DOCKER_SOCKET=/var/run/docker.sock npm test --workspace server`.
-- **CI:** [.github/workflows/build.yml](.github/workflows/build.yml) type-checks, tests and builds every push and pull request. Pushes to `main` publish `ghcr.io/<owner>/workshop` and `ghcr.io/<owner>/workshop-agent`. Make the **workshop-agent** package public in GitHub's package settings, because agent hosts pull it without credentials.
+- **CI:** [.github/workflows/build.yml](.github/workflows/build.yml) type-checks, tests and builds every push and pull request. Pushes to `main` publish `ghcr.io/<owner>/workshop` and `ghcr.io/<owner>/workshop-agent` and `ghcr.io/<owner>/workshop-agent-browser`. Make both agent packages public in GitHub's package settings, because agent hosts pull it without credentials.
 
 Contributor and agent notes: [AGENTS.md](AGENTS.md), [server/AGENTS.md](server/AGENTS.md), [client/AGENTS.md](client/AGENTS.md).

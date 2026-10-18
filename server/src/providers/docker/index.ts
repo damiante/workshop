@@ -139,6 +139,11 @@ export class DockerEnvironment implements Environment {
     }
   }
 
+  async imageLabels(image: string) {
+    const info = await this.docker.getImage(image).inspect().catch(ignore(404));
+    return info?.Config?.Labels ?? {};
+  }
+
   async createVolume(name: string, labels: Record<string, string>) {
     // Docker reuses an existing volume; Podman answers 409. Either way the volume exists.
     await this.docker.createVolume({ Name: name, Labels: labels }).catch(ignore(409));
