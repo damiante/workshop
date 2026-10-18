@@ -18,7 +18,7 @@ The original brief is [requirements.md](requirements.md), with the diagrams [wor
 
 - **Server** (`server/`): TypeScript run directly by Node 24 (type stripping, no build step), Express 5, `node:sqlite`. One in-process scheduler loop, one run supervisor, provider adapters.
 - **Client** (`client/`): React 19 single-page app built with Vite and served by the server. Live updates arrive over Server-Sent Events.
-- **Agent image** (`agent/`): Debian with Node 24, Python 3, a C toolchain, git, Playwright with headless Chromium and Claude Code (pinned). The image's `workshop.capabilities` label lists what it can do; the runner reads it per run and reports it to the agent in `system.md`. One entrypoint with four commands: `prepare`, `run`, `publish`, `usage-probe`.
+- **Agent image** (`agent/`): Debian with Node 24, Python 3, a C toolchain, git and Claude Code (pinned), plus a browser variant (Playwright with headless Chromium) that Implementation uses when the ticket is labelled `workshop/needs:browser`. The browser image's `workshop.capabilities` label lists what it can do; the runner reads it per run and reports it to the agent in `system.md`. One entrypoint with four commands: `prepare`, `run`, `publish`, `usage-probe`.
 
 Workshop never calls Anthropic with your subscription token. Only the official Claude Code CLI uses it, inside agent containers. The exception is API keys: Workshop lists models with them to validate them.
 

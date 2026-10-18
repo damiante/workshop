@@ -13,6 +13,7 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
 
 const { seedAgents, updateAgent } = await import('../src/agents.ts');
 const { allowanceOf, recordProbe } = await import('../src/allowance.ts');
+const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
@@ -40,7 +41,10 @@ class FakeEnv {
   }
   ping = async () => {};
   labels: Record<string, string> = {};
-  ensureImage = async () => {};
+  ensured: string[] = [];
+  ensureImage = async (image: string) => {
+    this.ensured.push(image);
+  };
   imageLabels = async (_image: string) => this.labels;
   createVolume = async () => {};
   removeVolume = async () => {};
@@ -176,6 +180,45 @@ describe('runner', () => {
     it('still runs when the labels cannot be read', async () => {
       const system = await runWith((e) => (e.imageLabels = async () => { throw new Error('boom'); }));
       expect(system).toContain('No browser is installed');
+    });
+  });
+
+  describe('image choice', () => {
+    const script = () =>
+      new FakeEnv({
+        prepare: ['ok'],
+        run: [result({ outcome: 'done', summary: 'ok', tests: 'ok' })],
+        publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+      });
+    const setLabels = (...extra: string[]) => run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('implement'), ...extra]));
+
+    it('uses the browser image for implementation on a ticket that needs one, pulling it before each start', async () => {
+      setLabels(label.needs('browser'));
+      fake.env = script();
+      await settle(go());
+      expect(fake.env.started.map((s: StepSpec) => s.image)).toEqual([config.agentBrowserImage, config.agentBrowserImage, config.agentBrowserImage]);
+      expect(fake.env.ensured).toContain(config.agentBrowserImage);
+    });
+    it('uses the base image without the label, and for other agents', async () => {
+      fake.env = script();
+      await settle(go());
+      expect(new Set(fake.env.started.map((s: StepSpec) => s.image))).toEqual(new Set([config.agentImage]));
+      setLabels(label.needs('browser'));
+      fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'reject', reason: 'no' })] });
+      await settle(go('classifier'));
+      expect(new Set(fake.env.started.map((s: StepSpec) => s.image))).toEqual(new Set([config.agentImage]));
+    });
+    it('pulls the image before starting every container', async () => {
+      setLabels(label.needs('browser'));
+      fake.env = script();
+      const order: string[] = [];
+      const ensure = fake.env.ensureImage;
+      const start = fake.env.start;
+      fake.env.ensureImage = async (i: string) => (order.push(`pull ${i}`), ensure(i));
+      fake.env.start = async (s: StepSpec) => (order.push(`start ${s.image}`), start(s));
+      await settle(go());
+      expect(order.length).toBeGreaterThan(0);
+      order.forEach((o, i) => { if (o.startsWith('start ')) expect(order[i - 1]).toBe(`pull ${o.slice(6)}`); });
     });
   });
 

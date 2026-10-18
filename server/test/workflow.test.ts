@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { branchFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
+import { addNeeds, branchFor, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
 import { parseResult } from '../src/workflow/schemas.ts';
 import { planTransition, type PlanContext } from '../src/workflow/transitions.ts';
 import { capabilitiesOf, environmentText, taskPrompt } from '../src/workflow/prompts.ts';
@@ -125,6 +125,20 @@ describe('planTransition', () => {
     expect(plan).toMatchObject({ publish: true, merge: true });
   });
 
+  it('classify accept with a browser capability adds the needs label and says so', () => {
+    const plan = planTransition(ctx(), { decision: 'accept', size: 's', reason: 'UI.', capabilities: ['browser'] });
+    expect(plan.add).toContain(label.needs('browser'));
+    expect(plan.comment).toContain('run with a browser');
+    expect(planTransition(ctx(), { decision: 'accept', size: 's', reason: 'x', capabilities: [] }).comment).not.toContain('browser');
+  });
+
+  it('re-classify never removes a needs label the owner added', () => {
+    const labels = [label.size('s'), label.stage('reclassify'), label.needs('browser')];
+    const plan = planTransition(ctx({ labels, mode: 'delta' }), { decision: 'accept', size: 's', reason: 'x', capabilities: [] });
+    expect(plan.remove).not.toContain(label.needs('browser'));
+    expect(plan.add).not.toContain(label.needs('browser'));
+  });
+
   it('a failed outcome is a failure, nothing published', () => {
     const plan = planTransition(ctx({ agent: 'implement' }), { outcome: 'failed', summary: 'Tests never pass.' });
     expect(plan.failure).toBe('Tests never pass.');
@@ -133,6 +147,14 @@ describe('planTransition', () => {
 });
 
 describe('parseResult', () => {
+  it('validates the classifier capabilities', () => {
+    const accept = { decision: 'accept', size: 's', reason: 'x' };
+    expect(parseResult('classifier', { ...accept, capabilities: ['browser'] })).toMatchObject({ capabilities: ['browser'] });
+    expect(parseResult('classifier', accept)).toEqual(accept);
+    expect(parseResult('classifier', { ...accept, capabilities: ['gpu'] })).toMatch(/capabilities must be a list of: browser/);
+    expect(parseResult('classifier', { ...accept, capabilities: 'browser' })).toMatch(/capabilities must be a list/);
+  });
+
   it('requires a size to accept and questions for needs_info', () => {
     expect(parseResult('classifier', { decision: 'accept', reason: 'x' })).toMatch(/size/);
     expect(parseResult('design', { outcome: 'needs_info', summary: '' })).toMatch(/question/);
@@ -226,6 +248,33 @@ describe('stateEdits', () => {
   });
 });
 
+describe('needs labels and the image choice', () => {
+  const images = { repo: null, base: 'base', browser: 'browser' };
+  const needs = parseLabels([label.needs('browser')]);
+  const plain = parseLabels([]);
+
+  it('parses needs from labels', () => {
+    expect(parseLabels([label.needs('browser')]).needs).toEqual(['browser']);
+    expect(plain.needs).toEqual([]);
+  });
+
+  it('addNeeds only adds', () => {
+    expect(addNeeds([], ['browser'])).toEqual({ add: [label.needs('browser')], remove: [] });
+    expect(addNeeds([label.needs('browser')], ['browser'])).toEqual({ add: [], remove: [] });
+    expect(addNeeds([label.needs('browser')], [])).toEqual({ add: [], remove: [] });
+  });
+
+  it('gives the browser image to implementation on a ticket that needs it', () => {
+    expect(imageFor('implement', needs, images)).toBe('browser');
+    expect(imageFor('implement', plain, images)).toBe('base');
+    for (const agent of ['classifier', 'design', 'design-review', 'merge'] as const) expect(imageFor(agent, needs, images)).toBe('base');
+  });
+
+  it("always uses a repository's own image", () => {
+    for (const agent of ['implement', 'design'] as const) expect(imageFor(agent, needs, { ...images, repo: 'mine' })).toBe('mine');
+  });
+});
+
 describe('capabilities', () => {
   it('parses the capabilities label', () => {
     expect(capabilitiesOf({})).toEqual([]);
@@ -236,6 +285,7 @@ describe('capabilities', () => {
   it('describes the environment to the agent', () => {
     expect(environmentText(['browser'])).toContain('playwright screenshot');
     expect(environmentText([])).toContain('No browser is installed');
+    expect(environmentText([])).toContain('workshop/needs:browser');
     expect(environmentText(['browser', 'gpu'])).toContain('gpu');
   });
 });
