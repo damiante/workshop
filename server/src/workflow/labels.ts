@@ -126,10 +126,14 @@ export function addNeeds(labels: string[], needs: Capability[]) {
   return { add: needs.map(label.needs).filter((name) => !labels.includes(name)), remove: [] as string[] };
 }
 
-/** The image for a run: a repository's own image always wins; Implementation on a ticket that needs a browser gets the browser image. */
-export function imageFor(agent: AgentName, state: TicketState, images: { repo: string | null; base: string; browser: string }): string {
+/**
+ * The image for a run: a repository's own image always wins; Implementation on a ticket that needs a
+ * browser gets the browser image, and so do Design and Design adversary when the Classifier set `ui`.
+ */
+export function imageFor(agent: AgentName, state: TicketState, images: { repo: string | null; base: string; browser: string }, ui = false): string {
   if (images.repo) return images.repo;
-  return agent === 'implement' && state.needs.includes('browser') ? images.browser : images.base;
+  const browser = (agent === 'implement' && state.needs.includes('browser')) || ((agent === 'design' || agent === 'design-review') && ui);
+  return browser ? images.browser : images.base;
 }
 
 /** Label edits that apply `patch`, keeping one stage and one size label at most. Fields left out stay as they are. */

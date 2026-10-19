@@ -38,10 +38,17 @@ export interface TicketLink {
   url: string;
 }
 
+/** An image in ticket text: a fetchable URL and the key that identifies it across URL shapes. */
+export interface ImageRef {
+  url: string;
+  key: string;
+}
+
 export interface TicketComment {
   author: string;
   body: string;
   createdAt: string;
+  images?: ImageRef[];
 }
 
 /** Project-management tool (GitHub Issues first). */
@@ -51,6 +58,8 @@ export interface TicketSource {
   /** Tickets changed since `since` (ISO time), or all open tickets when `since` is null. */
   listChanged(repo: RepoRef, since: string | null): Promise<RemoteTicket[]>;
   comments(repo: RepoRef, number: number): Promise<TicketComment[]>;
+  /** The images in the ticket's own text. Their links expire quickly, so download them straight away. */
+  ticketImages(repo: RepoRef, number: number): Promise<ImageRef[]>;
   setLabels(repo: RepoRef, number: number, add: string[], remove: string[]): Promise<void>;
   comment(repo: RepoRef, number: number, body: string): Promise<void>;
   /** Defaults to completed. */
@@ -88,6 +97,7 @@ export interface ReviewFeedback {
   body: string;
   path?: string;
   line?: number;
+  images?: ImageRef[];
 }
 
 /** Version-control host (GitHub first). */
@@ -124,8 +134,8 @@ export interface StepSpec {
   image: string;
   cmd: string[];
   env: Record<string, string>;
-  /** Files written into the container before it starts (path → content). */
-  files?: Record<string, string>;
+  /** Files written into the container before it starts (path → content). Names ending in "/" are folders. */
+  files?: Record<string, string | Buffer>;
   volume?: string;
   labels: Record<string, string>;
   cpus?: number;
@@ -160,6 +170,11 @@ export interface Environment {
   inspect(id: string): Promise<ContainerState | null>;
   kill(id: string): Promise<void>;
   remove(id: string): Promise<void>;
+  /**
+   * A tar archive of `path` on a run's volume, read through a throwaway container. Null when the path
+   * doesn't exist. Throws when the archive would be larger than `maxBytes`.
+   */
+  readArchive(p: { image: string; volume: string; path: string; labels: Record<string, string>; maxBytes: number }): Promise<Buffer | null>;
   list(labels: Record<string, string>): Promise<{ id: string; labels: Record<string, string>; running: boolean }[]>;
 }
 

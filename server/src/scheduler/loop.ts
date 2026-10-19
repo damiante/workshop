@@ -4,6 +4,7 @@ import { allowanceOf, allowanceViews, apiSpendSince, recordProbe } from '../allo
 import type { AgentName, Billing, HostView, QueueItem, Settings, TicketOrder } from '../api-types.ts';
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
+import { sweepMedia } from '../media.ts';
 import { publish } from '../events.ts';
 import { readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts';
 import { environmentOf, getConnection, listConnections, modelsOf, setConnectionStatus } from '../providers/index.ts';
@@ -369,6 +370,7 @@ async function cleanup(s: Settings) {
       () => {},
     );
   }
+  sweepMedia(Date.now() - 30 * 86400_000);
   run('DELETE FROM alerts WHERE ack_at IS NOT NULL AND ack_at < ?', cutoff);
   run('DELETE FROM allowance_samples WHERE ts < ?', Date.now() - 8 * 86400_000);
 }

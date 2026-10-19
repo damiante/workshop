@@ -1,9 +1,12 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
 import { allowanceViews, apiSpendSince } from '../allowance.ts';
-import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, Overview, Settings, TicketStatePatch, Usage } from '../api-types.ts';
+import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketMedia, Overview, Settings, TicketStatePatch, Usage } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
+import { listMedia, mediaDir, mediaView } from '../media.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
 import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews } from '../runs.ts';
 import { pushRefusal, withinHours } from '../scheduler/gates.ts';
@@ -13,6 +16,7 @@ import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend } from '../spend.ts';
 import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
+import { CONTENT_TYPES, extType, validName } from '../workflow/media.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
 import { OPENAPI } from './openapi.ts';
 import { check, HttpError, int, num } from './util.ts';
@@ -265,6 +269,42 @@ apiRouter.put('/tickets/:id/state', async (req, res) => {
 apiRouter.post('/sync', (_req, res) => {
   syncSoon();
   res.status(202).json({ ok: true });
+});
+
+function mediaTicket(idParam: string) {
+  check(/^[1-9]\d*$/.test(idParam), 'Ticket ids are whole numbers.');
+  const t = getTicket(Number(idParam));
+  check(t, 'Ticket not found.', 404);
+  return t;
+}
+
+apiRouter.get('/tickets/:id/media', (req, res) => {
+  const t = mediaTicket(req.params.id);
+  const body: TicketMedia = { ticketId: t.id, ticket: `${getRepo(t.repo_id)!.full_name}#${t.number}`, title: t.title, items: listMedia(t.id).map(mediaView) };
+  res.json(body);
+});
+
+apiRouter.get('/tickets/:id/media/:name', (req, res) => {
+  const t = mediaTicket(req.params.id);
+  const name = req.params.name;
+  check(validName(name), "That isn't a media file name.");
+  const row = listMedia(t.id).find((m) => m.name === name);
+  const type = extType(name);
+  check(row && type, 'Image not found.', 404);
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(path.join(mediaDir(t.id), name));
+  } catch {
+    throw new HttpError(404, 'Image not found.');
+  }
+  res.type(CONTENT_TYPES[type]);
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': `inline; filename="${name}"`,
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+    'Cache-Control': 'private, max-age=300',
+  });
+  res.send(bytes);
 });
 
 apiRouter.get('/runs', (req, res) => {

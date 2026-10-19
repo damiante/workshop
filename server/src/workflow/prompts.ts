@@ -24,7 +24,7 @@ export const DEFAULT_PROMPTS: Record<AgentName, string> = {
 4. Decline (decision "reject") when the ticket isn't actionable code work: a question or discussion, too little information to act on, technically infeasible, or a duplicate.
 5. If one specific answer from the owner would make it actionable, use "needs_info" with that question instead of declining.
 6. Use "blocked" when any part of the ticket asks for something another open ticket will build, so doing this one first would mean building that part twice or leaving it out. One sentence is enough: "expose this on the API" while another ticket is "Develop an API" means blocked by that ticket. This holds even if the repository already has something similar (such as the internal routes the web UI calls): the owner opened that other ticket because what exists isn't what they mean. List those ticket numbers in blocked_by, and name what each one provides in your reason. Don't use it when the tickets only touch the same area and either order works, or when the owner has said in a comment not to wait.
-7. When accepting, list in capabilities what the Implementation agent needs to test the change: "browser" when it changes a web UI that should be checked in a browser or shown in a screenshot. Leave it empty otherwise, since the browser image is large. In delta mode, list what the whole ticket needs, not only the requested changes.
+7. When accepting, list in capabilities what the Implementation agent needs to test the change: "browser" when it changes a web UI that should be checked in a browser or shown in a screenshot. Leave it empty otherwise, since the browser image is large. In delta mode, list what the whole ticket needs, not only the requested changes. Also set ui to true when the ticket changes what a user sees, or is a bug best looked into by running the app (a layout or rendering bug, say): Design and Design adversary then get a browser.
 
 In delta mode, changes were requested on an existing pull request: size only the requested changes, relative to what is already on the branch.`,
 
@@ -84,10 +84,20 @@ export interface TaskContext {
   review: { author: string; body: string; path?: string; line?: number }[];
   /** The repository's other open tickets (Classifier only), most recently updated first. */
   openTickets?: { number: number; title: string; body: string }[];
+  /** The Classifier found a visible UI change or a bug best examined by running the app. */
+  ui: boolean;
+  /** What's in the ticket's media store, at /work/media/<name>. */
+  media: { name: string; source: string; runId: string | null; caption: string | null }[];
 }
 
 const MAX_OPEN_TICKETS = 30;
 const MAX_OPEN_BODY = 600;
+
+const BROWSER_FOR_DESIGN =
+  'This ticket involves something a user sees. You may run the app in a browser (Playwright with Chromium) to reproduce or examine it, and save what you capture to `/work/media/`.';
+
+const SOURCE_TEXT = (m: TaskContext['media'][number]) =>
+  m.source === 'issue' ? 'from the issue' : m.source === 'comment' ? 'from a comment' : `added by ${AGENT_INFO[m.source as AgentName]?.label ?? m.source}${m.runId ? ` (run ${m.runId.slice(0, 8)})` : ''}`;
 
 function taskLine(c: TaskContext): string {
   const reviewed = c.review.length > 0;
@@ -102,16 +112,20 @@ function taskLine(c: TaskContext): string {
         : base;
     }
     case 'design':
-      return reviewed
-        ? `Revise the design at \`${c.docPath}\` to cover the review feedback above, and commit it.`
-        : `Write the design at \`${c.docPath}\` and commit it.`;
+      return [
+        reviewed
+          ? `Revise the design at \`${c.docPath}\` to cover the review feedback above, and commit it.`
+          : `Write the design at \`${c.docPath}\` and commit it.`,
+        c.ui ? BROWSER_FOR_DESIGN : '',
+      ].filter(Boolean).join(' ');
     case 'design-review':
-      return `Review and improve the design at \`${c.docPath}\`, then commit.`;
+      return [`Review and improve the design at \`${c.docPath}\`, then commit.`, c.ui ? BROWSER_FOR_DESIGN : ''].filter(Boolean).join(' ');
     case 'implement':
       return [
         `Implement this ticket on branch \`${c.branch}\`.`,
         `Follow the design at \`${c.docPath}\` if that file exists (XS and S tickets normally have none).`,
         reviewed ? 'Address all of the review feedback above.' : '',
+        "If the change affects what a user sees, run the app, screenshot the changed screens or states and save them to `/work/media/`. Before and after shots are best when the old state is easy to reach. If the app can't run here, say so in your summary instead.",
       ].filter(Boolean).join(' ');
     case 'merge':
       return `Run \`git merge origin/${c.base}\`, resolve the conflicts, run the tests and commit the merge.`;
@@ -148,6 +162,13 @@ export function taskPrompt(c: TaskContext): string {
     const left = c.openTickets.length - MAX_OPEN_TICKETS;
     if (left > 0) parts.push('', `_${left} more open ticket(s) left out._`);
   }
+  parts.push('', '## Media', '');
+  if (c.media.length) for (const m of c.media) parts.push(`- /work/media/${m.name}: ${SOURCE_TEXT(m)}${m.caption ? `: ${m.caption}` : ''}`);
+  else parts.push('(Empty.)');
+  parts.push(
+    '',
+    'This folder is shared by every agent working on this ticket. Open an image with the Read tool. To add images, write them straight into `/work/media/` (no subfolders; PNG, JPEG, GIF or WebP; 10 MB each) and list each file you add in the result\'s `media` field with a one-line caption. Files anywhere else are lost when you finish, and deleting a file here does not remove it from the store.',
+  );
   parts.push('', '## Your task', taskLine(c));
   return parts.join('\n');
 }
@@ -163,7 +184,7 @@ export function capabilitiesOf(labels: Record<string, string>): string[] {
 /** What the agent's container can do, for the system prompt. */
 export function environmentText(caps: string[]): string {
   const browser = caps.includes('browser')
-    ? 'A headless Chromium is available through Playwright (installed globally; browsers in $PLAYWRIGHT_BROWSERS_PATH). For a screenshot, start the app and run `playwright screenshot --full-page <url> <file>.png`; for scripted checks, `require(\'playwright\')` from a CommonJS script (`.cjs`: the global install resolves through NODE_PATH, which `import` ignores). If the repository pins its own Playwright version, run `npx playwright install chromium` first. Everything left under /work/repo is committed and pushed when you finish, so save screenshots outside it (for example /tmp) unless you mean to commit them.'
+    ? 'A headless Chromium is available through Playwright (installed globally; browsers in $PLAYWRIGHT_BROWSERS_PATH). For a screenshot, start the app and run `playwright screenshot --full-page <url> <file>.png`; for scripted checks, `require(\'playwright\')` from a CommonJS script (`.cjs`: the global install resolves through NODE_PATH, which `import` ignores). If the repository pins its own Playwright version, run `npx playwright install chromium` first. Everything left under /work/repo is committed and pushed when you finish, so save screenshots to /work/media/ (Workshop keeps them and shows them to the owner), not under /work/repo, unless you mean to commit them.'
     : 'No browser is installed in this environment. If the task needs one (screenshots, browser tests), do the rest and say in your summary what you couldn\'t check. Workshop runs Implementation with a browser when the ticket has the `workshop/needs:browser` label, so suggest that the owner add it.';
   const other = caps.filter((c) => c !== 'browser');
   return `## Environment\n\n${browser}${other.length ? `\n\nOther capabilities declared by this image: ${other.join(', ')}.` : ''}`;

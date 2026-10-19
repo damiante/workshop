@@ -212,6 +212,11 @@ function Card({ t }: { t: TicketView }) {
           {t.prStatus === 'conflict' ? ' (conflicts)' : t.prStatus === 'blocked' ? ' (waiting for checks)' : ''}
         </a>
       )}
+      {t.mediaCount > 0 && (
+        <Link className="small" to={`/tickets/${t.id}/media`}>
+          Screenshots ({t.mediaCount})
+        </Link>
+      )}
       {t.next && !t.activeRunId && <span className="small muted">Next: {t.next}</span>}
       {!t.activeRunId && (
         <div className="row small">

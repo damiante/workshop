@@ -128,7 +128,8 @@ Scripts can do the same, launch agents and read usage over HTTP with an API toke
 | `WORKSHOP_SECRET_KEY` | yes | | Encrypts stored credentials. Keep a copy: if it changes, Workshop refuses to start rather than lose them |
 | `TZ` | | `UTC` | Default time zone for operating hours |
 | `PORT` | | `3000` | Port inside the container |
-| `DATA_DIR` | | `/data` | Database and run logs |
+| `DATA_DIR` | | `/data` | Database, run logs and the per-ticket media store |
+| `WORKSHOP_PUBLIC_URL` | | | Workshop's address as you open it, e.g. `https://workshop.example.com`. Used for screenshot links in pull requests; without it the PR says to open the ticket in Workshop |
 | `WORKSHOP_AGENT_IMAGE` | | set at build | Agent image; each release pins the one built from the same commit |
 | `WORKSHOP_AGENT_BROWSER_IMAGE` | | set at build | Agent image with a browser, used for Implementation on `workshop/needs:browser` tickets |
 | `TRUST_PROXY` | | `loopback, linklocal, uniquelocal` | Which proxies' `X-Forwarded-*` headers to trust ([Express syntax](https://expressjs.com/en/guide/behind-proxies.html)) |

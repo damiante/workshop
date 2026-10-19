@@ -183,6 +183,8 @@ describe('taskPrompt', () => {
     comments: [],
     omittedComments: 0,
     review: [],
+    ui: false,
+    media: [],
   };
 
   it('lists the other open tickets for the classifier only, trimmed and counted', () => {
@@ -212,12 +214,75 @@ describe('taskPrompt', () => {
       comments: [{ author: 'me', body: 'Use Y', createdAt: '2026-10-01T00:00:00Z' }],
       omittedComments: 2,
       review: [{ author: 'me', body: 'Rename this', path: 'a.ts', line: 4 }],
+      ui: false,
+      media: [],
     });
     expect(prompt).toContain('# me/app#3: X');
     expect(prompt).toContain('**@me** (2026-10-01):');
     expect(prompt).toContain('2 comment(s) from people outside');
     expect(prompt).toContain('on `a.ts:4`: Rename this');
     expect(prompt).toContain('Address all of the review feedback above.');
+  });
+
+  it('lists the media store with source and caption, or says it is empty', () => {
+    expect(taskPrompt({ ...base, agent: 'implement' })).toContain('## Media\n\n(Empty.)');
+    const prompt = taskPrompt({
+      ...base,
+      agent: 'implement',
+      media: [
+        { name: 'issue-1.png', source: 'issue', runId: null, caption: null },
+        { name: 'comment-1.png', source: 'comment', runId: null, caption: null },
+        { name: 'after.png', source: 'Implementation', runId: 'abcdef12-0000', caption: 'Dark mode' },
+      ],
+    });
+    expect(prompt).toContain('- /work/media/issue-1.png: from the issue');
+    expect(prompt).toContain('- /work/media/comment-1.png: from a comment');
+    expect(prompt).toContain('- /work/media/after.png: added by Implementation (run abcdef12): Dark mode');
+    expect(prompt).toContain('Read tool');
+    expect(prompt).toContain('`media` field');
+  });
+
+  it('mentions a browser to Design and Design adversary only when ui is set; Implementation always gets the screenshot sentence', () => {
+    for (const agent of ['design', 'design-review'] as const) {
+      expect(taskPrompt({ ...base, agent })).not.toMatch(/browser|Playwright/);
+      expect(taskPrompt({ ...base, agent, ui: true })).toContain('Playwright with Chromium');
+    }
+    for (const ui of [false, true]) expect(taskPrompt({ ...base, agent: 'implement', ui })).toContain('screenshot the changed screens');
+    expect(taskPrompt({ ...base, agent: 'classifier' })).not.toMatch(/Playwright/);
+  });
+});
+
+describe('media and ui results', () => {
+  it('accepts and rejects ui on the classifier', () => {
+    expect(parseResult('classifier', { decision: 'accept', size: 's', reason: 'r', ui: true })).toMatchObject({ ui: true });
+    expect(parseResult('classifier', { decision: 'accept', size: 's', reason: 'r', ui: false })).toMatchObject({ ui: false });
+    expect(parseResult('classifier', { decision: 'accept', size: 's', reason: 'r', ui: 'yes' })).toMatch(/ui must be/);
+  });
+
+  it('accepts and rejects media on work results', () => {
+    expect(parseResult('implement', { outcome: 'done', summary: 's', media: [{ path: '/work/media/a.png', caption: 'A' }] })).toMatchObject({ media: [{ path: '/work/media/a.png' }] });
+    expect(parseResult('implement', { outcome: 'done', summary: 's', media: [] })).toMatchObject({ outcome: 'done' });
+    expect(parseResult('implement', { outcome: 'done', summary: 's', media: 'x' })).toBe('media must be a list of { path, caption }.');
+    expect(parseResult('implement', { outcome: 'done', summary: 's', media: [{ path: 1 }] })).toBe('media must be a list of { path, caption }.');
+    expect(parseResult('implement', { outcome: 'done', summary: 's', media: [{ path: 'a.png' }] })).toBe('media must be a list of { path, caption }.');
+  });
+
+  it('carries ui on accept and deletes the media store on reject', () => {
+    const ctx = { agent: 'classifier', mode: 'normal', labels: [], state: parseLabels([]), author: 'me', docPath: 'd.md', docUrl: 'u' } as PlanContext;
+    expect(planTransition(ctx, { decision: 'accept', size: 'm', reason: 'r', ui: true })).toMatchObject({ ui: true });
+    expect(planTransition(ctx, { decision: 'accept', size: 'm', reason: 'r' }).ui).toBeUndefined();
+    expect(planTransition(ctx, { decision: 'reject', reason: 'r' }).deleteMedia).toBe(true);
+  });
+
+  it('gives Design and Design adversary the browser image only with ui; a repository image still wins', () => {
+    const images = { repo: null, base: 'base', browser: 'browser' };
+    const plain = parseLabels([]);
+    for (const agent of ['design', 'design-review'] as const) {
+      expect(imageFor(agent, plain, images)).toBe('base');
+      expect(imageFor(agent, plain, images, true)).toBe('browser');
+      expect(imageFor(agent, plain, { ...images, repo: 'mine' }, true)).toBe('mine');
+    }
+    expect(imageFor('classifier', plain, images, true)).toBe('base');
   });
 });
 

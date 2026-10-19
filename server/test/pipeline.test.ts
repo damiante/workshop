@@ -1,4 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { tar } from '../src/providers/docker/tar.ts';
 import type { StepSpec } from '../src/providers/types.ts';
 
 // The providers are replaced with fakes; everything else (DB, runner, transitions) is real.
@@ -18,7 +21,8 @@ const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, setConnectionStatus } = await import('../src/providers/index.ts');
 const { bus } = await import('../src/events.ts');
-const { activity, getRun } = await import('../src/runs.ts');
+const { activity, getRun, readLog } = await import('../src/runs.ts');
+const { sweepMedia } = await import('../src/media.ts');
 const { launch, resume } = await import('../src/scheduler/runner.ts');
 const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
 const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
@@ -60,6 +64,9 @@ class FakeEnv {
     for (const text of (this.script[id.split('-')[0]] ?? []).slice(skip)) onLine({ stream: 'stdout', text });
   };
   wait = async () => ({ running: false, exitCode: 0, oomKilled: false });
+  /** What the run's /work/media holds when the agent finishes (a tar archive), or null for none. */
+  archive: Buffer | null = null;
+  readArchive = async () => this.archive;
   spec = (step: string) => this.started.find((s) => s.cmd[0] === step);
 }
 
@@ -901,5 +908,271 @@ describe('ticket order', () => {
     fake.tickets.listChanged = async () => [remote()];
     await syncRepo(repo);
     expect(getTicket(1)!.created_at).toBe('2026-09-01T00:00:00Z');
+  });
+});
+
+describe('media store', () => {
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(40)]);
+  const UUID = '0e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b';
+  const UUID2 = '1e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b';
+  const priv = (id: string) => `https://private-user-images.githubusercontent.com/1/2-${id}.png?jwt=x`;
+  const ref = (id: string, url = priv(id)) => ({ url, key: id });
+  const storeDir = () => path.join(config.dataDir, 'media', '1');
+  const rows = () => all<any>('SELECT * FROM media WHERE ticket_id = 1 ORDER BY id');
+  const logOf = (id: string) => readLog(id).filter((e) => e.step === 'workshop').map((e) => e.text);
+  let fetched: string[];
+  let respond: (url: string) => Response;
+  const png = () => new Response(PNG, { status: 200 });
+
+  const finish = (media?: object[]) => result({ outcome: 'done', summary: 'Done.', ...(media ? { media } : {}) });
+  const env = (over: { run?: string[]; archive?: Buffer | null } = {}) => {
+    const e = new FakeEnv({ prepare: ['ok'], run: over.run ?? [finish()], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+    e.archive = over.archive ?? null;
+    fake.env = e;
+    return e;
+  };
+
+  beforeEach(() => {
+    fs.rmSync(storeDir(), { recursive: true, force: true });
+    run('DELETE FROM media');
+    run('UPDATE tickets SET ui = 0 WHERE id = 1');
+    fetched = [];
+    respond = () => png();
+    vi.stubGlobal('fetch', async (url: string) => {
+      fetched.push(url);
+      return respond(url);
+    });
+    fake.tickets.ticketImages = async () => [];
+    config.publicUrl = null;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('copies issue images into the store, delivers them to the run and rewrites the links, without downloading them again', async () => {
+    fake.tickets.ticketImages = async () => [ref(UUID)];
+    run("UPDATE tickets SET body = ? WHERE id = 1", `Looks like this: ![](https://github.com/user-attachments/assets/${UUID})`);
+    const e = env();
+    await settle(go());
+    expect(fetched).toEqual([priv(UUID)]);
+    expect(rows()).toMatchObject([{ name: 'issue-1.png', source: 'issue', source_key: UUID, size: PNG.length }]);
+    const spec = e.spec('run')!;
+    expect((spec.files!['media/issue-1.png'] as Buffer).equals(PNG)).toBe(true);
+    expect(spec.files!['media/']).toBe('');
+    const prompt = spec.files!['.workshop/prompt.md'] as string;
+    expect(prompt).toContain('![](/work/media/issue-1.png)');
+    expect(prompt).toContain('- /work/media/issue-1.png: from the issue');
+
+    env();
+    await settle(go());
+    expect(fetched).toHaveLength(1);
+    expect((fake.env.spec('run')!.files!['.workshop/prompt.md'] as string)).toContain('![](/work/media/issue-1.png)');
+  });
+
+  it('only fetches allowed hosts, follows redirects to GitHub storage and skips stranger comments', async () => {
+    run("UPDATE tickets SET body = '' WHERE id = 1");
+    fake.tickets.ticketImages = async () => [ref(UUID, `https://github.com/user-attachments/assets/${UUID}`), ref('evil', 'https://evil.example/x.png'), ref(UUID2, `https://github.com/user-attachments/assets/${UUID2}`)];
+    fake.tickets.comments = async () => [
+      { author: 'me', body: 'c', createdAt: '2026-10-12T00:00:00Z', images: [ref('11111111-1111-1111-1111-111111111111', 'https://user-images.githubusercontent.com/1/ok.png')] },
+      { author: 'stranger', body: 'x', createdAt: '2026-10-12T01:00:00Z', images: [ref('22222222-1111-1111-1111-111111111111', 'https://user-images.githubusercontent.com/1/stranger.png')] },
+    ];
+    respond = (url) => {
+      if (url === `https://github.com/user-attachments/assets/${UUID}`) return new Response(null, { status: 302, headers: { location: 'https://objects.githubusercontent.com/abc' } });
+      if (url === `https://github.com/user-attachments/assets/${UUID2}`) return new Response(null, { status: 302, headers: { location: 'https://evil.example/steal' } });
+      if (url.includes('ok.png')) return new Response('<html>not an image</html>', { status: 200 });
+      return png();
+    };
+    const id = go();
+    await settle(id);
+    expect(fetched).toContain('https://objects.githubusercontent.com/abc');
+    expect(fetched).not.toContain('https://evil.example/x.png');
+    expect(fetched).not.toContain('https://evil.example/steal');
+    expect(fetched.some((u) => u.includes('stranger'))).toBe(false);
+    expect(rows().map((r) => r.name)).toEqual(['issue-1.png']);
+    const log = logOf(id).join('\n');
+    expect(log).toContain('evil.example');
+    expect(log).toContain("isn't a PNG");
+  });
+
+  it('copies at most 50 new images per run and warns about the rest', async () => {
+    const many = Array.from({ length: 51 }, (_, i) => ref(`${String(i).padStart(8, '0')}-4c5d-4e6f-8a9b-0c1d2e3f4a5b`));
+    fake.tickets.ticketImages = async () => many;
+    const id = go();
+    env();
+    await settle(id);
+    expect(rows()).toHaveLength(50);
+    expect(logOf(id).filter((l) => l.includes('at most 50'))).toHaveLength(1);
+  });
+
+  it('carries media added by one run to the next run on the ticket', async () => {
+    env({ archive: tar({ 'media/': '', 'media/after.png': PNG }), run: [finish([{ path: '/work/media/after.png', caption: 'Dark mode' }])] });
+    const first = await settle(go());
+    expect(first.status).toBe('succeeded');
+    expect(rows()).toMatchObject([{ name: 'after.png', source: 'Implementation', run_id: first.id, caption: 'Dark mode' }]);
+    const e = env();
+    await settle(go());
+    const spec = e.spec('run')!;
+    expect((spec.files!['media/after.png'] as Buffer).equals(PNG)).toBe(true);
+    expect(spec.files!['.workshop/prompt.md']).toContain(`- /work/media/after.png: added by Implementation (run ${first.id.slice(0, 8)}): Dark mode`);
+  });
+
+  it('copies back good files and skips bad ones with a warning, without failing the run', async () => {
+    const huge = Buffer.concat([PNG, Buffer.alloc(10 * 1024 * 1024)]);
+    env({ archive: tar({ 'media/': '', 'media/good.png': PNG, 'media/fake.png': 'hello', 'media/huge.png': huge, 'media/sub/': '', 'media/sub/x.png': PNG, 'media/notes.txt': 'x' }) });
+    const id = go();
+    const r = await settle(id);
+    expect(r.status).toBe('succeeded');
+    expect(rows().map((x) => x.name)).toEqual(['good.png']);
+    expect(fs.existsSync(path.join(storeDir(), 'fake.png'))).toBe(false);
+    const log = logOf(id).join('\n');
+    expect(log).toContain('media/fake.png');
+    expect(log).toContain('media/huge.png');
+    expect(log).toContain('media/sub/');
+    expect(log).toContain('media/notes.txt');
+  });
+
+  it('replaces an agent file without counting its size twice, and skips an unchanged one', async () => {
+    const bigger = Buffer.concat([PNG, Buffer.alloc(100)]);
+    env({ archive: tar({ 'media/a.png': PNG }) });
+    await settle(go());
+    const created = rows()[0].created_at;
+    env({ archive: tar({ 'media/a.png': PNG }) });
+    await settle(go());
+    expect(rows()[0].created_at).toBe(created);
+    env({ archive: tar({ 'media/a.png': bigger }) });
+    await settle(go());
+    expect(rows()).toMatchObject([{ name: 'a.png', size: bigger.length }]);
+  });
+
+  it('does not let an agent replace an image from the issue', async () => {
+    fake.tickets.ticketImages = async () => [ref(UUID)];
+    const other = Buffer.concat([PNG, Buffer.alloc(5)]);
+    env({ archive: tar({ 'media/issue-1.png': other }) });
+    const id = go();
+    await settle(id);
+    expect(fs.readFileSync(path.join(storeDir(), 'issue-1.png')).equals(PNG)).toBe(true);
+    expect(logOf(id).join('\n')).toContain('replace an image from the issue');
+  });
+
+  it('writes nothing for a closed ticket', async () => {
+    run("UPDATE tickets SET state = 'closed' WHERE id = 1");
+    env({ archive: tar({ 'media/a.png': PNG }) });
+    await settle(go());
+    run("UPDATE tickets SET state = 'open' WHERE id = 1");
+    expect(rows()).toEqual([]);
+    expect(fs.existsSync(storeDir())).toBe(false);
+  });
+
+  it('warns, and still succeeds, when the media folder cannot be read', async () => {
+    const e = env();
+    e.readArchive = async () => {
+      throw new Error('Media folder is larger than 200 MB');
+    };
+    const id = go();
+    expect((await settle(id)).status).toBe('succeeded');
+    expect(logOf(id).join('\n')).toContain('larger than 200 MB');
+  });
+
+  it('puts a Screenshots line in the pull request body, with links when WORKSHOP_PUBLIC_URL is set', async () => {
+    config.publicUrl = 'https://workshop.example.com';
+    env({ archive: tar({ 'media/after.png': PNG }), run: [finish([{ path: 'after.png', caption: 'Dark mode' }])] });
+    await settle(go());
+    const body = fake.vcs.openPullRequest.mock.calls.at(-1)![1].body as string;
+    expect(body).toContain('**Screenshots:** [all screenshots](https://workshop.example.com/tickets/1/media) · [Dark mode](https://workshop.example.com/api/tickets/1/media/after.png)');
+    expect(body.indexOf('Screenshots')).toBeLessThan(body.indexOf('Closes #3'));
+  });
+
+  it('falls back to plain text without a public URL, and omits the line without media', async () => {
+    env({ archive: tar({ 'media/after.png': PNG }) });
+    await settle(go());
+    expect(fake.vcs.openPullRequest.mock.calls.at(-1)![1].body).toContain('**Screenshots:** open this ticket in Workshop');
+    run('UPDATE tickets SET pr_number = NULL, pr_url = NULL WHERE id = 1');
+    run('DELETE FROM media');
+    env();
+    await settle(go());
+    expect(fake.vcs.openPullRequest.mock.calls.at(-1)![1].body).not.toContain('Screenshots');
+  });
+
+  it('adds the screenshots line to the update comment after review', async () => {
+    run('UPDATE tickets SET pr_number = 7 WHERE id = 1');
+    env({ archive: tar({ 'media/after.png': PNG }) });
+    await settle(go());
+    const call = fake.vcs.commentOnPullRequest.mock.calls.at(-1);
+    expect(call?.[2]).toContain('Updated after review.');
+    expect(call?.[2]).toContain('**Screenshots:**');
+  });
+
+  it('stores the classifier ui flag on the ticket, and gives Design the browser image and prompt', async () => {
+    run("UPDATE tickets SET labels = '[]' WHERE id = 1");
+    env({ run: [result({ decision: 'accept', size: 'm', reason: 'Visible.', ui: true })] });
+    await settle(go('classifier'));
+    expect(one<{ ui: number }>('SELECT ui FROM tickets WHERE id = 1')!.ui).toBe(1);
+
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('m'), label.stage('design')]));
+    const e = env();
+    const id = launch({ ticketId: 1, agent: 'design', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!;
+    await settle(id);
+    expect(e.spec('run')!.files!['.workshop/prompt.md']).toContain('Playwright with Chromium');
+  });
+
+  describe('cleanup', () => {
+    const seed = () => {
+      fs.mkdirSync(storeDir(), { recursive: true });
+      fs.writeFileSync(path.join(storeDir(), 'a.png'), PNG);
+      run("INSERT INTO media (ticket_id, name, source, size, created_at) VALUES (1, 'a.png', 'Implementation', ?, 1)", PNG.length);
+    };
+    const gone = () => expect([rows().length, fs.existsSync(storeDir())]).toEqual([0, false]);
+
+    it('deletes the store when the pull request is merged', async () => {
+      seed();
+      run('UPDATE tickets SET pr_number = 7, labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('merge')]));
+      fake.vcs.pullRequestState = async () => ({ number: 7, url: 'u', state: 'merged', headSha: 'a', mergeable: 'clean', decision: 'approved' });
+      await mergeApproved(true);
+      await mergeApproved(false);
+      gone();
+    });
+
+    it('deletes the store when the pull request is closed', async () => {
+      seed();
+      run('UPDATE tickets SET pr_number = 7, labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('pr-review')]));
+      fake.tickets.listChanged = async () => [];
+      fake.vcs.pullRequestState = async () => ({ number: 7, url: 'u', state: 'closed', headSha: 'a', mergeable: 'clean', decision: null });
+      await syncRepo(getRepo(1)!);
+      gone();
+    });
+
+    it('deletes the store when the issue is closed', async () => {
+      seed();
+      fake.tickets.listChanged = async () => [
+        { number: 3, title: 'Add dark mode', body: '', state: 'closed', author: 'me', url: 'u', updatedAt: '2026-10-13T02:00:00Z', labels: [label.size('s'), label.stage('implement')] },
+      ];
+      fake.vcs.pullRequestState = async () => ({ number: 7, url: 'u', state: 'open', headSha: 'a', mergeable: 'clean', decision: null });
+      await syncRepo(getRepo(1)!);
+      gone();
+    });
+
+    it('deletes the store when the classifier declines the ticket', async () => {
+      seed();
+      run("UPDATE tickets SET labels = '[]' WHERE id = 1");
+      env({ run: [result({ decision: 'reject', reason: 'Not code.' })] });
+      await settle(go('classifier'));
+      gone();
+    });
+
+    it('the sweep removes stores of closed, missing and stale tickets, and keeps busy ones', () => {
+      seed();
+      sweepMedia(Date.parse('2026-10-01T00:00:00Z')); // ticket updated 2026-10-13: fresh
+      expect(rows()).toHaveLength(1);
+      sweepMedia(Date.parse('2026-11-01T00:00:00Z')); // now stale
+      gone();
+      seed();
+      run("UPDATE tickets SET state = 'closed' WHERE id = 1");
+      sweepMedia(0);
+      gone();
+      run("UPDATE tickets SET state = 'open' WHERE id = 1");
+      fs.mkdirSync(path.join(config.dataDir, 'media', '999'), { recursive: true }); // a folder for a ticket that no longer exists
+      sweepMedia(0);
+      expect(fs.existsSync(path.join(config.dataDir, 'media', '999'))).toBe(false);
+    });
   });
 });

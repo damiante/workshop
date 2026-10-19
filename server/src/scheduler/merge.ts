@@ -1,5 +1,6 @@
 import { raiseAlert } from '../alerts.ts';
 import { run } from '../db.ts';
+import { deleteMedia } from '../media.ts';
 import { getSettings } from '../settings.ts';
 import { branchOf, editLabels, getRepo, labelsOf, repoRef, sourceFor, vcsFor, type TicketRow } from '../tickets.ts';
 import { label, moveTo } from '../workflow/labels.ts';
@@ -12,6 +13,7 @@ export async function finishMerged(t: TicketRow) {
   if (t.state !== 'closed') await sourceFor(repo).close(repoRef(repo), t.number);
   await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running]);
   run("UPDATE tickets SET state = 'closed', pr_status = 'merged' WHERE id = ?", t.id);
+  deleteMedia(t.id);
 }
 
 /** You closed the pull request without merging: close the issue as not planned. Reopening it starts again. */
@@ -25,6 +27,7 @@ export async function stopAfterClosedPr(t: TicketRow) {
     t.number,
     'The pull request was closed without merging, so Workshop closed this issue as not planned. Reopen the issue to start again from classification.',
   );
+  deleteMedia(t.id);
 }
 
 /** You closed the issue: close Workshop's open pull request, delete its branch and clear its labels. */

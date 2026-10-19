@@ -1,10 +1,13 @@
+import fs from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import path from 'node:path';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { seedAgents } from '../src/agents.ts';
 import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
 import { initDb, one, run } from '../src/db.ts';
+import { mediaDir } from '../src/media.ts';
 import { createConnection } from '../src/providers/index.ts';
 import { publish } from '../src/events.ts';
 import { appendLog } from '../src/runs.ts';
@@ -246,6 +249,56 @@ describe('repository priority', () => {
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('Priority must be a whole number from -100 to 100.');
     }
+  });
+});
+
+describe('media', () => {
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(16)]);
+  let ticketId = 0;
+
+  beforeAll(() => {
+    const conn = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('vcs', 'github', 'GH media', '{}', '', 'ok', 0, 0)").lastInsertRowid);
+    const repo = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (?, 'me/media', 'main', 'u', 1)", conn).lastInsertRowid);
+    ticketId = Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 5, 'Dark mode', '', 'u', 'Damiante', 'open', '[]', '2026-10-13T00:00:00Z')", repo).lastInsertRowid);
+    fs.mkdirSync(mediaDir(ticketId), { recursive: true });
+    fs.writeFileSync(path.join(mediaDir(ticketId), 'after.png'), PNG);
+    run("INSERT INTO media (ticket_id, name, source, run_id, caption, size, created_at) VALUES (?, 'after.png', 'Implementation', 'r1', 'Dark', ?, 5)", ticketId, PNG.length);
+  });
+
+  it('needs sign-in', async () => {
+    expect((await request(app).get(`/api/tickets/${ticketId}/media`)).status).toBe(401);
+    expect((await request(app).get(`/api/tickets/${ticketId}/media/after.png`)).status).toBe(401);
+  });
+
+  it('lists the items', async () => {
+    const res = await request(app).get(`/api/tickets/${ticketId}/media`).set('cookie', cookie);
+    expect(res.body).toMatchObject({ ticketId, ticket: 'me/media#5', title: 'Dark mode' });
+    expect(res.body.items).toEqual([{ name: 'after.png', source: 'Implementation', runId: 'r1', caption: 'Dark', size: PNG.length, createdAt: 5, url: `/api/tickets/${ticketId}/media/after.png` }]);
+    expect((await request(app).get('/api/tickets/99999/media').set('cookie', cookie)).status).toBe(404);
+    expect((await request(app).get('/api/tickets/abc/media').set('cookie', cookie)).status).toBe(400);
+    const view = (await request(app).get('/api/tickets').set('cookie', cookie)).body.find((t: { id: number }) => t.id === ticketId);
+    expect(view.mediaCount).toBe(1);
+  });
+
+  it('serves the file with its own type and safe headers', async () => {
+    const res = await request(app).get(`/api/tickets/${ticketId}/media/after.png`).set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('image/png');
+    expect(res.headers['x-content-type-options']).toBe('nosniff');
+    expect(res.headers['content-disposition']).toMatch(/^inline/);
+    expect(res.headers['content-security-policy']).toContain('sandbox');
+    expect(res.body.equals(PNG)).toBe(true);
+  });
+
+  it('rejects bad names and unknown files', async () => {
+    for (const name of ['a..png', '..%2Fx.png', '%2e%2e%2f%2e%2e%2fetc%2fpasswd', 'x.svg.png.']) {
+      const res = await request(app).get(`/api/tickets/${ticketId}/media/${name}`).set('cookie', cookie);
+      expect([400, 404]).toContain(res.status);
+      expect(res.headers['content-type']).toMatch(/json/);
+    }
+    expect((await request(app).get(`/api/tickets/${ticketId}/media/a..png`).set('cookie', cookie)).status).toBe(400);
+    expect((await request(app).get(`/api/tickets/${ticketId}/media/..%2Fx.png`).set('cookie', cookie)).status).toBe(400);
+    expect((await request(app).get(`/api/tickets/${ticketId}/media/other.png`).set('cookie', cookie)).status).toBe(404);
   });
 });
 
