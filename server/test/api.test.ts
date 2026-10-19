@@ -1,10 +1,13 @@
+import type { AddressInfo } from 'node:net';
 import request from 'supertest';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { seedAgents } from '../src/agents.ts';
 import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
 import { initDb, one, run } from '../src/db.ts';
 import { createConnection } from '../src/providers/index.ts';
+import { publish } from '../src/events.ts';
+import { appendLog } from '../src/runs.ts';
 import { saveSettings } from '../src/settings.ts';
 import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
@@ -433,5 +436,115 @@ describe('alert links', () => {
     const res = await request(app).get('/api/alerts').set('cookie', cookie);
     const byKind = Object.fromEntries(res.body.map((a: { kind: string; runId: string | null }) => [a.kind, a.runId]));
     expect(byKind).toMatchObject({ 'run-detached': 'r-old', 'ticket-failed': 'r-new', 'host-offline': null, gone: null });
+  });
+});
+
+describe('live streams', () => {
+  let base = '';
+  let server: ReturnType<typeof app.listen>;
+  let ticket = 0;
+  beforeAll(async () => {
+    server = app.listen(0);
+    await new Promise((r) => server.once('listening', r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
+    const conn = createConnection('vcs', 'github', 'live', { appId: '1' }, {});
+    const repo = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (?, 'me/live', 'main', 'u', 1)", conn).lastInsertRowid);
+    ticket = Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 1, 't', '', 'u', 'Damiante', 'open', '[]', '2026-10-13T00:00:00Z')", repo).lastInsertRowid);
+  });
+  afterAll(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+
+  const addRun = (id: string, status: string, lines: number) => {
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, 'design', 1, 'm', 'subscription', ?, 0)", id, ticket, status);
+    for (let i = 0; i < lines; i++) appendLog(id, { step: 'run', stream: 'stdout', text: `line ${i}` });
+  };
+  const open = async (path: string) => {
+    const ctl = new AbortController();
+    const res = await fetch(base + path, { headers: { cookie }, signal: ctl.signal });
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let pending: ReturnType<typeof reader.read> | undefined;
+    return {
+      res,
+      abort: () => ctl.abort(),
+      /** Reads until the stream ends or `until` matches; returns what was read. */
+      async read(until?: RegExp) {
+        let text = '';
+        for (;;) {
+          pending ??= reader.read(); // a read that timed out is kept, so it doesn't swallow the next chunk
+          const part = await Promise.race([pending, new Promise<null>((r) => setTimeout(() => r(null), 300))]);
+          if (!part) return { text, ended: false };
+          pending = undefined;
+          if (part.done) return { text, ended: true };
+          text += decoder.decode(part.value);
+          if (until?.test(text)) return { text, ended: false };
+        }
+      },
+    };
+  };
+
+  it('forbids caching API responses', async () => {
+    expect((await request(app).get('/api/overview').set('cookie', cookie)).headers['cache-control']).toBe('no-store');
+  });
+
+  it('sends a visible ping when the event stream opens', async () => {
+    const s = await open('/events');
+    expect(s.res.headers.get('content-type')).toBe('text/event-stream');
+    expect(s.res.headers.get('cache-control')).toContain('no-transform');
+    expect((await s.read(/event: ping/)).text).toContain('event: ping\ndata: {}');
+    publish('runs');
+    expect((await s.read(/"runs"/)).text).toContain('data: {"topic":"runs"}');
+    s.abort();
+  });
+
+  it('replays a finished run log, then ends the stream', async () => {
+    addRun('live-done', 'succeeded', 2);
+    const s = await open('/runs/live-done/log');
+    const { text, ended } = await s.read();
+    expect(text).toContain('line 0');
+    expect(text).toContain('line 1');
+    expect(text.trimEnd().endsWith('data: {}')).toBe(true);
+    expect(text).toContain('event: end');
+    expect(ended).toBe(true);
+  });
+
+  it('exports a run log as a JSON Lines download', async () => {
+    const res = await request(app).get('/api/runs/live-done/export').set('cookie', cookie).buffer(true).parse((r, cb) => {
+      const chunks: Buffer[] = [];
+      r.on('data', (c: Buffer) => chunks.push(c));
+      r.on('end', () => cb(null, Buffer.concat(chunks)));
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toContain('workshop-run-live-done.jsonl');
+    const lines = res.body.toString().trim().split('\n').map((l: string) => JSON.parse(l));
+    expect(lines.map((l: { text: string }) => l.text)).toEqual(['line 0', 'line 1']);
+    expect((await request(app).get('/api/runs/nope/export').set('cookie', cookie)).status).toBe(404);
+  });
+
+  it('resumes from ?after= and Last-Event-ID', async () => {
+    const a = await (await open('/runs/live-done/log?after=0')).read();
+    expect(a.text).not.toContain('line 0');
+    expect(a.text).toContain('line 1');
+    const ctl = await fetch(`${base}/runs/live-done/log?after=0`, { headers: { cookie, 'last-event-id': '1' } });
+    expect(await ctl.text()).not.toContain('line 1');
+    const junk = await (await open('/runs/live-done/log?after=abc')).read();
+    expect(junk.text).toContain('line 0');
+  });
+
+  it('keeps an active run log open, then ends it when the run finishes', async () => {
+    addRun('live-active', 'running', 1);
+    const s = await open('/runs/live-active/log');
+    const first = await s.read();
+    expect(first.text).toContain('line 0');
+    expect(first.ended).toBe(false);
+    appendLog('live-active', { step: 'run', stream: 'stdout', text: 'tail' });
+    run("UPDATE runs SET status = 'succeeded' WHERE id = 'live-active'");
+    publish('runs');
+    const rest = await s.read();
+    expect(rest.text).toContain('tail');
+    expect(rest.text).toContain('event: end');
+    expect(rest.ended).toBe(true);
   });
 });

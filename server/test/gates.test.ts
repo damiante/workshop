@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, dependencyBlock, inScope, isUnclassified, modeBlock, priorityBlock, pickHost, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
+import { allowanceBlock, clockTopics, dependencyBlock, inScope, isUnclassified, modeBlock, priorityBlock, pickHost, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -170,5 +170,20 @@ describe('nominated tickets', () => {
     expect(inScope('all', [])).toBe(true);
     expect(inScope('nominated', [])).toBe(false);
     expect(inScope('nominated', ['workshop/nominated'])).toBe(true);
+  });
+});
+
+describe('clock topics', () => {
+  const base = { withinHours: true, blocks: '[]', queue: '[]' };
+  it('announces nothing on the first tick or when nothing changed', () => {
+    expect(clockTopics(null, base)).toEqual([]);
+    expect(clockTopics(base, { ...base })).toEqual([]);
+  });
+
+  it('names the view each change affects', () => {
+    expect(clockTopics(base, { ...base, withinHours: false })).toEqual(['settings']);
+    expect(clockTopics(base, { ...base, blocks: '[[1,null]]' })).toEqual(['allowance']);
+    expect(clockTopics(base, { ...base, queue: '[[1,"x"]]' })).toEqual(['tickets']);
+    expect(clockTopics(base, { withinHours: false, blocks: 'a', queue: 'b' })).toEqual(['settings', 'allowance', 'tickets']);
   });
 });

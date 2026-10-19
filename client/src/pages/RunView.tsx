@@ -4,6 +4,7 @@ import type { LogEntry, RunView as Run } from '../../../server/src/api-types.ts'
 import { api, useApi, useNow } from '../api.ts';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, money, RUN_STATUS, tokens } from '../format.ts';
+import { LiveStream } from '../live.ts';
 import { addEntry, emptyTranscript, type Item } from '../transcript.ts';
 
 const ACTIVE = ['starting', 'running', 'publishing', 'paused'];
@@ -45,20 +46,38 @@ export function RunView() {
   useEffect(() => {
     transcript.current = emptyTranscript();
     setVersion((v) => v + 1);
-    // EventSource resumes with Last-Event-ID after a dropped connection, so lines aren't repeated.
-    const source = new EventSource(`/api/runs/${id}/log`);
+    // A new EventSource doesn't send Last-Event-ID, so a reconnect passes the last line it saw as ?after=.
+    let last = -1;
+    let ended = false; // the run finished and the server closed the log: don't reopen it
     let queued = false;
-    source.onmessage = (message) => {
-      addEntry(transcript.current, JSON.parse(message.data) as LogEntry);
-      if (!queued) {
-        queued = true;
-        requestAnimationFrame(() => {
-          queued = false;
-          setVersion((v) => v + 1);
-        });
-      }
+    const stream = new LiveStream({
+      url: () => `/api/runs/${id}/log${last >= 0 ? `?after=${last}` : ''}`,
+      onMessage: (data, lastEventId) => {
+        last = Number(lastEventId);
+        addEntry(transcript.current, JSON.parse(data) as LogEntry);
+        if (!queued) {
+          queued = true;
+          requestAnimationFrame(() => {
+            queued = false;
+            setVersion((v) => v + 1);
+          });
+        }
+      },
+      onEnd: () => {
+        ended = true;
+      },
+    });
+    // Hidden tabs release their connection (browsers allow few per site) and pick up where they left off.
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') stream.stop();
+      else if (!ended) stream.start();
     };
-    return () => source.close();
+    document.addEventListener('visibilitychange', onVisibility);
+    if (document.visibilityState !== 'hidden') stream.start();
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      stream.stop();
+    };
   }, [id]);
 
   useEffect(() => {
@@ -92,11 +111,16 @@ export function RunView() {
             {run.ticketTitle}
           </a>
         </div>
-        {active && (
-          <button className="danger" onClick={stop}>
-            Stop
-          </button>
-        )}
+        <div className="row">
+          <a className="button" href={`/api/runs/${run.id}/export`} download>
+            Export log
+          </a>
+          {active && (
+            <button className="danger" onClick={stop}>
+              Stop
+            </button>
+          )}
+        </div>
       </div>
       <div className="row small muted" style={{ columnGap: 16 }}>
         <Status tone={status.tone}>{status.label}</Status>

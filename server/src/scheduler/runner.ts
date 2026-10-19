@@ -46,6 +46,7 @@ type StepName = 'prepare' | 'run' | 'publish';
 
 class HostUnreachable extends Error {}
 
+const USAGE_RECORD_MS = 30_000;
 const driving = new Set<string>();
 export const isDriving = (id: string) => driving.has(id);
 
@@ -251,29 +252,58 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   const name = AGENT_INFO[r.agent].label;
   const claude: ClaudeRun = {};
   let lastPublished = 0;
-  const state = await runContainer(
+  let recorded = '';
+  let recordedAt = 0;
+  const recordUsage = () => {
+    if (!claude.usage || r.billing !== 'subscription' || !r.model_connection_id) return;
+    const reading = JSON.stringify(claude.usage);
+    if (reading === recorded) return;
+    recorded = reading;
+    recordedAt = Date.now();
+    recordProbe(r.model_connection_id, claude.usage.fiveHour, claude.usage.sevenDay);
+  };
+  let trailing: NodeJS.Timeout | undefined;
+  const running = runContainer(
     ctx,
     'run',
     () => runSpec(ctx, agent),
     (text) => {
       const before = claude.activity;
-      const hadUsage = Boolean(claude.usage);
+      const hadResult = !!claude.result;
       readClaudeLine(claude, text);
-      // Every run reports current subscription usage: a free, fresh reading for the allowance gate.
-      if (!hadUsage && claude.usage && r.billing === 'subscription' && r.model_connection_id) {
-        recordProbe(r.model_connection_id, claude.usage.fiveHour, claude.usage.sevenDay);
-      }
-      if (claude.activity && claude.activity !== before) {
+      // Every run reports current subscription usage: a free, fresh reading for the allowance gate and
+      // the usage bars. Recorded whenever it changes, at most every 30 seconds.
+      if (Date.now() - recordedAt >= USAGE_RECORD_MS) recordUsage();
+      if (claude.result && !hadResult) {
+        // Say what the log says, the moment it says it: the container may take a while to exit.
+        activity.set(r.id, claude.result.isError ? 'The agent stopped with an error.' : 'The agent finished.');
+        clearTimeout(trailing);
+        trailing = undefined;
+        lastPublished = Date.now();
+        publish('runs');
+      } else if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
-        if (Date.now() - lastPublished > 3000) {
+        // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
+        const wait = lastPublished + 3000 - Date.now();
+        if (wait <= 0) {
           lastPublished = Date.now();
           publish('runs');
+        } else if (!trailing) {
+          trailing = setTimeout(() => {
+            trailing = undefined;
+            lastPublished = Date.now();
+            publish('runs');
+          }, wait);
         }
       }
     },
     agent.timeout_min * 60_000,
   );
+  // Record what the run reported even if the container failed.
+  const state = await running.finally(recordUsage);
+  clearTimeout(trailing);
   activity.delete(r.id);
+  publish('runs');
   if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
   const res = claude.result;
   setRun(r.id, { exit_code: state.exitCode });

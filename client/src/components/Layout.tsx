@@ -1,7 +1,7 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { NavLink, Outlet } from 'react-router';
 import type { Mode, Overview } from '../../../server/src/api-types.ts';
-import { api, useApi } from '../api.ts';
+import { api, useApi, useLiveState } from '../api.ts';
 import { ThemeToggle } from './ThemeToggle.tsx';
 import { Meter } from './ui.tsx';
 
@@ -13,13 +13,20 @@ const MODES: { value: Mode; label: string }[] = [
 
 function ModeSwitch({ mode, withinHours }: { mode: Mode; withinHours: boolean }) {
   const [error, setError] = useState<string | null>(null);
-  const set = (value: Mode) => api('/settings', { method: 'PUT', body: { mode: value } }).then(() => setError(null), (e: Error) => setError(e.message));
+  const [pending, setPending] = useState<Mode | null>(null);
+  // Stay locked until the refreshed overview reports the requested mode.
+  useEffect(() => { if (pending === mode) setPending(null); }, [mode, pending]);
+  const set = (value: Mode) => {
+    if (pending !== null || value === mode) return;
+    setPending(value);
+    api('/settings', { method: 'PUT', body: { mode: value } }).then(() => setError(null), (e: Error) => { setError(e.message); setPending(null); });
+  };
   const hint = mode === 'paused' ? 'No new agents start' : mode === 'scheduled' && !withinHours ? 'Outside operating hours' : null;
   return (
     <div className="row">
-      <div className="segmented" role="group" aria-label="Operation mode">
+      <div className={`segmented${pending === null ? '' : ' pending'}`} role="group" aria-label="Operation mode" aria-busy={pending !== null}>
         {MODES.map((m) => (
-          <button key={m.value} aria-pressed={mode === m.value} onClick={() => set(m.value)}>
+          <button key={m.value} aria-pressed={(pending ?? mode) === m.value} disabled={pending !== null} onClick={() => set(m.value)}>
             {m.label}
           </button>
         ))}
@@ -28,6 +35,21 @@ function ModeSwitch({ mode, withinHours }: { mode: Mode; withinHours: boolean })
       {error && <span className="error-text small">{error}</span>}
     </div>
   );
+}
+
+/** True once updates have been paused for a few seconds, so a brief blip doesn't flash a note. */
+function useStalled() {
+  const live = useLiveState();
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    if (live === 'live') {
+      setStalled(false);
+      return;
+    }
+    const id = setTimeout(() => setStalled(true), 5000);
+    return () => clearTimeout(id);
+  }, [live]);
+  return stalled;
 }
 
 function Brand({ className }: { className: string }) {
@@ -57,6 +79,7 @@ function Brand({ className }: { className: string }) {
 }
 
 export function Layout({ version }: { version: string }) {
+  const stalled = useStalled();
   const { data } = useApi<Overview>('/overview', ['settings', 'allowance', 'alerts', 'runs', 'connections']);
   const signOut = () => api('/auth/logout', { body: {} }).finally(() => window.location.assign('/'));
   const openAlerts = data?.alerts.length ?? 0;
@@ -107,6 +130,7 @@ export function Layout({ version }: { version: string }) {
               )}
             </div>
           ))}
+          {stalled && <span className="small muted">Live updates paused. Reconnecting…</span>}
         </header>
         <main className="content">
           <Outlet />
