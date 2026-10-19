@@ -286,6 +286,7 @@ describe('media', () => {
     expect(res.headers['content-type']).toBe('image/png');
     expect(res.headers['x-content-type-options']).toBe('nosniff');
     expect(res.headers['content-disposition']).toMatch(/^inline/);
+    expect(res.headers['cache-control']).toBe('private, no-cache'); // a replaced screenshot keeps its URL
     expect(res.headers['content-security-policy']).toContain('sandbox');
     expect(res.body.equals(PNG)).toBe(true);
   });

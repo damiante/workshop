@@ -112,6 +112,9 @@ export function replaceImageLinks(text: string, byKey: Map<string, string>): str
   });
 }
 
+/** Keeps the PR body well under GitHub's size limit. */
+const MAX_LINKS = 20;
+
 export interface ScreenshotItem {
   name: string;
   caption: string | null;
@@ -122,6 +125,8 @@ export function screenshotsLine(items: ScreenshotItem[], publicUrl: string | nul
   if (!items.length) return '';
   if (!publicUrl) return '**Screenshots:** open this ticket in Workshop';
   const base = publicUrl.replace(/\/+$/, '');
-  const links = items.map((i) => `[${cleanCaption(i.caption ?? '') || i.name}](${base}/api/tickets/${ticketId}/media/${i.name})`);
-  return `**Screenshots:** [all screenshots](${base}/tickets/${ticketId}/media) · ${links.join(' · ')}`;
+  const shown = items.slice(0, MAX_LINKS);
+  const more = items.length > shown.length ? [`${items.length - shown.length} more on the page`] : [];
+  const links = shown.map((i) => `[${cleanCaption(i.caption ?? '') || i.name}](${base}/api/tickets/${ticketId}/media/${i.name})`);
+  return `**Screenshots:** [all screenshots](${base}/tickets/${ticketId}/media) · ${[...links, ...more].join(' · ')}`;
 }

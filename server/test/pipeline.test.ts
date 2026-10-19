@@ -1054,6 +1054,23 @@ describe('media store', () => {
     expect(logOf(id).join('\n')).toContain('replace an image from the issue');
   });
 
+  it('does not warn about the files it delivered, and lets a later run claim an unchanged screenshot with a new caption', async () => {
+    fake.tickets.ticketImages = async () => [ref(UUID)];
+    env({ archive: tar({ 'media/': '', 'media/issue-1.png': PNG, 'media/a.png': PNG }) });
+    const first = go();
+    await settle(first);
+    expect(logOf(first).filter((l) => l.includes('issue-1.png'))).toEqual([]);
+    const row = () => rows().find((r) => r.name === 'a.png');
+    expect(row()).toMatchObject({ run_id: first, caption: null });
+
+    env({ archive: tar({ 'media/': '', 'media/issue-1.png': PNG, 'media/a.png': PNG }), run: [finish([{ path: 'a.png', caption: 'Better caption' }])] });
+    const second = go();
+    await settle(second);
+    expect(logOf(second)).toEqual([]);
+    expect(row()).toMatchObject({ run_id: second, caption: 'Better caption' });
+    expect(rows().find((r) => r.name === 'issue-1.png')).toMatchObject({ source: 'issue', run_id: null });
+  });
+
   it('writes nothing for a closed ticket', async () => {
     run("UPDATE tickets SET state = 'closed' WHERE id = 1");
     env({ archive: tar({ 'media/a.png': PNG }) });

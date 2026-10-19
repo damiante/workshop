@@ -110,6 +110,13 @@ describe('prompt and PR text', () => {
     );
   });
 
+  it('links at most 20 screenshots and says how many more there are', () => {
+    const items = Array.from({ length: 23 }, (_, i) => ({ name: `s${i}.png`, caption: null }));
+    const line = screenshotsLine(items, 'https://w.example', 3);
+    expect(line.match(/\/media\/s\d+\.png/g)).toHaveLength(20);
+    expect(line).toContain('3 more on the page');
+  });
+
   it('cleans captions to one short line', () => {
     expect(cleanCaption('a\n[b](c)\n  d')).toBe('a b(c) d');
     expect(cleanCaption('x'.repeat(300))).toHaveLength(200);

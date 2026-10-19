@@ -302,7 +302,7 @@ apiRouter.get('/tickets/:id/media/:name', (req, res) => {
     'X-Content-Type-Options': 'nosniff',
     'Content-Disposition': `inline; filename="${name}"`,
     'Content-Security-Policy': "default-src 'none'; sandbox",
-    'Cache-Control': 'private, max-age=300',
+    'Cache-Control': 'private, no-cache',
   });
   res.send(bytes);
 });

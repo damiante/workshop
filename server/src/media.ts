@@ -153,6 +153,14 @@ export async function fetchTicketImages(runId: string, ticketId: number, images:
   await Promise.all(workers);
 }
 
+function readStored(ticketId: number, name: string): Buffer | null {
+  try {
+    return fs.readFileSync(path.join(mediaDir(ticketId), name));
+  } catch {
+    return null;
+  }
+}
+
 /** Stores the new or changed images an agent left in /work/media. `entries` come from the volume's archive. */
 export function collectAgentMedia(runId: string, ticketId: number, agent: string, entries: TarEntry[], captions: Map<string, string>) {
   const ticket = one<{ state: string }>('SELECT state FROM tickets WHERE id = ?', ticketId);
@@ -162,12 +170,22 @@ export function collectAgentMedia(runId: string, ticketId: number, agent: string
     if (name === 'media' && entry.type === 'dir') continue;
     const file = name.replace(/^media\//, '');
     const existing = one<MediaRow>('SELECT * FROM media WHERE ticket_id = ? AND name = ?', ticketId, file);
+    const stored = entry.type === 'file' && existing ? readStored(ticketId, file) : null;
+    if (existing && stored?.equals(entry.content)) {
+      // The folder was delivered with this file, so most entries are unchanged. An agent that lists one again
+      // in this run's result claims it (caption and run), so the PR can link it.
+      if (captions.has(file) && existing.source !== 'issue' && existing.source !== 'comment') {
+        run('UPDATE media SET caption = ?, run_id = ?, source = ? WHERE id = ?', cleanCaption(captions.get(file)!) || existing.caption, runId, agent, existing.id);
+        publish('media');
+        publish('runs');
+      }
+      continue;
+    }
     const check = checkAgentFile(entry, existing, usedBytes(ticketId));
     if (!check.ok) {
       warn(runId, `Workshop skipped ${name} from /work/media: ${check.reason}.`);
       continue;
     }
-    if (existing && fs.existsSync(path.join(mediaDir(ticketId), file)) && fs.readFileSync(path.join(mediaDir(ticketId), file)).equals(entry.content)) continue;
     save(ticketId, file, entry.content, { source: agent, runId, caption: cleanCaption(captions.get(file) ?? '') || null });
   }
 }
