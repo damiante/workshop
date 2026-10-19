@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router';
+import { Link, useParams } from 'react-router';
 import type { LogEntry, RunView as Run } from '../../../server/src/api-types.ts';
 import { api, useApi, useNow } from '../api.ts';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
@@ -112,6 +112,11 @@ export function RunView() {
           </a>
         </div>
         <div className="row">
+          {run.mediaCount > 0 && (
+            <Link className="button" to={`/tickets/${run.ticketId}/media?run=${run.id}`}>
+              View screenshots ({run.mediaCount})
+            </Link>
+          )}
           <a className="button" href={`/api/runs/${run.id}/export`} download>
             Export log
           </a>

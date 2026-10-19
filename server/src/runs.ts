@@ -38,13 +38,13 @@ export const RUNNING_SQL = "status IN ('starting', 'running', 'publishing')";
 export const getRun = (id: string) => one<RunRow>('SELECT * FROM runs WHERE id = ?', id);
 
 const VIEW_SQL = `
-  SELECT runs.*, t.number, t.title, t.url AS ticket_url, r.full_name, c.name AS env_name
+  SELECT runs.*, (SELECT COUNT(*) FROM media m WHERE m.run_id = runs.id) AS media_count, t.number, t.title, t.url AS ticket_url, r.full_name, c.name AS env_name
   FROM runs
   JOIN tickets t ON t.id = runs.ticket_id
   JOIN repos r ON r.id = t.repo_id
   LEFT JOIN connections c ON c.id = runs.environment_id`;
 
-type ViewRow = RunRow & { number: number; title: string; ticket_url: string; full_name: string; env_name: string | null };
+type ViewRow = RunRow & { media_count: number; number: number; title: string; ticket_url: string; full_name: string; env_name: string | null };
 
 /** Latest activity of running agents; in memory only, as it changes every few seconds. */
 export const activity = new Map<string, string>();
@@ -73,6 +73,7 @@ function toView(r: ViewRow): RunView {
     startedAt: r.started_at,
     endedAt: r.ended_at,
     resetsAt: r.resets_at,
+    mediaCount: r.media_count,
   };
 }
 

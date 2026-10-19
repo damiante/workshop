@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest';
+import { untar } from '../src/providers/docker/tar.ts';
 import { DockerEnvironment } from '../src/providers/docker/index.ts';
 import type { LogLine } from '../src/providers/types.ts';
 
@@ -45,5 +46,27 @@ describe.skipIf(!socketPath)('DockerEnvironment against a real engine', () => {
     expect((await env.list({ 'workshop.test': '1' })).map((c) => c.id)).toContain(id);
     await env.remove(id);
     expect(await env.inspect(id)).toBeNull();
+  }, 120_000);
+
+  it('reads /work/media back from a volume through a throwaway container, byte for byte', async () => {
+    await env.ensureImage(IMAGE);
+    const bytes = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+    const id = await env.start({
+      image: IMAGE,
+      cmd: ['true'],
+      env: {},
+      volume,
+      labels: { 'workshop.test': '1' },
+      files: { 'media/': '', 'media/a.bin': bytes },
+    });
+    await env.follow(id, 0, () => {});
+    await env.wait(id);
+    await env.remove(id);
+    const read = { image: IMAGE, volume, labels: { 'workshop.test': '1' }, maxBytes: 10_000_000 };
+    const entries = untar((await env.readArchive({ ...read, path: '/work/media' }))!);
+    expect(entries.find((e) => e.name === 'media/a.bin')?.content.equals(bytes)).toBe(true);
+    expect(await env.readArchive({ ...read, path: '/work/missing' })).toBeNull();
+    await expect(env.readArchive({ ...read, path: '/work/media', maxBytes: 100 })).rejects.toThrow(/larger than/);
+    expect(await env.list({ 'workshop.test': '1', 'workshop.step': 'media' })).toEqual([]); // the throwaway container is removed
   }, 120_000);
 });

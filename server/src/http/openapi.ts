@@ -87,6 +87,7 @@ const schemas: Record<string, Schema> = {
     startedAt: int,
     endedAt: nullable(int),
     resetsAt: nullable(int),
+    mediaCount: int,
   }),
   TicketView: object({
     id: int,
@@ -110,8 +111,11 @@ const schemas: Record<string, Schema> = {
     activeRunId: nullable(str),
     push: nullable(enumOf('stage', 'lifecycle')),
     nominated: nullable(bool),
+    mediaCount: int,
     updatedAt: str,
   }),
+  MediaItem: object({ name: str, source: str, runId: nullable(str), caption: nullable(str), size: int, createdAt: int, url: str }),
+  TicketMedia: object({ ticketId: int, ticket: str, title: str, items: array(ref('MediaItem')) }),
   TicketStatePatch: object(
     {
       stage: { ...nullable(ref('Stage')), description: 'The ticket\'s stage. null removes the stage label.' },
@@ -184,12 +188,14 @@ interface Op {
   params?: string[];
   query?: Record<string, string>;
   stream?: string;
+  /** Content type of a `stream` response; event-stream by default. */
+  streamType?: string;
 }
 
 function operation(method: string, op: Op) {
   const responses: Record<string, unknown> = {
     [op.status ?? '200']: op.stream
-      ? { description: op.stream, content: { 'text/event-stream': { schema: str } } }
+      ? { description: op.stream, content: { [op.streamType ?? 'text/event-stream']: { schema: str } } }
       : { description: 'Success.', content: content(op.ok ?? ref('Ok')) },
     401: errorResponse(ERRORS[401]),
   };
@@ -265,6 +271,16 @@ const paths: Record<string, Record<string, Op>> = {
       body: { type: 'object' },
       ok: ref('TicketView'),
       errors: [400, 403, 404, 409],
+    },
+  },
+  '/tickets/{id}/media': { get: { summary: "The images in the ticket's media store: screenshots agents added and images copied from the issue.", params: ['id'], ok: ref('TicketMedia'), errors: [400, 404] } },
+  '/tickets/{id}/media/{name}': {
+    get: {
+      summary: 'One image from the ticket\'s media store, with its own Content-Type (image/png, image/jpeg, image/gif or image/webp).',
+      params: ['id', 'name'],
+      stream: 'The image file.',
+      streamType: 'image/*',
+      errors: [400, 404],
     },
   },
   '/sync': { post: { summary: 'Asks Workshop to sync tickets from GitHub soon.', status: '202', errors: [403] } },

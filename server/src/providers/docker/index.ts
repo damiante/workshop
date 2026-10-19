@@ -171,6 +171,38 @@ export class DockerEnvironment implements Environment {
     return container.id;
   }
 
+  async readArchive(p: { image: string; volume: string; path: string; labels: Record<string, string>; maxBytes: number }) {
+    // Never started: a created container already sees its volume, as putArchive relies on.
+    const container = await this.docker.createContainer({
+      Image: p.image,
+      Cmd: ['true'],
+      Labels: { ...p.labels, 'workshop.step': 'media' },
+      HostConfig: { Mounts: [{ Type: 'volume', Source: p.volume, Target: '/work' }] },
+    });
+    try {
+      let stream: NodeJS.ReadableStream;
+      try {
+        stream = (await container.getArchive({ path: p.path })) as unknown as NodeJS.ReadableStream;
+      } catch (err) {
+        if ((err as { statusCode?: number }).statusCode === 404) return null;
+        throw err;
+      }
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of stream) {
+        total += (chunk as Buffer).length;
+        if (total > p.maxBytes) {
+          (stream as unknown as { destroy?: () => void }).destroy?.();
+          throw new Error(`Media folder is larger than ${Math.round(p.maxBytes / 1048576)} MB`);
+        }
+        chunks.push(chunk as Buffer);
+      }
+      return Buffer.concat(chunks);
+    } finally {
+      await container.remove({ force: true }).catch(ignore(404));
+    }
+  }
+
   async follow(id: string, skip: number, onLine: (line: LogLine) => void) {
     // No timestamps: Docker splits lines over 16 KB and would stamp each fragment, corrupting long JSON lines.
     const stream = (await this.docker.getContainer(id).logs({ follow: true, stdout: true, stderr: true })) as unknown as NodeJS.ReadableStream;

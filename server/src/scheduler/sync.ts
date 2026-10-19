@@ -1,5 +1,6 @@
 import { all, one, run } from '../db.ts';
 import { publish } from '../events.ts';
+import { deleteMedia } from '../media.ts';
 import { getSettings } from '../settings.ts';
 import { activeRunId, editLabels, getTicket, isAllowedAuthor, labelsOf, linkRef, repoRef, setBlockers, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
 import type { RemoteTicket } from '../providers/types.ts';
@@ -41,6 +42,7 @@ export async function syncRepo(repo: RepoRow) {
     const active = existing && t.state === 'closed' ? activeRunId(existing.id) : null;
     if (active) await stopRun(active, 'The ticket was closed.', false);
     if (existing?.state === 'open' && t.state === 'closed') {
+      deleteMedia(existing.id); // before the tidy-up, so it happens even if that throws
       try {
         await cleanUpClosedIssue(getTicket(existing.id)!);
       } catch (err) {

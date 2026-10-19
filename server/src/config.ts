@@ -20,6 +20,8 @@ export const config = {
   // instance can't be fooled into per-IP lockout bypass by a spoofed header.
   trustProxy: process.env.TRUST_PROXY ?? 'loopback, linklocal, uniquelocal',
   resetTotp: process.env.WORKSHOP_RESET_TOTP === '1',
+  // Workshop's address as people open it; used for links in pull requests.
+  publicUrl: process.env.WORKSHOP_PUBLIC_URL?.replace(/\/+$/, '') || null,
   version: process.env.APP_VERSION ?? 'dev',
   // Distinguishes this Workshop's containers from another instance's on a shared host.
   instance: process.env.WORKSHOP_INSTANCE ?? 'workshop',

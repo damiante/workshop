@@ -1,6 +1,6 @@
 // Types shared with the client (imported type-only). Keep this file free of runtime imports.
 
-export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens';
+export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media';
 
 export type Mode = 'paused' | 'scheduled' | 'always';
 
@@ -158,6 +158,8 @@ export interface TicketView {
   activeRunId: string | null;
   /** Set while you've pushed this ticket by hand. */
   push: Push | null;
+  /** How many images the ticket's media store holds. */
+  mediaCount: number;
   updatedAt: string;
 }
 
@@ -187,6 +189,27 @@ export interface RunView {
   startedAt: number;
   endedAt: number | null;
   resetsAt: number | null;
+  /** How many images this run added to the ticket's media store. */
+  mediaCount: number;
+}
+
+export interface MediaItem {
+  name: string;
+  /** 'issue', 'comment', or the agent that added it. */
+  source: string;
+  runId: string | null;
+  caption: string | null;
+  size: number;
+  createdAt: number;
+  /** Where to fetch the image, e.g. /api/tickets/3/media/issue-1.png */
+  url: string;
+}
+
+export interface TicketMedia {
+  ticketId: number;
+  ticket: string;
+  title: string;
+  items: MediaItem[];
 }
 
 export interface UsageWindow {

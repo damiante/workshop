@@ -3,6 +3,7 @@ import { all, one, run } from './db.ts';
 import { publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
 import type { RepoRef, TicketLink } from './providers/types.ts';
+import { mediaCount } from './media.ts';
 import { getSettings } from './settings.ts';
 import { dependencyBlock, inScope } from './scheduler/gates.ts';
 import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
@@ -41,6 +42,7 @@ export interface TicketRow {
   blocked_by: string;
   push: Push | null;
   push_stage: string | null;
+  ui: number;
   updated_at: string;
   created_at: string | null;
 }
@@ -134,6 +136,7 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
     prStatus: t.pr_status,
     activeRunId: activeRunId(t.id),
     push: t.push,
+    mediaCount: mediaCount(t.id),
     updatedAt: t.updated_at,
   };
 }

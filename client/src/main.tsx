@@ -14,6 +14,7 @@ import { Alerts } from './pages/Alerts.tsx';
 import { Connections } from './pages/Connections.tsx';
 import { Dashboard } from './pages/Dashboard.tsx';
 import { Login } from './pages/Login.tsx';
+import { Media } from './pages/Media.tsx';
 import { RunView } from './pages/RunView.tsx';
 import { Runs } from './pages/Runs.tsx';
 import { SettingsPage } from './pages/Settings.tsx';
@@ -39,6 +40,7 @@ function App() {
         <Route element={<Layout version={auth.version} />}>
           <Route index element={<Dashboard />} />
           <Route path="tickets" element={<Tickets />} />
+          <Route path="tickets/:id/media" element={<Media />} />
           <Route path="runs" element={<Runs />} />
           <Route path="runs/:id" element={<RunView />} />
           <Route path="connections" element={<Connections />} />

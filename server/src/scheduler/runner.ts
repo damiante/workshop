@@ -8,8 +8,10 @@ import { all, run } from '../db.ts';
 import { publish } from '../events.ts';
 import { hitUsageLimit, readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts';
 import type { DockerConfig } from '../providers/docker/index.ts';
+import { untar } from '../providers/docker/tar.ts';
 import { environmentOf, getConnection, modelsOf } from '../providers/index.ts';
 import type { ContainerState, Environment, StepSpec } from '../providers/types.ts';
+import { collectAgentMedia, deleteMedia, fetchTicketImages, listMedia, mediaFiles, warn, type IssueImage } from '../media.ts';
 import { ACTIVE_STATUSES, activity, appendLog, getRun, linesFrom, readLog, type RunRow } from '../runs.ts';
 import { getSettings } from '../settings.ts';
 import { recordSpend } from '../spend.ts';
@@ -32,6 +34,7 @@ import {
   type TicketRow,
 } from '../tickets.ts';
 import { imageFor, label, parseLabels } from '../workflow/labels.ts';
+import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
 import { AGENT_INFO, capabilitiesOf, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
@@ -84,7 +87,7 @@ function context(r: RunRow): Ctx {
     repo,
     env: environmentOf(conn),
     host: { name: conn.name, cfg: conn.config as unknown as DockerConfig },
-    image: imageFor(r.agent, parseLabels(labelsOf(ticket)), { repo: repo.image || null, base: config.agentImage, browser: config.agentBrowserImage }),
+    image: imageFor(r.agent, parseLabels(labelsOf(ticket)), { repo: repo.image || null, base: config.agentImage, browser: config.agentBrowserImage }, Boolean(ticket.ui)),
     labels: { 'workshop.instance': config.instance, 'workshop.run': r.id, 'workshop.ticket': `${repo.full_name}#${ticket.number}`, 'workshop.agent': r.agent },
   };
 }
@@ -173,15 +176,26 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
     MAX_BUDGET_USD: r.billing === 'api' ? String(getSettings().apiRunCapUsd) : '',
     RESUME: r.resumes > 0 ? '1' : '',
   };
-  const files: Record<string, string> = { '.workshop/': '', '.workshop/schema.json': JSON.stringify(schemaFor(r.agent)) };
+  const files: Record<string, string | Buffer> = { '.workshop/': '', '.workshop/schema.json': JSON.stringify(schemaFor(r.agent)) };
   if (r.resumes === 0) {
     const t = ctx.ticket;
     const repo = repoRef(ctx.repo);
     const source = sourceFor(ctx.repo);
     const labels = labelsOf(t);
+    // Each batch of images is downloaded right after the fetch that returned it: GitHub's signed links expire in minutes.
+    try {
+      await fetchTicketImages(r.id, t.id, (await source.ticketImages(repo, t.number)).map((ref) => ({ source: 'issue', ref })));
+    } catch (err) {
+      warn(r.id, `Workshop skipped the images in the issue: ${(err as Error).message}`);
+    }
     const comments = await source.comments(repo, t.number);
     const included = comments.filter((c) => isAllowedAuthor(c.author) || c.author === source.selfLogin());
+    await fetchTicketImages(r.id, t.id, included.flatMap((c) => (c.images ?? []).map((ref): IssueImage => ({ source: 'comment', ref }))));
     const review = t.pr_number && r.agent !== 'merge' ? await vcsFor(ctx.repo).reviewFeedback(repo, t.pr_number, getSettings().authors) : [];
+    await fetchTicketImages(r.id, t.id, review.flatMap((c) => (c.images ?? []).map((ref): IssueImage => ({ source: 'comment', ref }))));
+    const stored = listMedia(t.id);
+    const byKey = new Map(stored.filter((m) => m.source_key).map((m) => [m.source_key!, m.name]));
+    const local = (text: string) => replaceImageLinks(text, byKey);
     const branch = branchOf(t);
     const docPath = docPathOf(t);
     const openTickets =
@@ -201,12 +215,15 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
       base: ctx.repo.default_branch,
       branch,
       docPath,
-      ticket: { number: t.number, title: t.title, body: t.body, url: t.url, labels, size: parseLabels(labels).size },
-      comments: included,
+      ticket: { number: t.number, title: t.title, body: local(t.body), url: t.url, labels, size: parseLabels(labels).size },
+      comments: included.map((c) => ({ ...c, body: local(c.body) })),
       omittedComments: comments.length - included.length,
-      review,
+      review: review.map((x) => ({ ...x, body: local(x.body) })),
       openTickets,
+      ui: Boolean(t.ui),
+      media: stored.map((m) => ({ name: m.name, source: m.source, runId: m.run_id, caption: m.caption })),
     });
+    Object.assign(files, mediaFiles(t.id));
   }
   return { cmd: ['run'], env, files };
 }
@@ -244,6 +261,21 @@ const summarize = (r: AgentResult) => {
           : 'Asked questions';
   return `${what}: ${r.reason}`;
 };
+
+/** Copies the images an agent left in /work/media into the ticket's store. Problems are run warnings, never failures. */
+async function copyBackMedia(ctx: Ctx, parsed: AgentResult) {
+  const r = ctx.run;
+  if (!r.volume) return;
+  try {
+    const archive = await ctx.env.readArchive({ image: ctx.image, volume: r.volume, path: '/work/media', labels: ctx.labels, maxBytes: 2 * MAX_TICKET });
+    if (!archive) return;
+    const captions = new Map<string, string>();
+    for (const m of 'media' in parsed ? (parsed.media ?? []) : []) captions.set(m.path.split('/').pop()!, m.caption);
+    collectAgentMedia(r.id, r.ticket_id, AGENT_INFO[r.agent].label, untar(archive), captions);
+  } catch (err) {
+    warn(r.id, `Workshop couldn't copy /work/media into the ticket's store: ${(err as Error).message}`);
+  }
+}
 
 /** The claude step. Returns true when the run should go on to publishing. */
 async function runAgent(ctx: Ctx): Promise<boolean> {
@@ -332,6 +364,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   if (res.isError) throw new Error(describeError(res, agent));
   const parsed = parseResult(r.agent, res.structured);
   if (typeof parsed === 'string') throw new Error(`The agent's result was invalid: ${parsed}`);
+  await copyBackMedia(ctx, parsed);
   setRun(r.id, { status: 'publishing', step: null, container_id: null, result: JSON.stringify(parsed), summary: summarize(parsed) });
   return true;
 }
@@ -353,12 +386,14 @@ async function openOrUpdatePr(ctx: Ctx, t: TicketRow, result: WorkResult, pushed
   // new PR by "ahead" also covers a restart between pushing and opening the PR, when nothing is new.)
   if (number ? pushed.before === pushed.after : !pushed.ahead) throw new Error('The implementation agent finished without committing any changes.');
   let url = t.pr_url;
+  const shots = screenshotsLine(listMedia(t.id).filter((m) => m.run_id === ctx.run.id), config.publicUrl, t.id);
+  const screenshots = shots ? `\n\n${shots}` : '';
   if (number) {
-    await vcs.commentOnPullRequest(repo, number, `Updated after review.\n\n${result.summary}${tests}`);
+    await vcs.commentOnPullRequest(repo, number, `Updated after review.\n\n${result.summary}${tests}${screenshots}`);
   } else {
     const size = parseLabels(labelsOf(t)).size;
     const design = size === 'm' || size === 'l' || size === 'xl' ? `\n\n**Design:** [\`${docPathOf(t)}\`](${vcs.fileUrl(repo, branch, docPathOf(t))})` : '';
-    const body = `${result.summary}${tests}${design}\n\nCloses #${t.number}\n\n---\n_Opened by Workshop. Approve to merge it, or request changes and Workshop will work on them._`;
+    const body = `${result.summary}${tests}${screenshots}${design}\n\nCloses #${t.number}\n\n---\n_Opened by Workshop. Approve to merge it, or request changes and Workshop will work on them._`;
     const pr = await vcs.openPullRequest(repo, { branch, title: t.title, body });
     number = pr.number;
     url = pr.url;
@@ -411,6 +446,8 @@ async function publishRun(ctx: Ctx) {
     await vcs.createBranch(repo, branch, { number: t.number, nodeId: t.node_id ?? undefined });
     run('UPDATE tickets SET branch = ? WHERE id = ?', branch, t.id);
   }
+  if (plan.ui !== undefined) run('UPDATE tickets SET ui = ? WHERE id = ?', Number(plan.ui), t.id);
+  if (plan.deleteMedia) deleteMedia(t.id);
   if (plan.openPr) await openOrUpdatePr(ctx, t, result as WorkResult, pushed);
   await editLabels(t, plan.add, [...plan.remove, label.running]);
   if (plan.comment) await sourceFor(ctx.repo).comment(repo, t.number, plan.comment);

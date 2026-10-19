@@ -67,6 +67,10 @@ Either push also ends where Workshop would wait for you anyway: your pull reques
 
 A push is refused with 409 and the reason when the ticket is closed, failed, skipped, waiting on a question or waiting for your review, or (for `stage`) already has an agent working on that stage. A ticket that doesn't exist, belongs to a disabled repository or was opened by someone outside the author allowlist is 404, and a missing or invalid scope is 400.
 
+## Media
+
+Each ticket has a temporary store of images: screenshots agents added, and images copied from the issue. `GET /api/tickets/{id}/media` lists them; `GET /api/tickets/{id}/media/{name}` returns one file with its own `Content-Type`. Both need a token or session. The store is deleted when the ticket finishes (merged, pull request closed, issue closed or declined) and after 30 days without changes.
+
 ## Errors
 
 Errors are JSON, `{ "error": "readable message" }`, with the usual status: 400 for a bad request, 401 for a missing, wrong or revoked token, 403 for a read-only token, 404 for something that doesn't exist, 409 when Workshop can't do it right now.

@@ -165,6 +165,22 @@ const MIGRATIONS = [
   ALTER TABLE tickets ADD COLUMN created_at TEXT;
   UPDATE repos SET synced_at = NULL;
   `,
+  `
+  CREATE TABLE media (
+    id INTEGER PRIMARY KEY,
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL, -- 'issue', 'comment', or an agent name
+    source_key TEXT, -- issue/comment images: imageKey of the URL, so re-syncs don't download them again
+    run_id TEXT, -- no FK: outlives the run
+    caption TEXT,
+    size INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (ticket_id, name)
+  );
+  CREATE INDEX media_run ON media (run_id);
+  ALTER TABLE tickets ADD COLUMN ui INTEGER NOT NULL DEFAULT 0;
+  `,
 ];
 
 export let db: DatabaseSync;

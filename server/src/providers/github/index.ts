@@ -1,7 +1,9 @@
 import { App, Octokit } from 'octokit';
 import type { Installation, ProviderInfo } from '../../api-types.ts';
+import { imageKey, isGitHubImageUrl } from '../../workflow/media.ts';
 import type {
   GitAccess,
+  ImageRef,
   LabelDef,
   Mergeability,
   PullRequestState,
@@ -226,8 +228,15 @@ export class GitHubApp implements VcsHost, TicketSource {
 
   async comments(repo: RepoRef, number: number): Promise<TicketComment[]> {
     const kit = await this.kit(repo);
-    const list = await kit.paginate('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', { ...split(repo), issue_number: number, per_page: 100 });
-    return list.map((c) => ({ author: c.user?.login ?? 'ghost', body: c.body ?? '', createdAt: c.created_at }));
+    const list = await kit.paginate('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', { ...split(repo), issue_number: number, per_page: 100, ...FULL });
+    return list.map((c) => ({ author: c.user?.login ?? 'ghost', body: c.body ?? '', createdAt: c.created_at, images: imageRefs((c as { body_html?: string }).body_html ?? '') }));
+  }
+
+  async ticketImages(repo: RepoRef, number: number): Promise<ImageRef[]> {
+    // format: 'full' asks for body_html too: its signed image links work on private repositories.
+    const kit = await this.kit(repo);
+    const { data } = await kit.request('GET /repos/{owner}/{repo}/issues/{issue_number}', { ...split(repo), issue_number: number, mediaType: { format: 'full' } });
+    return imageRefs((data as { body_html?: string }).body_html ?? '');
   }
 
   async setLabels(repo: RepoRef, number: number, add: string[], remove: string[]) {
@@ -382,15 +391,16 @@ export class GitHubApp implements VcsHost, TicketSource {
   async reviewFeedback(repo: RepoRef, number: number, reviewers: string[]): Promise<ReviewFeedback[]> {
     const kit = await this.kit(repo);
     const allowed = new Set(reviewers.map((r) => r.toLowerCase()));
-    const reviews = await kit.paginate('GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', { ...split(repo), pull_number: number, per_page: 100 });
+    const reviews = await kit.paginate('GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews', { ...split(repo), pull_number: number, per_page: 100, ...FULL });
     const latest = reviews.filter((r) => r.state === 'CHANGES_REQUESTED' && allowed.has(r.user?.login.toLowerCase() ?? '')).at(-1);
     if (!latest) return [];
-    const inline = await kit.paginate('GET /repos/{owner}/{repo}/pulls/{pull_number}/comments', { ...split(repo), pull_number: number, per_page: 100 });
+    const inline = await kit.paginate('GET /repos/{owner}/{repo}/pulls/{pull_number}/comments', { ...split(repo), pull_number: number, per_page: 100, ...FULL });
+    const html = (x: object) => imageRefs((x as { body_html?: string }).body_html ?? '');
     return [
-      ...(latest.body ? [{ author: latest.user?.login ?? 'ghost', body: latest.body }] : []),
+      ...(latest.body ? [{ author: latest.user?.login ?? 'ghost', body: latest.body, images: html(latest) }] : []),
       ...inline
         .filter((c) => c.pull_request_review_id === latest.id)
-        .map((c) => ({ author: c.user.login, body: c.body, path: c.path, line: c.line ?? c.original_line ?? undefined })),
+        .map((c) => ({ author: c.user.login, body: c.body, path: c.path, line: c.line ?? c.original_line ?? undefined, images: html(c) })),
     ];
   }
 
@@ -416,4 +426,28 @@ export class GitHubApp implements VcsHost, TicketSource {
       throw err;
     }
   }
+}
+
+// Spread in, so the typed route parameters don't reject it. format 'full' asks for body_html as well: its signed image links work on private repositories.
+const FULL = { mediaType: { format: 'full' } };
+
+const decodeAttr = (v: string) => v.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+
+/** The GitHub-hosted images in rendered HTML. Anything from another host is dropped, so a commenter can't choose what Workshop fetches. */
+export function imageRefs(html: string): ImageRef[] {
+  const refs = new Map<string, ImageRef>();
+  for (const tag of html.match(/<img\b[^>]*>/gi) ?? []) {
+    const attr = (name: string) => {
+      const m = new RegExp(`(?:^|\\s)${name}=(?:"([^"]*)"|'([^']*)')`, 'i').exec(tag);
+      const v = m?.[1] ?? m?.[2];
+      return v === undefined ? undefined : decodeAttr(v);
+    };
+    const src = attr('src');
+    const canonical = attr('data-canonical-src');
+    const url = [src, canonical].find((u) => u && isGitHubImageUrl(u));
+    if (!url) continue;
+    const key = imageKey(canonical ?? src ?? url);
+    if (!refs.has(key)) refs.set(key, { url, key });
+  }
+  return [...refs.values()];
 }

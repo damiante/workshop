@@ -22,6 +22,8 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |
 | `src/scheduler/loop.ts` | The 60-second tick: host checks, re-attach, sync, API merges, resume paused runs, the queue, launch one, usage probe, cleanup |
+| `src/media.ts` | The per-ticket media store (`DATA_DIR/media/<ticket id>/` plus the `media` table): downloads issue images, copies agent screenshots back, delivers the folder to runs, deletes it on finish and in the 30-day sweep |
+| `src/workflow/media.ts` | Pure media rules: allowed hosts, image sniffing, name and size checks, link rewriting, the PR's Screenshots line |
 | `src/scheduler/runner.ts` | Run lifecycle (`launch`, `drive`, `resume`, `fail`, `stopRun`) |
 | `src/scheduler/sync.ts` | Pull changed tickets; check pull requests waiting for review |
 | `src/scheduler/merge.ts` | API-first merging, closed and merged pull requests |
@@ -75,8 +77,8 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - Logs are followed **without timestamps**. Docker splits lines over 16 KB and would prefix every fragment, corrupting long stream-json lines. `docker.integration.test.ts` checks a 50 KB line.
 - Podman returns 409 when a volume already exists, where Docker reuses it; `createVolume` ignores 409.
 - SSH hosts run `docker system dial-stdio` remotely (docker-modem), so they need the `docker` CLI. The host key is pinned on first connect (`config.hostKey`).
-- Prompt files reach a created container through `putArchive`, with a small tar writer in `providers/docker/tar.ts`. Names must be under 100 bytes.
-- `imageFor` (in `workflow/labels.ts`) picks the image per run: a repository's own image, else the browser image for Implementation on `workshop/needs:browser` tickets, else the base image.
+- Prompt files reach a created container through `putArchive`, with a small tar writer in `providers/docker/tar.ts`. Names must be under 100 bytes. Contents may be `Buffer`s, and `untar()` reads what `Environment.readArchive()` returns (media is copied back from a never-started container on the run's volume).
+- `imageFor` (in `workflow/labels.ts`) picks the image per run: a repository's own image, else the browser image for Implementation on `workshop/needs:browser` tickets and for Design and Design adversary when the Classifier set `ui`, else the base image.
 - Image capabilities come from the `workshop.capabilities` label (`imageLabels`), read per run and described to the agent in `system.md`.
 
 ## Trying the agent image locally

@@ -17,6 +17,10 @@ export interface Plan {
   openPr?: boolean;
   /** Try to merge the pull request. */
   merge?: boolean;
+  /** Store the Classifier's `ui` flag on the ticket. */
+  ui?: boolean;
+  /** Delete the ticket's media store: the ticket won't be worked on. */
+  deleteMedia?: boolean;
   /** The agent gave up; counts toward the retry limit. */
   failure?: string;
 }
@@ -79,6 +83,7 @@ function planClassifier(ctx: PlanContext, r: ClassifierResult): Plan {
   if (r.decision === 'reject') {
     return {
       add: [label.skip],
+      deleteMedia: true,
       remove: moveTo(ctx.labels, null).remove,
       comment: `Workshop won't work on this ticket: ${r.reason}\n\nRemove the \`${label.skip}\` label to have it classified again.`,
     };
@@ -89,6 +94,7 @@ function planClassifier(ctx: PlanContext, r: ClassifierResult): Plan {
   return {
     ...combine(setSize(ctx.labels, size), moveTo(ctx.labels, next), addNeeds(ctx.labels, r.capabilities ?? [])),
     createBranch: ctx.mode === 'normal',
+    ...(r.ui !== undefined ? { ui: r.ui === true } : {}),
     comment: `Workshop sized ${what} **${size.toUpperCase()}**: ${r.reason}\n\n${r.capabilities?.includes('browser') ? '\n\nImplementation will run with a browser (Playwright) to test it.' : ''}\n\nNext: ${NEXT_TEXT[next]}.`,
   };
 }
