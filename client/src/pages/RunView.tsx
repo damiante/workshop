@@ -111,11 +111,16 @@ export function RunView() {
             {run.ticketTitle}
           </a>
         </div>
-        {active && (
-          <button className="danger" onClick={stop}>
-            Stop
-          </button>
-        )}
+        <div className="row">
+          <a className="button" href={`/api/runs/${run.id}/export`} download>
+            Export log
+          </a>
+          {active && (
+            <button className="danger" onClick={stop}>
+              Stop
+            </button>
+          )}
+        </div>
       </div>
       <div className="row small muted" style={{ columnGap: 16 }}>
         <Status tone={status.tone}>{status.label}</Status>

@@ -496,6 +496,19 @@ describe('live streams', () => {
     expect(ended).toBe(true);
   });
 
+  it('exports a run log as a JSON Lines download', async () => {
+    const res = await request(app).get('/api/runs/live-done/export').set('cookie', cookie).buffer(true).parse((r, cb) => {
+      const chunks: Buffer[] = [];
+      r.on('data', (c: Buffer) => chunks.push(c));
+      r.on('end', () => cb(null, Buffer.concat(chunks)));
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toContain('workshop-run-live-done.jsonl');
+    const lines = res.body.toString().trim().split('\n').map((l: string) => JSON.parse(l));
+    expect(lines.map((l: { text: string }) => l.text)).toEqual(['line 0', 'line 1']);
+    expect((await request(app).get('/api/runs/nope/export').set('cookie', cookie)).status).toBe(404);
+  });
+
   it('resumes from ?after= and Last-Event-ID', async () => {
     const a = await (await open('/runs/live-done/log?after=0')).read();
     expect(a.text).not.toContain('line 0');
