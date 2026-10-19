@@ -160,6 +160,11 @@ const MIGRATIONS = [
            COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), COALESCE(cost_usd, 0)
     FROM runs WHERE input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cost_usd IS NOT NULL;
   `,
+  // Re-list every ticket on the next sync so existing rows get their creation time.
+  `
+  ALTER TABLE tickets ADD COLUMN created_at TEXT;
+  UPDATE repos SET synced_at = NULL;
+  `,
 ];
 
 export let db: DatabaseSync;

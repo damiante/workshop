@@ -1,5 +1,7 @@
 import { one, run } from './db.ts';
-import type { Settings } from './api-types.ts';
+import type { Settings, TicketOrder } from './api-types.ts';
+
+export const TICKET_ORDERS: TicketOrder[] = ['updated-asc', 'updated-desc', 'created-asc', 'created-desc'];
 
 export const DEFAULT_SETTINGS: Settings = {
   // Nothing launches until you've configured Workshop and switched it on.
@@ -14,6 +16,7 @@ export const DEFAULT_SETTINGS: Settings = {
   apiDailyCapUsd: 20,
   pollMinutes: 3,
   authors: [],
+  ticketOrder: 'updated-asc',
   retentionDays: 30,
 };
 

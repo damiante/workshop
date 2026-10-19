@@ -25,6 +25,7 @@ export interface RemoteTicket {
   labels: string[];
   url: string;
   updatedAt: string;
+  createdAt?: string;
   /** How many open tickets block this one. Undefined means the source didn't say. */
   openBlockers?: number;
 }

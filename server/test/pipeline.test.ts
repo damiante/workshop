@@ -850,3 +850,56 @@ describe('nominated tickets only', () => {
     expect(getTicket(1)!.push).toBeNull();
   });
 });
+
+describe('ticket order', () => {
+  const implement = JSON.stringify([label.size('s'), label.stage('implement')]);
+  const numbers = () => buildQueue().map((c) => c.ticket.number);
+  const add = (n: number, updated: string, created: string | null, labels = implement) =>
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at, created_at) VALUES (1, ?, 'T', '', 'u', 'me', 'open', ?, ?, ?)", n, labels, updated, created);
+
+  beforeEach(() => {
+    saveSettings({ mode: 'always', ticketOrder: 'updated-asc' });
+    run("UPDATE tickets SET updated_at = '2026-10-13T00:00:00Z', created_at = '2026-10-01T00:00:00Z' WHERE id = 1");
+    add(10, '2026-10-10T00:00:00Z', '2026-10-05T00:00:00Z'); // oldest update, newest creation
+    add(11, '2026-10-15T00:00:00Z', null); // no creation time: falls back to its update time
+  });
+  afterEach(() => {
+    run('DELETE FROM tickets WHERE number IN (10, 11, 12)');
+    saveSettings({ ticketOrder: 'updated-asc' });
+  });
+
+  it('defaults to least recently updated first', () => {
+    expect(numbers()).toEqual([10, 3, 11]);
+  });
+
+  it('supports most recently updated first', () => {
+    saveSettings({ ticketOrder: 'updated-desc' });
+    expect(numbers()).toEqual([11, 3, 10]);
+  });
+
+  it('orders by creation time, falling back to the update time', () => {
+    saveSettings({ ticketOrder: 'created-asc' });
+    expect(numbers()).toEqual([3, 10, 11]);
+    saveSettings({ ticketOrder: 'created-desc' });
+    expect(numbers()).toEqual([11, 10, 3]);
+  });
+
+  it('never beats a push or the step order', () => {
+    add(12, '2026-10-16T00:00:00Z', null, '[]'); // unclassified: a later step, though the newest update
+    saveSettings({ ticketOrder: 'updated-desc' });
+    expect(numbers()).toEqual([11, 3, 10, 12]);
+    setPush(getTicket(1)!, 'lifecycle');
+    expect(numbers()[0]).toBe(3);
+  });
+
+  it('stores the creation time on sync and keeps it when a later sync omits it', async () => {
+    const remote = (over: object = {}) => ({ number: 3, title: 'Add dark mode', body: '', state: 'open', author: 'me', url: 'u', updatedAt: '2026-10-14T00:00:00Z', labels: [label.size('s'), label.stage('implement')], ...over });
+    const repo = one<any>('SELECT * FROM repos WHERE id = 1');
+    fake.tickets.listChanged = async () => [remote({ createdAt: '2026-09-01T00:00:00Z' })];
+    await syncRepo(repo);
+    expect(getTicket(1)!.created_at).toBe('2026-09-01T00:00:00Z');
+    fake.tickets.listChanged = async () => [remote()];
+    await syncRepo(repo);
+    expect(getTicket(1)!.created_at).toBe('2026-09-01T00:00:00Z');
+  });
+});

@@ -193,6 +193,7 @@ export class GitHubApp implements VcsHost, TicketSource {
         labels: i.labels.map((l) => (typeof l === 'string' ? l : l.name ?? '')).filter(Boolean),
         url: i.html_url,
         updatedAt: i.updated_at,
+        createdAt: i.created_at,
         openBlockers: (i as { issue_dependencies_summary?: { blocked_by?: number } }).issue_dependencies_summary?.blocked_by ?? 0,
       }));
   }

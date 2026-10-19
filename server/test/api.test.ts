@@ -70,6 +70,15 @@ describe('authenticated API', () => {
     expect(ok.body).toMatchObject({ mode: 'scheduled', start: '22:00', end: '07:00', authors: ['Damiante'] });
   });
 
+  it('validates and saves the ticket order', async () => {
+    const bad = await request(app).put('/api/settings').set('cookie', cookie).send({ ticketOrder: 'random' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('Unknown ticket order.');
+    const ok = await request(app).put('/api/settings').set('cookie', cookie).send({ ticketOrder: 'created-desc' });
+    expect(ok.body.ticketOrder).toBe('created-desc');
+    expect((await request(app).get('/api/settings').set('cookie', cookie)).body.ticketOrder).toBe('created-desc');
+  });
+
   it('treats a prompt equal to the default as not customised', async () => {
     const agents = (await request(app).get('/api/agents').set('cookie', cookie)).body;
     const classifier = agents.find((a: { name: string }) => a.name === 'classifier');

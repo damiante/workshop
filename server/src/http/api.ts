@@ -9,7 +9,7 @@ import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews } from '../
 import { pushRefusal, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { stopRun } from '../scheduler/runner.ts';
-import { getSettings, saveSettings } from '../settings.ts';
+import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend } from '../spend.ts';
 import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
@@ -111,6 +111,10 @@ apiRouter.put('/settings', (req, res) => {
   if (b.apiRunCapUsd !== undefined) patch.apiRunCapUsd = num(b.apiRunCapUsd, 'API cap per run', 0, 1000);
   if (b.apiDailyCapUsd !== undefined) patch.apiDailyCapUsd = num(b.apiDailyCapUsd, 'API cap per day', 0, 10000);
   if (b.pollMinutes !== undefined) patch.pollMinutes = int(b.pollMinutes, 'Polling interval', 1, 60);
+  if (b.ticketOrder !== undefined) {
+    check(TICKET_ORDERS.includes(b.ticketOrder), 'Unknown ticket order.');
+    patch.ticketOrder = b.ticketOrder;
+  }
   if (b.retentionDays !== undefined) patch.retentionDays = int(b.retentionDays, 'Retention', 1, 365);
   if (b.authors !== undefined) {
     check(Array.isArray(b.authors) && b.authors.every((a: unknown) => typeof a === 'string'), 'Authors must be a list of GitHub usernames.');
