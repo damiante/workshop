@@ -128,6 +128,7 @@ const schemas: Record<string, Schema> = {
     kind: str,
     message: str,
     ref: nullable(str),
+    runId: nullable(str),
     createdAt: int,
     ackAt: nullable(int),
   }),

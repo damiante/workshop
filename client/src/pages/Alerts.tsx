@@ -1,3 +1,4 @@
+import { Link } from 'react-router';
 import type { AlertView } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
@@ -16,6 +17,7 @@ export function Alerts() {
           <div className="stack grow" style={{ gap: 2 }}>
             <Status tone={a.level === 'error' ? 'error' : a.level === 'warning' ? 'attention' : 'idle'}>{a.message}</Status>
             <span className="small muted">{clock(a.createdAt)}</span>
+            {a.runId && <Link to={`/runs/${a.runId}`}>View run</Link>}
           </div>
           {acknowledgeable && <button onClick={() => ack(`/alerts/${a.id}/ack`)}>Acknowledge</button>}
         </li>

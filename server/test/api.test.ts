@@ -425,6 +425,20 @@ describe('nominating tickets', () => {
   });
 });
 
+describe('alert links', () => {
+  it('points run and ticket alerts at a run, and leaves other alerts unlinked', async () => {
+    const tid = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-old', ?, 'design', 1, 'm', 'subscription', 'failed', 1)", tid);
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-new', ?, 'design', 2, 'm', 'subscription', 'failed', 2)", tid);
+    for (const [kind, ref] of [['run-detached', 'run:r-old'], ['ticket-failed', `ticket:${tid}`], ['host-offline', 'host:1'], ['gone', 'run:missing']]) {
+      run("INSERT INTO alerts (level, kind, message, ref, created_at) VALUES ('error', ?, 'm', ?, 0)", kind, ref);
+    }
+    const res = await request(app).get('/api/alerts').set('cookie', cookie);
+    const byKind = Object.fromEntries(res.body.map((a: { kind: string; runId: string | null }) => [a.kind, a.runId]));
+    expect(byKind).toMatchObject({ 'run-detached': 'r-old', 'ticket-failed': 'r-new', 'host-offline': null, gone: null });
+  });
+});
+
 describe('live streams', () => {
   let base = '';
   let server: ReturnType<typeof app.listen>;
