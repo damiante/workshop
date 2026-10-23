@@ -69,6 +69,8 @@ A push is refused with 409 and the reason when the ticket is closed, failed, ski
 
 ## Media
 
+`GET /api/tickets/{id}` returns a ticket (open or closed), every agent run on it oldest first, and its media, which is what the ticket lifecycle page shows. Finished runs are removed after the retention period in Settings.
+
 Each ticket has a temporary store of images: screenshots agents added, and images copied from the issue. `GET /api/tickets/{id}/media` lists them; `GET /api/tickets/{id}/media/{name}` returns one file with its own `Content-Type`. Both need a token or session. The store is deleted when the ticket finishes (merged, pull request closed, issue closed or declined) and after 30 days without changes.
 
 ## Errors

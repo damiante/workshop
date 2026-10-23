@@ -1,4 +1,4 @@
-import type { AgentName, RunStatus } from '../../server/src/api-types.ts';
+import type { AgentName, RunStatus, Stage } from '../../server/src/api-types.ts';
 
 export const AGENT_LABEL: Record<AgentName, string> = {
   classifier: 'Classifier',
@@ -6,6 +6,15 @@ export const AGENT_LABEL: Record<AgentName, string> = {
   'design-review': 'Design adversary',
   implement: 'Implementation',
   merge: 'Merge',
+};
+
+export const STAGE_TEXT: Record<Stage, string> = {
+  design: 'Design',
+  'design-review': 'Design review',
+  implement: 'Implementation',
+  'pr-review': 'Your review',
+  merge: 'Merge',
+  reclassify: 'Re-classify changes',
 };
 
 export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone }> = {

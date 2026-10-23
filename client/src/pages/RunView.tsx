@@ -112,6 +112,9 @@ export function RunView() {
           </a>
         </div>
         <div className="row">
+          <Link className="button" to={`/tickets/${run.ticketId}`}>
+            Ticket lifecycle
+          </Link>
           {run.mediaCount > 0 && (
             <Link className="button" to={`/tickets/${run.ticketId}/media?run=${run.id}`}>
               View screenshots ({run.mediaCount})

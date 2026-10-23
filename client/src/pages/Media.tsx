@@ -16,7 +16,9 @@ export function Media() {
   return (
     <div className="stack">
       <div className="stack" style={{ gap: 4 }}>
-        <h1>Screenshots for {data.ticket}</h1>
+        <h1>
+          Screenshots for <Link to={`/tickets/${data.ticketId}`}>{data.ticket}</Link>
+        </h1>
         <span className="muted">{data.title}</span>
       </div>
       <Panel

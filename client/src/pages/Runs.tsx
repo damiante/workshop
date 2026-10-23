@@ -34,7 +34,7 @@ export function Runs() {
                     <Link to={`/runs/${r.id}`}>{clock(r.startedAt)}</Link>
                   </td>
                   <td>
-                    {r.ticket}
+                    <Link to={`/tickets/${r.ticketId}`}>{r.ticket}</Link>
                     <div className="small muted">{r.ticketTitle}</div>
                   </td>
                   <td>

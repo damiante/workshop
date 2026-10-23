@@ -303,6 +303,44 @@ describe('media', () => {
   });
 });
 
+describe('ticket lifecycle', () => {
+  let ticketId = 0;
+
+  beforeAll(() => {
+    const conn = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('vcs', 'github', 'GH life', '{}', '', 'ok', 0, 0)").lastInsertRowid);
+    const repo = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (?, 'me/life', 'main', 'u', 1)", conn).lastInsertRowid);
+    ticketId = Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 9, 'Lifecycle', '', 'u', 'Damiante', 'closed', '[]', '2026-10-13T00:00:00Z')", repo).lastInsertRowid);
+    const ins = "INSERT INTO runs (id, ticket_id, agent, mode, attempt, model, billing, status, summary, started_at) VALUES (?, ?, ?, ?, 1, 'm', 'subscription', 'succeeded', ?, ?)";
+    run(ins, 'l-3', ticketId, 'classifier', 'delta', 'Sized S', 30);
+    run(ins, 'l-1', ticketId, 'classifier', 'normal', 'Sized M', 10);
+    run(ins, 'l-2', ticketId, 'implement', 'normal', 'Built it', 20);
+    run("INSERT INTO media (ticket_id, name, source, run_id, caption, size, created_at) VALUES (?, 'shot.png', 'Implementation', 'l-2', NULL, 3, 5)", ticketId);
+  });
+
+  it('needs sign-in', async () => {
+    expect((await request(app).get(`/api/tickets/${ticketId}`)).status).toBe(401);
+  });
+
+  it('returns a closed ticket with its runs oldest first and its media', async () => {
+    const res = await request(app).get(`/api/tickets/${ticketId}`).set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.ticket).toMatchObject({ id: ticketId, state: 'closed', mediaCount: 1 });
+    expect(res.body.runs.map((r: { id: string }) => r.id)).toEqual(['l-1', 'l-2', 'l-3']);
+    expect(res.body.runs.map((r: { agent: string; mode: string; summary: string }) => [r.agent, r.mode, r.summary])).toEqual([
+      ['classifier', 'normal', 'Sized M'],
+      ['implement', 'normal', 'Built it'],
+      ['classifier', 'delta', 'Sized S'],
+    ]);
+    expect(res.body.media).toMatchObject([{ name: 'shot.png', runId: 'l-2' }]);
+    expect(Object.keys(res.body).sort()).toEqual(Object.keys((OPENAPI.components.schemas.TicketLifecycle as { properties: object }).properties).sort());
+  });
+
+  it('rejects bad and unknown ids', async () => {
+    expect((await request(app).get('/api/tickets/abc').set('cookie', cookie)).status).toBe(400);
+    expect((await request(app).get('/api/tickets/99999').set('cookie', cookie)).status).toBe(404);
+  });
+});
+
 describe('OpenAPI', () => {
   const routes = (apiRouter.stack as unknown as { route?: { path: string; methods: Record<string, boolean> } }[])
     .filter((l) => l.route)
