@@ -9,9 +9,9 @@ function RunLine({ run, now }: { run: RunView; now: number }) {
   return (
     <div className="stack" style={{ gap: 4 }}>
       <div className="spread">
-        <Link to={`/runs/${run.id}`}>
-          {AGENT_LABEL[run.agent]} on {run.ticket}
-        </Link>
+        <span>
+          <Link to={`/runs/${run.id}`}>{AGENT_LABEL[run.agent]}</Link> on <Link to={`/tickets/${run.ticketId}`}>{run.ticket}</Link>
+        </span>
         <Status tone={status.tone}>{status.label}</Status>
       </div>
       <span>{run.ticketTitle}</span>
@@ -35,12 +35,14 @@ function NeedsYou({ ticket }: { ticket: TicketView }) {
   return (
     <div className="stack" style={{ gap: 4 }}>
       <div className="spread">
-        <a href={ticket.url} target="_blank" rel="noreferrer">
+        <Link to={`/tickets/${ticket.id}`}>
           {ticket.repo}#{ticket.number}
-        </a>
+        </Link>
         <Status tone={ticket.failed ? 'error' : 'attention'}>{ticket.failed ? 'Stopped' : ticket.needsInfo ? 'Question' : 'Review'}</Status>
       </div>
-      <span>{ticket.title}</span>
+      <a href={ticket.url} target="_blank" rel="noreferrer">
+        {ticket.title}
+      </a>
       <a className="small" href={href} target="_blank" rel="noreferrer">
         {text}
       </a>
@@ -118,7 +120,7 @@ export function Dashboard() {
                 <li key={q.ticketId} className="stack" style={{ gap: 4 }}>
                   <div className="spread">
                     <span>
-                      {q.ticket}: {q.title}
+                      <Link to={`/tickets/${q.ticketId}`}>{q.ticket}</Link>: {q.title}
                     </span>
                     <span className="tag">{q.next}</span>
                   </div>

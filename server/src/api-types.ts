@@ -205,6 +205,13 @@ export interface MediaItem {
   url: string;
 }
 
+export interface TicketLifecycle {
+  ticket: TicketView;
+  /** Every run on the ticket still kept, oldest first. */
+  runs: RunView[];
+  media: MediaItem[];
+}
+
 export interface TicketMedia {
   ticketId: number;
   ticket: string;

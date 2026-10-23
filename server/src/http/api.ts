@@ -3,12 +3,12 @@ import path from 'node:path';
 import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
 import { allowanceViews, apiSpendSince } from '../allowance.ts';
-import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketMedia, Overview, Settings, TicketStatePatch, Usage } from '../api-types.ts';
+import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, TicketStatePatch, Usage } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { listMedia, mediaDir, mediaView } from '../media.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
-import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews } from '../runs.ts';
+import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews, ticketRunViews } from '../runs.ts';
 import { pushRefusal, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { stopRun } from '../scheduler/runner.ts';
@@ -271,21 +271,27 @@ apiRouter.post('/sync', (_req, res) => {
   res.status(202).json({ ok: true });
 });
 
-function mediaTicket(idParam: string) {
+function ticketParam(idParam: string) {
   check(/^[1-9]\d*$/.test(idParam), 'Ticket ids are whole numbers.');
   const t = getTicket(Number(idParam));
   check(t, 'Ticket not found.', 404);
   return t;
 }
 
+apiRouter.get('/tickets/:id', (req, res) => {
+  const t = ticketParam(req.params.id);
+  const body: TicketLifecycle = { ticket: ticketView(t, getRepo(t.repo_id)!), runs: ticketRunViews(t.id), media: listMedia(t.id).map(mediaView) };
+  res.json(body);
+});
+
 apiRouter.get('/tickets/:id/media', (req, res) => {
-  const t = mediaTicket(req.params.id);
+  const t = ticketParam(req.params.id);
   const body: TicketMedia = { ticketId: t.id, ticket: `${getRepo(t.repo_id)!.full_name}#${t.number}`, title: t.title, items: listMedia(t.id).map(mediaView) };
   res.json(body);
 });
 
 apiRouter.get('/tickets/:id/media/:name', (req, res) => {
-  const t = mediaTicket(req.params.id);
+  const t = ticketParam(req.params.id);
   const name = req.params.name;
   check(validName(name), "That isn't a media file name.");
   const row = listMedia(t.id).find((m) => m.name === name);

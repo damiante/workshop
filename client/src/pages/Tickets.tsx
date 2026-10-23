@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import type { Push, Size, Stage, TicketStatePatch, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Modal, Status } from '../components/ui.tsx';
+import { STAGE_TEXT } from '../format.ts';
 
 const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
   { title: 'To classify', match: (t) => t.stage === null || t.stage === 'reclassify' },
@@ -21,7 +22,7 @@ const FILTERS: { label: string; match: (t: TicketView) => boolean }[] = [
   { label: 'Skipped', match: (t) => t.skipped },
 ];
 
-function TicketStatus({ t }: { t: TicketView }) {
+export function TicketStatus({ t }: { t: TicketView }) {
   if (t.activeRunId) {
     return (
       <Link to={`/runs/${t.activeRunId}`}>
@@ -77,12 +78,7 @@ function PushControls({ t }: { t: TicketView }) {
 
 const STAGE_OPTIONS: { value: Stage | ''; text: string }[] = [
   { value: '', text: 'To classify' },
-  { value: 'design', text: 'Design' },
-  { value: 'design-review', text: 'Design review' },
-  { value: 'implement', text: 'Implementation' },
-  { value: 'pr-review', text: 'Your review' },
-  { value: 'merge', text: 'Merge' },
-  { value: 'reclassify', text: 'Re-classify changes' },
+  ...(Object.entries(STAGE_TEXT) as [Stage, string][]).map(([value, text]) => ({ value, text })),
 ];
 const SIZE_OPTIONS: Size[] = ['xs', 's', 'm', 'l', 'xl'];
 
@@ -197,9 +193,9 @@ function Card({ t }: { t: TicketView }) {
   return (
     <article className="card">
       <div className="spread small muted">
-        <span>
+        <Link to={`/tickets/${t.id}`}>
           {t.repo}#{t.number}
-        </span>
+        </Link>
         {t.size && <span className="tag">{t.size.toUpperCase()}</span>}
       </div>
       <a href={t.url} target="_blank" rel="noreferrer">

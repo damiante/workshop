@@ -81,6 +81,10 @@ export function runViews(where = '1 = 1', ...params: (string | number)[]): RunVi
   return all<ViewRow>(`${VIEW_SQL} WHERE ${where} ORDER BY runs.started_at DESC LIMIT 200`, ...params).map(toView);
 }
 
+export function ticketRunViews(ticketId: number): RunView[] {
+  return all<ViewRow>(`${VIEW_SQL} WHERE runs.ticket_id = ? ORDER BY runs.started_at ASC, runs.rowid ASC`, ticketId).map(toView);
+}
+
 export function runView(id: string): RunView | undefined {
   const row = one<ViewRow>(`${VIEW_SQL} WHERE runs.id = ?`, id);
   return row ? toView(row) : undefined;

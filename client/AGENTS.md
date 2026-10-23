@@ -12,7 +12,7 @@ The Workshop UI: React 19, React Router 8, Vite. Plain CSS with custom propertie
 | `src/format.ts` | Labels for agents and run statuses, durations, times, money |
 | `src/transcript.ts` | Pure reducer: run log lines → steps, prose, tool calls with results attached, to-do list, outcome. Tested in `test/` |
 | `src/components/` | `Layout` (sidebar, mode switch, allowance meters), `ui.tsx` (`Status`, `Meter`, `Modal`, `Panel`, `ErrorNote`), `ThemeToggle` |
-| `src/pages/` | Login, Dashboard, Tickets, Runs, RunView, Connections, Agents, Settings, Alerts, Media (a ticket's screenshots, `tickets/:id/media`) |
+| `src/pages/` | Login, Dashboard, Tickets, Runs, RunView, Connections, Agents, Settings, Alerts, Ticket (a ticket's lifecycle, `tickets/:id`), Media (a ticket's screenshots, `tickets/:id/media`) |
 | `src/theme.css` | Every colour, size and component style |
 
 ## Data flow

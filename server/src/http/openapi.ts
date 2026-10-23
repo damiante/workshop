@@ -115,6 +115,7 @@ const schemas: Record<string, Schema> = {
     updatedAt: str,
   }),
   MediaItem: object({ name: str, source: str, runId: nullable(str), caption: nullable(str), size: int, createdAt: int, url: str }),
+  TicketLifecycle: object({ ticket: ref('TicketView'), runs: array(ref('RunView')), media: array(ref('MediaItem')) }),
   TicketMedia: object({ ticketId: int, ticket: str, title: str, items: array(ref('MediaItem')) }),
   TicketStatePatch: object(
     {
@@ -273,6 +274,7 @@ const paths: Record<string, Record<string, Op>> = {
       errors: [400, 403, 404, 409],
     },
   },
+  '/tickets/{id}': { get: { summary: "A ticket with every agent run on it, oldest first, and its media: the ticket's lifecycle in Workshop.", params: ['id'], ok: ref('TicketLifecycle'), errors: [400, 404] } },
   '/tickets/{id}/media': { get: { summary: "The images in the ticket's media store: screenshots agents added and images copied from the issue.", params: ['id'], ok: ref('TicketMedia'), errors: [400, 404] } },
   '/tickets/{id}/media/{name}': {
     get: {

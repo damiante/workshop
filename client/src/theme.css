@@ -711,6 +711,13 @@ input[type='checkbox'] {
   gap: 16px;
   padding: 16px;
 }
+.media-grid.thumbs {
+  padding: 0;
+  gap: 8px;
+}
+.media-grid.thumbs figure {
+  max-width: 160px;
+}
 .media-grid figure {
   margin: 0;
   display: flex;
