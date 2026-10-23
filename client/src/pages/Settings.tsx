@@ -117,6 +117,12 @@ function ApiTokens() {
     <Panel title="API tokens">
       <div className="panel-body stack">
         <p className="small muted">Scripts can use Workshop's API with a token. See docs/api.md.</p>
+        <p className="small">
+          API schema (OpenAPI):{' '}
+          <a href="/api/openapi.json" target="_blank" rel="noreferrer">View</a>
+          {' · '}
+          <a href="/api/openapi.json" download="workshop-openapi.json">Download</a>
+        </p>
         <ErrorNote error={error} />
         {data && data.length > 0 && (
           <div className="table-wrap">
