@@ -35,14 +35,12 @@ function NeedsYou({ ticket }: { ticket: TicketView }) {
   return (
     <div className="stack" style={{ gap: 4 }}>
       <div className="spread">
-        <Link to={`/tickets/${ticket.id}`}>
+        <a href={ticket.url} target="_blank" rel="noreferrer">
           {ticket.repo}#{ticket.number}
-        </Link>
+        </a>
         <Status tone={ticket.failed ? 'error' : 'attention'}>{ticket.failed ? 'Stopped' : ticket.needsInfo ? 'Question' : 'Review'}</Status>
       </div>
-      <a href={ticket.url} target="_blank" rel="noreferrer">
-        {ticket.title}
-      </a>
+      <Link to={`/tickets/${ticket.id}`}>{ticket.title}</Link>
       <a className="small" href={href} target="_blank" rel="noreferrer">
         {text}
       </a>
