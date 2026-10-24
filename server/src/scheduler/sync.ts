@@ -92,23 +92,33 @@ async function syncReviews(repo: RepoRow) {
   const ref = repoRef(repo);
   const authors = getSettings().authors;
   const tickets = all<TicketRow>('SELECT * FROM tickets WHERE repo_id = ? AND pr_number IS NOT NULL', repo.id);
+  let touched = false;
   for (const t of tickets) {
-    const state = parseLabels(labelsOf(t));
-    if (state.stage !== 'pr-review' && state.stage !== 'merge') continue;
-    if (state.stage === 'pr-review' && state.needsInfo && t.state === 'open') continue;
-    const pr = await vcs.pullRequestState(ref, t.pr_number!, authors);
-    run('UPDATE tickets SET pr_status = ? WHERE id = ?', pr.state === 'open' ? (pr.decision ?? 'review') : pr.state, t.id);
-    let move: ReturnType<typeof moveTo> | null = null;
-    if (pr.state === 'merged') await finishMerged(t);
-    else if (t.state === 'closed') move = moveTo(labelsOf(t), null); // you closed the issue: stop quietly
-    else if (pr.state === 'closed') {
-      const active = activeRunId(t.id); // a Merge agent may be resolving a conflict on that PR
-      if (active) await stopRun(active, 'The pull request was closed.', false);
-      await stopAfterClosedPr(t);
+    try {
+      const state = parseLabels(labelsOf(t));
+      if (state.stage !== 'pr-review' && state.stage !== 'merge') continue;
+      if (state.stage === 'pr-review' && state.needsInfo && t.state === 'open') continue;
+      const pr = await vcs.pullRequestState(ref, t.pr_number!, authors);
+      // Recorded first, so "Needs you" reflects the review even before the label change lands.
+      const status = pr.state === 'open' ? (pr.decision ?? 'review') : pr.state;
+      if (status !== t.pr_status) touched = true;
+      run('UPDATE tickets SET pr_status = ? WHERE id = ?', status, t.id);
+      let move: ReturnType<typeof moveTo> | null = null;
+      if (pr.state === 'merged') await finishMerged(t);
+      else if (t.state === 'closed') move = moveTo(labelsOf(t), null); // you closed the issue: stop quietly
+      else if (pr.state === 'closed') {
+        const active = activeRunId(t.id); // a Merge agent may be resolving a conflict on that PR
+        if (active) await stopRun(active, 'The pull request was closed.', false);
+        await stopAfterClosedPr(t);
+      }
+      else if (state.stage === 'merge') continue; // still open and approved: the merge step handles it
+      else if (pr.decision === 'approved') move = moveTo(labelsOf(t), 'merge');
+      else if (pr.decision === 'changes_requested') move = moveTo(labelsOf(t), 'reclassify');
+      if (move) await editLabels(t, move.add, move.remove);
+    } catch (err) {
+      // One failing pull request mustn't stop the others from being checked.
+      console.warn(`Couldn't check the pull request of ${repo.full_name}#${t.number}: ${(err as Error).message}`);
     }
-    else if (state.stage === 'merge') continue; // still open and approved: the merge step handles it
-    else if (pr.decision === 'approved') move = moveTo(labelsOf(t), 'merge');
-    else if (pr.decision === 'changes_requested') move = moveTo(labelsOf(t), 'reclassify');
-    if (move) await editLabels(t, move.add, move.remove);
   }
+  if (touched) publish('tickets');
 }

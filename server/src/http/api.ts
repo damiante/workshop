@@ -58,7 +58,7 @@ apiRouter.get('/overview', (_req, res) => {
     allowance: allowanceViews(),
     thresholds: { fiveHour: s.fiveHourMax, weekly: s.weeklyMax },
     running: runViews("runs.status IN ('starting', 'running', 'publishing', 'paused')"),
-    needsYou: tickets.filter((t) => t.needsInfo || t.failed || (t.stage === 'pr-review' && !t.activeRunId)),
+    needsYou: tickets.filter((t) => t.needsInfo || t.failed || (t.stage === 'pr-review' && !t.activeRunId && t.prStatus !== 'changes_requested')),
     queue: queueView(),
     hosts: hostViews(),
     alerts: alertViews('ack_at IS NULL', 20),
