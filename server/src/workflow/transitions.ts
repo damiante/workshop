@@ -1,7 +1,7 @@
 import type { AgentName } from '../api-types.ts';
 import { joinRefs } from '../scheduler/gates.ts';
-import { addNeeds, label, moveTo, setSize, stageAfterClassify, stageAfterDesign, type TicketState } from './labels.ts';
-import type { AgentResult, ClassifierResult, WorkResult } from './schemas.ts';
+import { addNeeds, applyEdits, label, labelDiff, moveTo, parseLabels, setSize, stageAfterClassify, stageAfterDesign, STAGE_OF_AGENT, type TicketState } from './labels.ts';
+import type { AgentResult, ClassifierResult, Rescue, WorkResult } from './schemas.ts';
 
 /** Everything Workshop should do after a successful agent run. Pure, so every transition is unit-tested. */
 export interface Plan {
@@ -21,6 +21,10 @@ export interface Plan {
   ui?: boolean;
   /** Delete the ticket's media store: the ticket won't be worked on. */
   deleteMedia?: boolean;
+  /** Delete this branch from the repository (a rescue branch that has been merged). */
+  deleteBranch?: string;
+  /** Forget the ticket's stored rescue. */
+  clearRescue?: boolean;
   /** The agent gave up; counts toward the retry limit. */
   failure?: string;
 }
@@ -34,6 +38,8 @@ export interface PlanContext {
   author: string;
   docPath: string;
   docUrl: string;
+  /** The ticket's stored rescue, for the Merge agent in the reconcile stage. */
+  rescue?: Rescue;
 }
 
 const NEXT_TEXT = { implement: 'implementation', design: 'design', 'design-review': 'design review' } as const;
@@ -65,8 +71,26 @@ export function planTransition(ctx: PlanContext, result: AgentResult): Plan {
     case 'implement':
       return { ...moveTo(ctx.labels, 'pr-review'), publish: true, openPr: true };
     case 'merge':
+      if (ctx.state.stage === 'reconcile') return planReconcile(ctx, r);
       return { add: [], remove: [], publish: true, merge: true };
   }
+}
+
+/** The Merge agent merged the saved work: finish the stage that the rescued push interrupted. */
+function planReconcile(ctx: PlanContext, r: WorkResult): Plan {
+  const rescue = ctx.rescue;
+  if (!rescue) return { add: [], remove: [], failure: 'Nothing to reconcile: Workshop has no saved work for this ticket. Move it to another stage.' };
+  const asBefore = applyEdits(ctx.labels, moveTo(ctx.labels, STAGE_OF_AGENT[rescue.agent]!));
+  const inner = planTransition({ ...ctx, agent: rescue.agent, mode: rescue.mode, labels: asBefore, state: parseLabels(asBefore), rescue: undefined }, rescue.result);
+  const merged = `The Merge agent merged the saved work from \`${rescue.branch}\` into this branch:\n\n${r.summary}`;
+  return {
+    ...inner,
+    ...labelDiff(ctx.labels, applyEdits(asBefore, inner)),
+    publish: true,
+    deleteBranch: rescue.branch,
+    clearRescue: true,
+    comment: [merged, inner.comment].filter(Boolean).join('\n\n'),
+  };
 }
 
 function planClassifier(ctx: PlanContext, r: ClassifierResult): Plan {

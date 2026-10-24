@@ -23,6 +23,16 @@ export interface WorkResult {
 
 export type AgentResult = ClassifierResult | WorkResult;
 
+/** A run whose push was rescued: what to finish once the Merge agent has merged the saved work. */
+export interface Rescue {
+  /** The branch the agent's commits were saved on. */
+  branch: string;
+  runId: string;
+  agent: AgentName;
+  mode: 'normal' | 'delta';
+  result: WorkResult;
+}
+
 const questions = { type: 'array', items: { type: 'string' }, description: 'Specific questions for the ticket owner (needs_info only).' };
 
 const CLASSIFIER_SCHEMA = {

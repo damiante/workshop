@@ -2,7 +2,7 @@ import type { AgentName, Size, Stage, TicketStatePatch } from '../api-types.ts';
 import type { LabelDef } from '../providers/types.ts';
 
 export const SIZES: Size[] = ['xs', 's', 'm', 'l', 'xl'];
-export const STAGES: Stage[] = ['design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify'];
+export const STAGES: Stage[] = ['design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify', 'reconcile'];
 
 export const CAPABILITIES = ['browser'] as const;
 export type Capability = (typeof CAPABILITIES)[number];
@@ -25,6 +25,7 @@ const STAGE_TEXT: Record<Stage, string> = {
   'pr-review': 'pull request waiting for your review',
   merge: 'approved, merge next',
   reclassify: 'changes requested, re-classify next',
+  reconcile: 'pushed work conflicts, Merge agent next',
 };
 
 export const LABEL_DEFS: LabelDef[] = [
@@ -74,6 +75,8 @@ export function nextStep(state: TicketState, open: boolean): Step | null {
     case 'design-review':
     case 'implement':
       return { kind: 'agent', agent: state.stage, mode: 'normal' };
+    case 'reconcile':
+      return { kind: 'agent', agent: 'merge', mode: 'normal' };
     case 'merge':
       return { kind: 'merge' };
     case 'pr-review':
@@ -89,9 +92,13 @@ const AGENT_TEXT: Record<AgentName, string> = {
   merge: 'Resolve merge conflicts',
 };
 
-export function describeStep(step: Step | null): string | null {
+/** The agents whose runs publish, and the stage each one works in. */
+export const STAGE_OF_AGENT: Partial<Record<AgentName, Stage>> = { design: 'design', 'design-review': 'design-review', implement: 'implement', merge: 'merge' };
+
+export function describeStep(step: Step | null, stage: Stage | null = null): string | null {
   if (!step) return null;
   if (step.kind === 'merge') return 'Merge';
+  if (stage === 'reconcile') return 'Reconcile pushed work';
   return step.mode === 'delta' ? 'Re-classify requested changes' : AGENT_TEXT[step.agent];
 }
 
@@ -111,6 +118,16 @@ export function moveTo(labels: string[], stage: Stage | null) {
     add: target && !labels.includes(target) ? [target] : [],
     remove: STAGES.map(label.stage).filter((name) => name !== target && labels.includes(name)),
   };
+}
+
+/** The edits that turn `from` into `to`. */
+export function labelDiff(from: string[], to: string[]) {
+  return { add: to.filter((name) => !from.includes(name)), remove: from.filter((name) => !to.includes(name)) };
+}
+
+/** The labels left after applying `edits`. */
+export function applyEdits(labels: string[], edits: { add: string[]; remove: string[] }): string[] {
+  return [...labels.filter((name) => !edits.remove.includes(name)), ...edits.add.filter((name) => !labels.includes(name))];
 }
 
 export function setSize(labels: string[], size: Size) {

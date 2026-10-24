@@ -119,7 +119,7 @@ export interface ModelOption {
 }
 
 export type Size = 'xs' | 's' | 'm' | 'l' | 'xl';
-export type Stage = 'design' | 'design-review' | 'implement' | 'pr-review' | 'merge' | 'reclassify';
+export type Stage = 'design' | 'design-review' | 'implement' | 'pr-review' | 'merge' | 'reclassify' | 'reconcile';
 
 /** Fields of a ticket's state to change by hand; fields left out stay as they are. */
 export interface TicketStatePatch {

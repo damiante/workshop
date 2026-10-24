@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { addNeeds, branchFor, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
-import { parseResult } from '../src/workflow/schemas.ts';
+import { addNeeds, applyEdits, branchFor, labelDiff, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
+import { parseResult, type Rescue } from '../src/workflow/schemas.ts';
 import { planTransition, type PlanContext } from '../src/workflow/transitions.ts';
 import { capabilitiesOf, environmentText, taskPrompt } from '../src/workflow/prompts.ts';
 
@@ -352,5 +352,65 @@ describe('capabilities', () => {
     expect(environmentText([])).toContain('No browser is installed');
     expect(environmentText([])).toContain('workshop/needs:browser');
     expect(environmentText(['browser', 'gpu'])).toContain('gpu');
+  });
+});
+
+describe('reconcile (a rescued push)', () => {
+  const rescue = (over: Partial<Rescue> = {}): Rescue => ({ branch: 'workshop/1-x-unmerged-abc', runId: 'run-1', agent: 'implement', mode: 'normal', result: { outcome: 'done', summary: 'Built it.' }, ...over });
+  const reconcileCtx = (r: Rescue | undefined, size = 's') => {
+    const labels = [label.size(size as 's'), label.stage('reconcile')];
+    return ctx({ agent: 'merge', labels, state: parseLabels(labels), rescue: r });
+  };
+  const merged = { outcome: 'done' as const, summary: 'Resolved CLAUDE.md.' };
+
+  it('reconcile is a Merge agent step', () => {
+    expect(step([label.stage('reconcile')])).toEqual({ kind: 'agent', agent: 'merge', mode: 'normal' });
+  });
+
+  it('labelDiff and applyEdits are inverses', () => {
+    const diff = labelDiff(['a', 'b'], ['b', 'c']);
+    expect(diff).toEqual({ add: ['c'], remove: ['a'] });
+    expect(applyEdits(['a', 'b'], diff).sort()).toEqual(['b', 'c']);
+  });
+
+  it('finishes an Implementation rescue: pull request, review stage, branch cleanup', () => {
+    const plan = planTransition(reconcileCtx(rescue()), merged);
+    expect(plan).toMatchObject({ publish: true, openPr: true, deleteBranch: 'workshop/1-x-unmerged-abc', clearRescue: true });
+    expect(plan.add).toEqual([label.stage('pr-review')]);
+    expect(plan.remove).toEqual([label.stage('reconcile')]);
+    expect(plan.comment).toContain('Resolved CLAUDE.md.');
+  });
+
+  it('finishes a Design rescue on an M ticket: implement next, both comments', () => {
+    const plan = planTransition(reconcileCtx(rescue({ agent: 'design', result: { outcome: 'done', summary: 'Designed.' } }), 'm'), merged);
+    expect(plan.add).toEqual([label.stage('implement')]);
+    expect(plan.remove).toEqual([label.stage('reconcile')]);
+    expect(plan.comment).toContain('Resolved CLAUDE.md.');
+    expect(plan.comment).toContain('Design written');
+  });
+
+  it('a stored needs_info result restores the question', () => {
+    const plan = planTransition(reconcileCtx(rescue({ result: { outcome: 'needs_info', summary: 's', questions: ['Which?'] } })), merged);
+    expect(plan.add).toContain(label.needsInfo);
+    expect(plan.comment).toContain('Which?');
+  });
+
+  it('fails when Workshop has no saved work', () => {
+    expect(planTransition(reconcileCtx(undefined), merged).failure).toContain('Nothing to reconcile');
+  });
+
+  it('the Merge agent in the merge stage is unchanged', () => {
+    const labels = [label.stage('merge')];
+    expect(planTransition(ctx({ agent: 'merge', labels, state: parseLabels(labels) }), merged)).toMatchObject({ publish: true, merge: true });
+  });
+
+  it('the task names the rescue branch', () => {
+    const prompt = taskPrompt({
+      agent: 'merge', mode: 'normal', repo: 'me/app', base: 'main', branch: 'workshop/3-x', docPath: 'd.md',
+      ticket: { number: 3, title: 'X', body: 'Do X', url: 'u', labels: [], size: null },
+      comments: [], omittedComments: 0, review: [], ui: false, media: [],
+      rescue: { branch: 'workshop/3-x-unmerged-abc', agent: 'implement', summary: 'Built it.' },
+    });
+    expect(prompt).toContain('git merge origin/workshop/3-x-unmerged-abc');
   });
 });

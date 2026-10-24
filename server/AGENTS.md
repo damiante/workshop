@@ -41,7 +41,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
   - a vanished `run` container is a failure;
   - re-attaching skips log lines already stored for that container (`linesFrom`).
 - The unique index `runs_one_active_per_ticket` enforces one agent per ticket (paused runs included). `launch()` returns null on conflict.
-- `publish` merges in commits that appeared on the remote branch and retries the push; on a conflict it saves the work on `<branch>-unmerged-<sha>` (exit 3) and the run fails.
+- `publish` merges in commits that appeared on the remote branch and retries the push; on a conflict it saves the work on `<branch>-unmerged-<sha>` (exit 3). The run then succeeds and the ticket moves to `stage:reconcile`, with what was interrupted kept in `tickets.rescue`; the Merge agent merges the rescue branch and `planTransition` finishes the interrupted stage. A conflict during that reconcile run fails it.
 - Side effects happen only in `publishRun`, from `planTransition`'s plan. Agents never apply labels.
 - `fail()` increments `tickets.failures`. At `MAX_ATTEMPTS` (2) it adds `workshop/failed` plus a comment. Sync resets the count when you remove the label.
 

@@ -2,7 +2,7 @@ import { raiseAlert } from '../alerts.ts';
 import { run } from '../db.ts';
 import { deleteMedia } from '../media.ts';
 import { getSettings } from '../settings.ts';
-import { branchOf, editLabels, getRepo, labelsOf, repoRef, sourceFor, vcsFor, type TicketRow } from '../tickets.ts';
+import { branchOf, editLabels, getRepo, labelsOf, repoRef, rescueOf, sourceFor, vcsFor, type TicketRow } from '../tickets.ts';
 import { label, moveTo } from '../workflow/labels.ts';
 
 const setPrStatus = (t: TicketRow, status: string) => run('UPDATE tickets SET pr_status = ? WHERE id = ?', status, t.id);
@@ -49,6 +49,11 @@ export async function cleanUpClosedIssue(t: TicketRow) {
     setPrStatus(t, 'closed');
   }
   if (t.branch) await vcs.deleteBranch(ref, t.branch);
+  const rescue = rescueOf(t);
+  if (rescue) {
+    await vcs.deleteBranch(ref, rescue.branch).catch((err) => console.warn(`Couldn't delete ${rescue.branch}: ${(err as Error).message}`));
+    run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
+  }
   await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running, label.needsInfo]);
 }
 

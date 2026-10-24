@@ -181,6 +181,8 @@ const MIGRATIONS = [
   CREATE INDEX media_run ON media (run_id);
   ALTER TABLE tickets ADD COLUMN ui INTEGER NOT NULL DEFAULT 0;
   `,
+  // What a rescued push interrupted (JSON), until the Merge agent has reconciled it.
+  `ALTER TABLE tickets ADD COLUMN rescue TEXT;`,
 ];
 
 export let db: DatabaseSync;

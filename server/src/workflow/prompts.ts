@@ -5,7 +5,7 @@ export const AGENT_INFO: Record<AgentName, { label: string; description: string;
   design: { label: 'Design', description: 'Writes a design doc on the branch for M, L and XL tickets.', maxTurns: 100, timeoutMin: 60 },
   'design-review': { label: 'Design adversary', description: 'Attacks the design for L and XL tickets and revises it.', maxTurns: 80, timeoutMin: 45 },
   implement: { label: 'Implementation', description: 'Implements the ticket with tests; Workshop opens the PR.', maxTurns: 300, timeoutMin: 180 },
-  merge: { label: 'Merge', description: 'Resolves conflicts when an approved PR no longer merges cleanly.', maxTurns: 100, timeoutMin: 60 },
+  merge: { label: 'Merge', description: 'Resolves conflicts when an approved PR no longer merges cleanly, or when pushed work conflicts with new commits on the branch.', maxTurns: 100, timeoutMin: 60 },
 };
 
 export const AGENT_NAMES = Object.keys(AGENT_INFO) as AgentName[];
@@ -54,9 +54,9 @@ Then improve the design file: append a "Review" section listing each criticism, 
 - For tickets sized l or xl: before finishing, use a subagent to adversarially review your complete diff against the ticket and the design (correctness, edge cases, security, missing tests). Fix what it finds, re-run the tests, and summarise its findings and your fixes.
 - Commit with clear messages. Your summary becomes the pull request description: what changed, how it was tested, and anything the reviewer should look at closely.`,
 
-  merge: `You are the Merge agent. The pull request for this ticket was approved, but it now conflicts with the base branch.
+  merge: `You are the Merge agent. Something conflicts with this ticket's branch: either the base branch, after the pull request was approved, or work that Workshop saved on another branch when this branch changed on GitHub under an agent.
 
-Merge the base branch into the current branch (the task gives the exact command). Resolve every conflict so that both sides' intent is kept. Where they truly contradict, keep the base branch's behaviour and make this branch's change work on top of it. Run the test suites and fix anything the merge broke. Commit the merge, then summarise the conflicts and how you resolved them.`,
+Merge the branch the task names into the current branch (the task gives the exact command). Resolve every conflict so that both sides' intent is kept. Where they truly contradict, keep the behaviour of the branch that was already on GitHub (the base branch, or the current branch's existing commits) and make the other change work on top of it. Run the test suites and fix anything the merge broke. Commit the merge, then summarise the conflicts and how you resolved them.`,
 };
 
 export function protocolText(p: { branch: string; base: string }) {
@@ -88,6 +88,8 @@ export interface TaskContext {
   ui: boolean;
   /** What's in the ticket's media store, at /work/media/<name>. */
   media: { name: string; source: string; runId: string | null; caption: string | null }[];
+  /** Merge agent only: work Workshop saved on another branch because a push conflicted. */
+  rescue?: { branch: string; agent: AgentName; summary: string };
 }
 
 const MAX_OPEN_TICKETS = 30;
@@ -128,6 +130,9 @@ function taskLine(c: TaskContext): string {
         "If the change affects what a user sees, run the app, screenshot the changed screens or states and save them to `/work/media/`. Before and after shots are best when the old state is easy to reach. If the app can't run here, say so in your summary instead.",
       ].filter(Boolean).join(' ');
     case 'merge':
+      if (c.rescue) {
+        return `Workshop couldn't push the ${AGENT_INFO[c.rescue.agent].label} agent's work because \`${c.branch}\` changed on GitHub meanwhile. That work is saved on \`origin/${c.rescue.branch}\`; its summary: "${c.rescue.summary}". Run \`git merge origin/${c.rescue.branch}\`, resolve the conflicts keeping both sides' intent, run the tests and commit the merge.`;
+      }
       return `Run \`git merge origin/${c.base}\`, resolve the conflicts, run the tests and commit the merge.`;
   }
 }

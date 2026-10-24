@@ -6,6 +6,7 @@ import type { RepoRef, TicketLink } from './providers/types.ts';
 import { mediaCount } from './media.ts';
 import { getSettings } from './settings.ts';
 import { dependencyBlock, inScope } from './scheduler/gates.ts';
+import type { Rescue } from './workflow/schemas.ts';
 import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
 
 export interface RepoRow {
@@ -43,11 +44,14 @@ export interface TicketRow {
   push: Push | null;
   push_stage: string | null;
   ui: number;
+  rescue: string | null;
   updated_at: string;
   created_at: string | null;
 }
 
 export const MAX_ATTEMPTS = 2;
+
+export const rescueOf = (t: TicketRow): Rescue | null => (t.rescue ? JSON.parse(t.rescue) : null);
 
 export const repoRef = (r: RepoRow): RepoRef => ({ fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url });
 
@@ -113,7 +117,7 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
   const step = nextStep(state, t.state === 'open');
   const next = step && !inScope(repo.selection, labels)
     ? 'Not nominated'
-    : state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : (step && dependencyBlock(blockersOf(t))) || describeStep(step);
+    : state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : (step && dependencyBlock(blockersOf(t))) || describeStep(step, state.stage);
   return {
     id: t.id,
     repo: repo.full_name,

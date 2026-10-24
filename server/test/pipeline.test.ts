@@ -93,7 +93,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.tickets = {
@@ -127,7 +127,7 @@ beforeEach(() => {
   };
 });
 
-const go = (agent: 'implement' | 'classifier' = 'implement') =>
+const go = (agent: 'implement' | 'classifier' | 'merge' = 'implement') =>
   launch({ ticketId: 1, agent, mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!;
 
 async function settle(id: string) {
@@ -321,18 +321,58 @@ describe('runner', () => {
     expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
   });
 
-  it('on a push conflict, comments with the rescue branch and fails the run', async () => {
+  const rescueBranch = 'workshop/1-x-unmerged-abc1234';
+  const rescued = async () => {
     fake.env = new FakeEnv({
       prepare: ['ok'],
-      run: [result({ outcome: 'done', summary: 'Done.' })],
-      publish: [line({ rescued: 'workshop/1-x-unmerged-abc1234' })],
+      run: [result({ outcome: 'done', summary: 'Built it.' })],
+      publish: [line({ rescued: rescueBranch })],
     });
     fake.env.exitCodes.publish = 3;
-    const r = await settle(go());
-    expect(r).toMatchObject({ status: 'failed', error: expect.stringContaining('workshop/1-x-unmerged-abc1234') });
-    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('workshop/1-x-unmerged-abc1234'));
-    expect(getTicket(1)!.failures).toBe(1);
+    return settle(go());
+  };
+
+  it('on a push conflict, saves the work and hands the ticket to the Merge agent without failing', async () => {
+    const r = await rescued();
+    expect(r).toMatchObject({ status: 'succeeded', error: null });
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining(rescueBranch));
+    expect(getTicket(1)!.failures).toBe(0);
+    expect(JSON.parse(getTicket(1)!.labels)).toContain(label.stage('reconcile'));
+    expect(JSON.parse(getTicket(1)!.labels)).not.toContain(label.stage('implement'));
+    expect(JSON.parse(getTicket(1)!.rescue!)).toMatchObject({ branch: rescueBranch, agent: 'implement', result: { summary: 'Built it.' } });
     expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('the Merge agent finishes the interrupted stage: pushes, opens the pull request, deletes the rescue branch', async () => {
+    await rescued();
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'done', summary: 'Resolved the conflicts.' })],
+      publish: [line({ before: 'bbb', after: 'ccc', ahead: 3 })],
+    });
+    const r = await settle(go('merge'));
+    expect(r.status).toBe('succeeded');
+    expect(fake.vcs.openPullRequest).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: expect.stringContaining('Built it.') }));
+    expect(fake.vcs.deleteBranch).toHaveBeenCalledWith(expect.anything(), rescueBranch);
+    const labels = JSON.parse(getTicket(1)!.labels);
+    expect(labels).toContain(label.stage('pr-review'));
+    expect(labels).not.toContain(label.stage('reconcile'));
+    expect(getTicket(1)!.rescue).toBeNull();
+  });
+
+  it('a second conflict during the reconcile run fails it and keeps the newest rescue branch', async () => {
+    await rescued();
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'done', summary: 'Resolved.' })],
+      publish: [line({ rescued: 'workshop/1-x-unmerged-def5678' })],
+    });
+    fake.env.exitCodes.publish = 3;
+    const r = await settle(go('merge'));
+    expect(r.status).toBe('failed');
+    expect(getTicket(1)!.failures).toBe(1);
+    expect(JSON.parse(getTicket(1)!.rescue!)).toMatchObject({ branch: 'workshop/1-x-unmerged-def5678', agent: 'implement' });
+    expect(JSON.parse(getTicket(1)!.labels)).toContain(label.stage('reconcile'));
   });
 
   it('a plain push failure keeps the generic message', async () => {
