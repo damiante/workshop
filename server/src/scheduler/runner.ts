@@ -27,16 +27,17 @@ import {
   markRunning,
   MAX_ATTEMPTS,
   repoRef,
+  rescueOf,
   setBlockers,
   sourceFor,
   vcsFor,
   type RepoRow,
   type TicketRow,
 } from '../tickets.ts';
-import { imageFor, label, parseLabels } from '../workflow/labels.ts';
+import { imageFor, label, moveTo, parseLabels } from '../workflow/labels.ts';
 import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
 import { AGENT_INFO, capabilitiesOf, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
-import { parseResult, schemaFor, type AgentResult, type WorkResult } from '../workflow/schemas.ts';
+import { parseResult, schemaFor, type AgentResult, type Rescue, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
 import { joinRefs } from './gates.ts';
 import { advanceMerge } from './merge.ts';
@@ -198,6 +199,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
     const local = (text: string) => replaceImageLinks(text, byKey);
     const branch = branchOf(t);
     const docPath = docPathOf(t);
+    const rescue = rescueOf(t);
     const openTickets =
       r.agent === 'classifier'
         ? all<{ number: number; title: string; body: string; author: string }>(
@@ -222,6 +224,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
       openTickets,
       ui: Boolean(t.ui),
       media: stored.map((m) => ({ name: m.name, source: m.source, runId: m.run_id, caption: m.caption })),
+      rescue: r.agent === 'merge' && parseLabels(labels).stage === 'reconcile' && rescue ? { branch: rescue.branch, agent: rescue.agent, summary: rescue.result.summary } : undefined,
     });
     Object.assign(files, mediaFiles(t.id));
   }
@@ -378,7 +381,7 @@ interface Pushed {
   rescued?: string;
 }
 
-async function openOrUpdatePr(ctx: Ctx, t: TicketRow, result: WorkResult, pushed: Pushed) {
+async function openOrUpdatePr(ctx: Ctx, t: TicketRow, result: WorkResult, pushed: Pushed, mediaRunId = ctx.run.id) {
   const repo = repoRef(ctx.repo);
   const vcs = vcsFor(ctx.repo);
   const branch = branchOf(t);
@@ -388,7 +391,7 @@ async function openOrUpdatePr(ctx: Ctx, t: TicketRow, result: WorkResult, pushed
   // new PR by "ahead" also covers a restart between pushing and opening the PR, when nothing is new.)
   if (number ? pushed.before === pushed.after : !pushed.ahead) throw new Error('The implementation agent finished without committing any changes.');
   let url = t.pr_url;
-  const shots = screenshotsLine(listMedia(t.id).filter((m) => m.run_id === ctx.run.id), config.publicUrl, t.id);
+  const shots = screenshotsLine(listMedia(t.id).filter((m) => m.run_id === mediaRunId), config.publicUrl, t.id);
   const screenshots = shots ? `\n\n${shots}` : '';
   if (number) {
     await vcs.commentOnPullRequest(repo, number, `Updated after review.\n\n${result.summary}${tests}${screenshots}`);
@@ -415,7 +418,7 @@ async function publishRun(ctx: Ctx) {
   const docPath = docPathOf(t);
   const result = JSON.parse(r.result!) as AgentResult;
   const plan = planTransition(
-    { agent: r.agent, mode: r.mode, labels, state: parseLabels(labels), author: t.author, docPath, docUrl: vcs.fileUrl(repo, branch, docPath) },
+    { agent: r.agent, mode: r.mode, labels, state: parseLabels(labels), author: t.author, docPath, docUrl: vcs.fileUrl(repo, branch, docPath), rescue: rescueOf(t) ?? undefined },
     result,
   );
   if (plan.failure) throw new Error(plan.failure);
@@ -430,10 +433,28 @@ async function publishRun(ctx: Ctx) {
       }
     });
     if (state.exitCode !== 0 && pushed.rescued) {
+      const reconciling = parseLabels(labels).stage === 'reconcile';
+      const stored = rescueOf(t);
+      if (!reconciling) {
+        // The work is safe: hand it to the Merge agent instead of failing the run.
+        const saved: Rescue = { branch: pushed.rescued, runId: r.id, agent: r.agent, mode: r.mode, result: result as WorkResult };
+        run('UPDATE tickets SET rescue = ? WHERE id = ?', JSON.stringify(saved), t.id);
+        const move = moveTo(labels, 'reconcile');
+        await editLabels(t, move.add, [...move.remove, label.running]);
+        await sourceFor(ctx.repo).comment(
+          repo,
+          t.number,
+          `\`${branch}\` changed on GitHub while the ${AGENT_INFO[r.agent].label} agent was working, and its commits conflict with the new ones. Workshop saved the agent's work on \`${pushed.rescued}\`. The Merge agent will merge it into \`${branch}\` next.`,
+        );
+        setRun(r.id, { status: 'succeeded', step: null, container_id: null, ended_at: Date.now(), summary: `Work saved on ${pushed.rescued}; the Merge agent reconciles it next.` });
+        if (r.volume) await ctx.env.removeVolume(r.volume).then(() => setRun(r.id, { volume: null }), () => {});
+        return;
+      }
+      if (stored) run('UPDATE tickets SET rescue = ? WHERE id = ?', JSON.stringify({ ...stored, branch: pushed.rescued }), t.id);
       await sourceFor(ctx.repo).comment(
         repo,
         t.number,
-        `\`${branch}\` changed on GitHub while the ${AGENT_INFO[r.agent].label} agent was working, and its commits conflict with the new ones. Workshop saved the agent's work on \`${pushed.rescued}\` and will try again from the current branch.`,
+        `\`${branch}\` changed on GitHub again while the Merge agent was working, and its commits conflict with the new ones. Workshop saved the agent's work on \`${pushed.rescued}\` and will try again from the current branch.`,
       );
       throw new Error(`Couldn't push ${branch}: it changed on GitHub and the agent's commits conflict with it. The work is saved on ${pushed.rescued}.`);
     }
@@ -458,7 +479,13 @@ async function publishRun(ctx: Ctx) {
   }
   if (plan.ui !== undefined) run('UPDATE tickets SET ui = ? WHERE id = ?', Number(plan.ui), t.id);
   if (plan.deleteMedia) deleteMedia(t.id);
-  if (plan.openPr) await openOrUpdatePr(ctx, t, result as WorkResult, pushed);
+  if (plan.openPr) {
+    // When reconciling, the PR describes the interrupted run's work, not the merge.
+    const rescued = plan.clearRescue ? rescueOf(t) : null;
+    await openOrUpdatePr(ctx, t, rescued ? rescued.result : (result as WorkResult), pushed, rescued ? rescued.runId : r.id);
+  }
+  if (plan.deleteBranch) await vcs.deleteBranch(repo, plan.deleteBranch).catch((err) => warn(r.id, `Workshop couldn't delete ${plan.deleteBranch}: ${(err as Error).message}`));
+  if (plan.clearRescue) run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
   await editLabels(t, plan.add, [...plan.remove, label.running]);
   if (plan.comment) await sourceFor(ctx.repo).comment(repo, t.number, plan.comment);
   run('UPDATE tickets SET failures = 0 WHERE id = ?', t.id);

@@ -15,6 +15,7 @@ export const STAGE_TEXT: Record<Stage, string> = {
   'pr-review': 'Your review',
   merge: 'Merge',
   reclassify: 'Re-classify changes',
+  reconcile: 'Reconcile pushed work',
 };
 
 export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone }> = {

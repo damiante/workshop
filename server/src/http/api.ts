@@ -261,6 +261,7 @@ apiRouter.put('/tickets/:id/state', async (req, res) => {
   } catch (err) {
     throw new HttpError(502, `Couldn't update the labels on GitHub: ${(err as Error).message}`);
   }
+  if (remove.includes(label.stage('reconcile'))) run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
   if (remove.includes(label.failed)) run('UPDATE tickets SET failures = 0 WHERE id = ?', t.id);
   kick();
   res.json(ticketView(t, repo));

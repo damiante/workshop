@@ -17,6 +17,7 @@ Workshop stores a ticket's state in labels on the issue, all prefixed `workshop/
 | `workshop/stage:pr-review` | Pull request open, waiting for your review |
 | `workshop/stage:merge` | Approved: merge next |
 | `workshop/stage:reclassify` | Changes requested: re-classify the requested changes |
+| `workshop/stage:reconcile` | Pushed work conflicted with new commits on the branch: Merge agent next |
 | `workshop/needs-info` | An agent asked a question in a comment. Answer it, then remove this label to resume the same stage |
 | `workshop/skip` | The Classifier declined the ticket (the reason is in a comment). Remove it to classify again |
 | `workshop/failed` | A stage failed twice, or you pressed Stop. Remove it to retry |
@@ -35,6 +36,7 @@ At most one stage label is present. `needs-info`, `skip` and `failed` sit alongs
 | No stage label | Classifier |
 | `stage:reclassify` | Classifier, in delta mode |
 | `stage:design` / `design-review` / `implement` | That agent |
+| `stage:reconcile` | Merge agent, merging the saved work (`tickets.rescue`) into the branch |
 | `stage:pr-review` | Nothing: waiting for your review |
 | `stage:merge` | Merge through the API, or the Merge agent if there are conflicts |
 
@@ -59,6 +61,7 @@ When several tickets are ready, work already under way goes first: merge, then i
 | Design adversary | done | `stage:implement` | Push the revised doc; comment a summary |
 | Implementation | done | `stage:pr-review` | Push. Open the pull request, or comment on the existing one after a review round. Request your review |
 | Merge | done | none | Push the conflict resolution, then merge through the API |
+| Merge (reconcile) | done | the interrupted stage's labels | Push, delete the rescue branch, then finish the interrupted stage (for example open the pull request) |
 | Any agent | needs_info | `needs-info` added, stage unchanged | Push any partial work; comment the numbered questions with an @mention |
 | Any agent | failed | none | Counts as a failed attempt |
 
@@ -105,6 +108,7 @@ A push lifts only the mode gate. Dependencies, model settings, allowance, the AP
 ## Failures, pauses and stops
 
 - **A failed attempt** (error result, invalid result, timeout, out of memory, a lost container, a failed push) counts against the stage. After the second one: `workshop/failed`, a comment with the error, and an alert.
+- **A conflicting push** isn't a failed attempt. `publish` saves the work on a rescue branch, the run succeeds, and the ticket moves to `stage:reconcile` so the Merge agent can merge it. If the branch moves again during the reconcile run, that run fails and counts.
 - **A usage limit** pauses the run instead. It resumes in the same Claude session on the same host after the window resets.
 - **Stop** in the run view kills the container and labels the ticket `workshop/failed`, so it doesn't restart immediately.
 - **Closing the issue** cancels any running agent.

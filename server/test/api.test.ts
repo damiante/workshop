@@ -501,6 +501,13 @@ describe("changing a ticket's status", () => {
     expect(one<{ failures: number }>('SELECT failures FROM tickets WHERE id = ?', id)!.failures).toBe(0);
   });
 
+  it('clears the stored rescue when the ticket leaves reconcile', async () => {
+    fakeTickets.setLabels = vi.fn().mockResolvedValue(undefined);
+    run("UPDATE tickets SET labels = ?, rescue = '{\"branch\":\"b\"}' WHERE id = ?", JSON.stringify(['workshop/stage:reconcile']), id);
+    expect((await put(id, { stage: 'implement' })).status).toBe(200);
+    expect(one<{ rescue: string | null }>('SELECT rescue FROM tickets WHERE id = ?', id)!.rescue).toBeNull();
+  });
+
   it('keeps a read-only token out', async () => {
     const made = await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'RO', scope: 'read' });
     const res = await request(app).put(`/api/tickets/${id}/state`).set('authorization', `Bearer ${made.body.token}`).send({ skip: true });
