@@ -255,6 +255,7 @@ apiRouter.put('/tickets/:id/state', async (req, res) => {
   }
   check(Object.keys(patch).length, 'Send at least one of stage, size, needsInfo, skip or failed.');
   check(!activeRunId(t.id), 'An agent is working on this ticket. Stop it in the run view first.', 409);
+  check(patch.stage !== 'reconcile' || t.rescue, "Workshop has no saved work to reconcile on this ticket. Choose another stage.");
   const { add, remove } = stateEdits(labelsOf(t), patch);
   try {
     await editLabels(t, add, remove);

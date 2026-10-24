@@ -102,6 +102,21 @@ describe.skipIf(!hasGit)('entrypoint publish (real git)', () => {
     expect(fs.existsSync(path.join(repoDir(), '.git/FETCH_HEAD'))).toBe(false);
   });
 
+  it('pushes a branch the agent rebased when nobody else moved it', () => {
+    commit(repoDir(), 'b.txt', 'x\n');
+    expect(step('publish').status).toBe(0);
+    const seed = path.join(dir, 'seed');
+    commit(seed, 'c.txt', 'y\n');
+    git(seed, 'push', '-q', 'origin', 'main');
+    expect(step('prepare').status).toBe(0);
+    git(repoDir(), 'rebase', '-q', 'origin/main');
+    commit(repoDir(), 'd.txt', 'z\n');
+    const mine = git(repoDir(), 'rev-parse', 'HEAD');
+    const r = step('publish');
+    expect(r.status).toBe(0);
+    expect(tip()).toBe(mine);
+  });
+
   it('reports no new commits when the agent committed nothing and the remote moved', () => {
     const theirs = other('c.txt', 'y\n');
     const r = step('publish');

@@ -508,6 +508,13 @@ describe("changing a ticket's status", () => {
     expect(one<{ rescue: string | null }>('SELECT rescue FROM tickets WHERE id = ?', id)!.rescue).toBeNull();
   });
 
+  it('refuses reconcile when there is no saved work to merge', async () => {
+    fakeTickets.setLabels = vi.fn().mockResolvedValue(undefined);
+    const res = await put(id, { stage: 'reconcile' });
+    expect(res.status).toBe(400);
+    expect(fakeTickets.setLabels).not.toHaveBeenCalled();
+  });
+
   it('keeps a read-only token out', async () => {
     const made = await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'RO', scope: 'read' });
     const res = await request(app).put(`/api/tickets/${id}/state`).set('authorization', `Bearer ${made.body.token}`).send({ skip: true });

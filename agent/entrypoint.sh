@@ -54,7 +54,10 @@ case "${1:-}" in
     pushed=
     for _ in 1 2 3; do
       before=$(git ls-remote "$PUSH_URL" "refs/heads/$BRANCH" | cut -f1)
-      if git push "$PUSH_URL" "HEAD:refs/heads/$BRANCH"; then pushed=1; break; fi
+      # The lease is the tip prepare (or the last merge) saw: a rebase or amend by the agent goes
+      # through, and only a branch that really moved on the remote is rejected.
+      seen=$(git rev-parse -q --verify "refs/remotes/origin/$BRANCH" || true)
+      if git push --force-with-lease="refs/heads/$BRANCH:$seen" "$PUSH_URL" "HEAD:refs/heads/$BRANCH"; then pushed=1; break; fi
       git fetch -q "$PUSH_URL" "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
       rm -f .git/FETCH_HEAD
       if ! git merge -q --no-edit "origin/$BRANCH"; then
