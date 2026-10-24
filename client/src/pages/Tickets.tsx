@@ -16,7 +16,7 @@ const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
 
 const FILTERS: { label: string; match: (t: TicketView) => boolean }[] = [
   { label: 'All', match: () => true },
-  { label: 'Needs you', match: (t) => t.needsInfo || t.stage === 'pr-review' },
+  { label: 'Needs you', match: (t) => t.needsInfo || (t.stage === 'pr-review' && t.prStatus !== 'changes_requested') },
   { label: 'Running', match: (t) => Boolean(t.activeRunId) },
   { label: 'Failed', match: (t) => t.failed },
   { label: 'Skipped', match: (t) => t.skipped },

@@ -521,6 +521,22 @@ describe('sync', () => {
     expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.stage('reclassify')], [label.stage('pr-review')]);
   });
 
+  it('records requested changes even when the label change fails, and keeps checking other tickets', async () => {
+    fake.tickets.listChanged = async () => [];
+    fake.vcs.pullRequestState = async () => pr({ decision: 'changes_requested' });
+    fake.tickets.setLabels.mockRejectedValueOnce(new Error('boom'));
+    await syncRepo(repo());
+    expect(one<{ pr_status: string }>('SELECT pr_status FROM tickets WHERE id = 1')?.pr_status).toBe('changes_requested');
+  });
+
+  it('keeps going when one pull request cannot be read', async () => {
+    fake.tickets.listChanged = async () => [];
+    fake.vcs.pullRequestState = async () => {
+      throw new Error('rate limited');
+    };
+    await expect(syncRepo(repo())).resolves.toBeUndefined();
+  });
+
   it('stops (rather than starting over) when you close the pull request', async () => {
     fake.tickets.listChanged = async () => [];
     fake.vcs.pullRequestState = async () => pr({ state: 'closed' });
