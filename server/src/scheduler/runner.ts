@@ -374,6 +374,8 @@ interface Pushed {
   before?: string;
   after?: string;
   ahead?: number;
+  /** Set when the branch moved and the agent's commits conflict: the branch they were saved on. */
+  rescued?: string;
 }
 
 async function openOrUpdatePr(ctx: Ctx, t: TicketRow, result: WorkResult, pushed: Pushed) {
@@ -427,6 +429,14 @@ async function publishRun(ctx: Ctx) {
         // git's own output
       }
     });
+    if (state.exitCode !== 0 && pushed.rescued) {
+      await sourceFor(ctx.repo).comment(
+        repo,
+        t.number,
+        `\`${branch}\` changed on GitHub while the ${AGENT_INFO[r.agent].label} agent was working, and its commits conflict with the new ones. Workshop saved the agent's work on \`${pushed.rescued}\` and will try again from the current branch.`,
+      );
+      throw new Error(`Couldn't push ${branch}: it changed on GitHub and the agent's commits conflict with it. The work is saved on ${pushed.rescued}.`);
+    }
     if (state.exitCode !== 0) throw new Error(`Pushing ${branch} failed (exit ${state.exitCode}). See the run log.`);
   }
   if (plan.addBlockers) {
