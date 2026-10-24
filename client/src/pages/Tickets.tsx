@@ -5,13 +5,14 @@ import { api, useApi } from '../api.ts';
 import { ErrorNote, Modal, Status } from '../components/ui.tsx';
 import { STAGE_TEXT } from '../format.ts';
 
-const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
+export const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
   { title: 'To classify', match: (t) => t.stage === null || t.stage === 'reclassify' },
   { title: 'Design', match: (t) => t.stage === 'design' },
   { title: 'Design review', match: (t) => t.stage === 'design-review' },
   { title: 'Implementation', match: (t) => t.stage === 'implement' },
   { title: 'Your review', match: (t) => t.stage === 'pr-review' },
   { title: 'Merge', match: (t) => t.stage === 'merge' },
+  { title: 'Reconcile', match: (t) => t.stage === 'reconcile' },
 ];
 
 const FILTERS: { label: string; match: (t: TicketView) => boolean }[] = [
