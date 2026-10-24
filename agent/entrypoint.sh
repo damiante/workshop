@@ -2,7 +2,7 @@
 # Workshop runs each step of an agent run in its own container on the run's volume (/work).
 # Git credentials only ever exist in `prepare` and `publish`; the container running Claude has none.
 set -euo pipefail
-cd /work
+cd "${WORKSHOP_DIR:-/work}"
 
 case "${1:-}" in
   prepare)
@@ -49,8 +49,24 @@ case "${1:-}" in
       git add -A
       git commit -q -m "Commit changes the agent left uncommitted"
     fi
-    before=$(git ls-remote "$PUSH_URL" "refs/heads/$BRANCH" | cut -f1)
-    git push "$PUSH_URL" "HEAD:refs/heads/$BRANCH"
+    # Only report success once a push has gone through. If the branch moved on the remote since
+    # prepare, merge its commits in and try again rather than lose the agent's work.
+    pushed=
+    for _ in 1 2 3; do
+      before=$(git ls-remote "$PUSH_URL" "refs/heads/$BRANCH" | cut -f1)
+      if git push "$PUSH_URL" "HEAD:refs/heads/$BRANCH"; then pushed=1; break; fi
+      git fetch -q "$PUSH_URL" "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+      rm -f .git/FETCH_HEAD
+      if ! git merge -q --no-edit "origin/$BRANCH"; then
+        # A real conflict: keep the work on a separate branch for the owner and fail the run.
+        git merge --abort
+        rescue="$BRANCH-unmerged-$(git rev-parse --short HEAD)"
+        git push "$PUSH_URL" "HEAD:refs/heads/$rescue"
+        printf '{"rescued":"%s"}\n' "$rescue"
+        exit 3
+      fi
+    done
+    if [ -z "$pushed" ]; then echo "Gave up pushing $BRANCH after 3 attempts." >&2; exit 1; fi
     ahead=$(git rev-list --count "origin/$BASE_BRANCH..HEAD")
     # Workshop reads this line: whether anything new was pushed, and how far the branch is ahead of base.
     printf '{"before":"%s","after":"%s","ahead":%s}\n' "$before" "$(git rev-parse HEAD)" "$ahead"

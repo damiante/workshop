@@ -41,6 +41,8 @@ const result = (structured: object) => line({ type: 'result', subtype: 'success'
 class FakeEnv {
   started: StepSpec[] = [];
   private script: Record<string, string[]>;
+  /** Non-zero exit codes per step, by container name prefix. */
+  exitCodes: Record<string, number> = {};
   constructor(script: Record<string, string[]>) {
     this.script = script;
   }
@@ -63,7 +65,7 @@ class FakeEnv {
   follow = async (id: string, skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
     for (const text of (this.script[id.split('-')[0]] ?? []).slice(skip)) onLine({ stream: 'stdout', text });
   };
-  wait = async () => ({ running: false, exitCode: 0, oomKilled: false });
+  wait = async (id: string) => ({ running: false, exitCode: this.exitCodes[id.split('-')[0]] ?? 0, oomKilled: false });
   /** What the run's /work/media holds when the agent finishes (a tar archive), or null for none. */
   archive: Buffer | null = null;
   readArchive = async () => this.archive;
@@ -317,6 +319,27 @@ describe('runner', () => {
     const r = await settle(go());
     expect(r).toMatchObject({ status: 'failed', error: expect.stringMatching(/without committing/) });
     expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('on a push conflict, comments with the rescue branch and fails the run', async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'done', summary: 'Done.' })],
+      publish: [line({ rescued: 'workshop/1-x-unmerged-abc1234' })],
+    });
+    fake.env.exitCodes.publish = 3;
+    const r = await settle(go());
+    expect(r).toMatchObject({ status: 'failed', error: expect.stringContaining('workshop/1-x-unmerged-abc1234') });
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('workshop/1-x-unmerged-abc1234'));
+    expect(getTicket(1)!.failures).toBe(1);
+    expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it('a plain push failure keeps the generic message', async () => {
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Done.' })], publish: [] });
+    fake.env.exitCodes.publish = 1;
+    const r = await settle(go());
+    expect(r).toMatchObject({ status: 'failed', error: expect.stringMatching(/Pushing .* failed \(exit 1\)/) });
   });
 
   it('opens the pull request when the commits were already pushed (restart between push and PR)', async () => {
