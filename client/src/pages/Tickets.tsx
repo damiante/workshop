@@ -11,8 +11,8 @@ export const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
   { title: 'Design review', match: (t) => t.stage === 'design-review' },
   { title: 'Implementation', match: (t) => t.stage === 'implement' },
   { title: 'Your review', match: (t) => t.stage === 'pr-review' },
-  { title: 'Merge', match: (t) => t.stage === 'merge' },
-  { title: 'Reconcile', match: (t) => t.stage === 'reconcile' },
+  // Reconcile is rare and the Merge agent works it, so it shares the Merge column.
+  { title: 'Merge', match: (t) => t.stage === 'merge' || t.stage === 'reconcile' },
 ];
 
 const FILTERS: { label: string; match: (t: TicketView) => boolean }[] = [
