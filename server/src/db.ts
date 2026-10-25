@@ -183,6 +183,8 @@ const MIGRATIONS = [
   `,
   // What a rescued push interrupted (JSON), until the Merge agent has reconciled it.
   `ALTER TABLE tickets ADD COLUMN rescue TEXT;`,
+  // The attention key you dismissed from Needs you; hidden while it still matches.
+  `ALTER TABLE tickets ADD COLUMN dismissed TEXT;`,
 ];
 
 export let db: DatabaseSync;

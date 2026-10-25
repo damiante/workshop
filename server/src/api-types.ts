@@ -156,6 +156,10 @@ export interface TicketView {
   prUrl: string | null;
   prStatus: string | null;
   activeRunId: string | null;
+  /** Why the ticket is waiting on you, or null when it isn't. */
+  attention: 'question' | 'failed' | 'review' | null;
+  /** You dismissed it from Needs you; it comes back when the reason changes. */
+  dismissed: boolean;
   /** Set while you've pushed this ticket by hand. */
   push: Push | null;
   /** How many images the ticket's media store holds. */
@@ -273,6 +277,8 @@ export interface Overview {
   thresholds: { fiveHour: number; weekly: number };
   running: RunView[];
   needsYou: TicketView[];
+  /** Needs-you items you dismissed. */
+  dismissed: TicketView[];
   queue: QueueItem[];
   hosts: HostView[];
   alerts: AlertView[];

@@ -540,6 +540,64 @@ describe('nominating tickets', () => {
   });
 });
 
+describe('dismissing Needs you items', () => {
+  it('hides an item until the reason it needs you changes', async () => {
+    const { run, one } = await import('../src/db.ts');
+    const id = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
+    const setLabels = (labels: string[]) => run('UPDATE tickets SET labels = ? WHERE id = ?', JSON.stringify(labels), id);
+    const dismiss = (body: object) => request(app).put(`/api/tickets/${id}/dismissed`).set('cookie', cookie).send(body);
+    const lists = async () => {
+      const o = (await request(app).get('/api/overview').set('cookie', cookie)).body;
+      const has = (l: { id: number }[]) => l.some((t) => t.id === id);
+      return { needs: has(o.needsYou), dismissed: has(o.dismissed) };
+    };
+    const addRun = (rid: string, at: number) =>
+      run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, 'design', 1, 'm', 'subscription', 'failed', ?)", rid, id, at);
+
+    setLabels(['workshop/stage:implement']);
+    expect((await dismiss({ dismissed: true })).status).toBe(409);
+    expect((await dismiss({ dismissed: 'yes' })).status).toBe(400);
+    expect((await request(app).put('/api/tickets/99999/dismissed').set('cookie', cookie).send({ dismissed: true })).status).toBe(404);
+    expect(await lists()).toEqual({ needs: false, dismissed: false });
+
+    setLabels(['workshop/stage:implement', 'workshop/needs-info']);
+    expect(await lists()).toEqual({ needs: true, dismissed: false });
+    const res = await dismiss({ dismissed: true });
+    expect(res.body).toMatchObject({ dismissed: true, attention: 'question' });
+    expect(await lists()).toEqual({ needs: false, dismissed: true });
+    expect((await dismiss({ dismissed: false })).body.dismissed).toBe(false);
+    expect(await lists()).toEqual({ needs: true, dismissed: false });
+
+    // Stays dismissed after an unrelated label edit.
+    await dismiss({ dismissed: true });
+    setLabels(['workshop/stage:implement', 'workshop/needs-info', 'bug']);
+    expect(await lists()).toEqual({ needs: false, dismissed: true });
+
+    // A different reason brings it back.
+    setLabels(['workshop/stage:implement', 'workshop/failed']);
+    expect(await lists()).toEqual({ needs: true, dismissed: false });
+
+    // A new run brings it back.
+    await dismiss({ dismissed: true });
+    expect(await lists()).toEqual({ needs: false, dismissed: true });
+    addRun('r-dismiss-1', 9_000_000_000_000);
+    expect(await lists()).toEqual({ needs: true, dismissed: false });
+
+    // Review: dismissed, then a new revision.
+    setLabels(['workshop/stage:pr-review']);
+    await dismiss({ dismissed: true });
+    expect(await lists()).toEqual({ needs: false, dismissed: true });
+    addRun('r-dismiss-2', 9_000_000_000_001);
+    expect(await lists()).toEqual({ needs: true, dismissed: false });
+
+    // Leaving Needs you removes it from both lists.
+    await dismiss({ dismissed: true });
+    setLabels(['workshop/stage:implement']);
+    expect(await lists()).toEqual({ needs: false, dismissed: false });
+    run("DELETE FROM runs WHERE id LIKE 'r-dismiss-%'");
+  });
+});
+
 describe('alert links', () => {
   it('points run and ticket alerts at a run, and leaves other alerts unlinked', async () => {
     const tid = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;

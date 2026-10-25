@@ -45,6 +45,7 @@ export interface TicketRow {
   push_stage: string | null;
   ui: number;
   rescue: string | null;
+  dismissed: string | null;
   updated_at: string;
   created_at: string | null;
 }
@@ -111,6 +112,30 @@ export function activeRunId(ticketId: number) {
   return one<{ id: string }>("SELECT id FROM runs WHERE ticket_id = ? AND status IN ('starting', 'running', 'publishing', 'paused')", ticketId)?.id ?? null;
 }
 
+type Attention = NonNullable<TicketView['attention']>;
+
+/** Why a ticket is waiting on you, or null when it isn't. */
+export function attentionOf(v: Pick<TicketView, 'needsInfo' | 'failed' | 'stage' | 'activeRunId' | 'prStatus'>): TicketView['attention'] {
+  if (v.needsInfo) return 'question';
+  if (v.failed) return 'failed';
+  if (v.stage === 'pr-review' && !v.activeRunId && v.prStatus !== 'changes_requested') return 'review';
+  return null;
+}
+
+/** The reason plus the latest run: each question, failure or pull request revision comes from a new run. */
+function attentionKey(t: TicketRow, reason: Attention | null) {
+  if (!reason) return null;
+  const latest = one<{ id: string }>('SELECT id FROM runs WHERE ticket_id = ? ORDER BY started_at DESC LIMIT 1', t.id)?.id;
+  return `${reason}:${latest ?? ''}`;
+}
+
+export function setDismissed(t: TicketRow, on: boolean) {
+  const key = on ? attentionKey(t, ticketView(t, getRepo(t.repo_id)!).attention) : null;
+  run('UPDATE tickets SET dismissed = ? WHERE id = ?', key, t.id);
+  t.dismissed = key;
+  publish('tickets');
+}
+
 export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
   const labels = labelsOf(t);
   const state = parseLabels(labels);
@@ -118,6 +143,8 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
   const next = step && !inScope(repo.selection, labels)
     ? 'Not nominated'
     : state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : (step && dependencyBlock(blockersOf(t))) || describeStep(step, state.stage);
+  const activeRun = activeRunId(t.id);
+  const attention = attentionOf({ ...state, prStatus: t.pr_status, activeRunId: activeRun });
   return {
     id: t.id,
     repo: repo.full_name,
@@ -138,7 +165,9 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
     prNumber: t.pr_number,
     prUrl: t.pr_url,
     prStatus: t.pr_status,
-    activeRunId: activeRunId(t.id),
+    activeRunId: activeRun,
+    attention,
+    dismissed: attention !== null && t.dismissed === attentionKey(t, attention),
     push: t.push,
     mediaCount: mediaCount(t.id),
     updatedAt: t.updated_at,

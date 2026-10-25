@@ -109,6 +109,8 @@ const schemas: Record<string, Schema> = {
     prUrl: nullable(str),
     prStatus: nullable(str),
     activeRunId: nullable(str),
+    attention: nullable(enumOf('question', 'failed', 'review')),
+    dismissed: bool,
     push: nullable(enumOf('stage', 'lifecycle')),
     nominated: nullable(bool),
     mediaCount: int,
@@ -146,6 +148,7 @@ const schemas: Record<string, Schema> = {
     thresholds: object({ fiveHour: num, weekly: num }),
     running: array(ref('RunView')),
     needsYou: array(ref('TicketView')),
+    dismissed: array(ref('TicketView')),
     queue: array(ref('QueueItem')),
     hosts: array(ref('HostView')),
     alerts: array(ref('AlertView')),
@@ -270,6 +273,16 @@ const paths: Record<string, Record<string, Op>> = {
       summary: 'Nominates or un-nominates a ticket in a repository that only works on nominated tickets. Send { "nominated": true | false }.',
       params: ['id'],
       body: { type: 'object' },
+      ok: ref('TicketView'),
+      errors: [400, 403, 404, 409],
+    },
+  },
+  '/tickets/{id}/dismissed': {
+    put: {
+      summary:
+        'Dismisses a ticket from Needs you on the dashboard, or brings it back. Send { "dismissed": true | false }. It comes back by itself when the reason changes: a new question, failure or pull request to review. Changes nothing on GitHub.',
+      params: ['id'],
+      body: object({ dismissed: bool }),
       ok: ref('TicketView'),
       errors: [400, 403, 404, 409],
     },
