@@ -34,14 +34,17 @@ ENV PATH=/home/agent/.local/bin:$PATH \
 ENTRYPOINT ["workshop-agent"]
 
 # The browser image: the base image plus Playwright with headless Chromium, for screenshots and
-# browser tests. Browsers live outside $HOME at a fixed path, owned by agent, so a repository pinned
-# to another Playwright version can install its own build there.
+# browser tests. Browsers live outside $HOME at a fixed path, owned by agent. Each Playwright release
+# looks for its own Chromium build there, so the recent minors in PLAYWRIGHT_EXTRA_VERSIONS are
+# preinstalled too: a repository pinned to one of them finds its browser without downloading it.
 FROM base AS browser
 USER root
 ARG PLAYWRIGHT_VERSION=1.64.1
+ARG PLAYWRIGHT_EXTRA_VERSIONS="1.63.0 1.62.1 1.61.1 1.60.0"
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 RUN npm install -g playwright@${PLAYWRIGHT_VERSION} \
  && playwright install --with-deps --only-shell chromium \
+ && for v in ${PLAYWRIGHT_EXTRA_VERSIONS}; do npx --yes playwright@${v} install --only-shell chromium; done \
  && rm -rf /var/lib/apt/lists/* /root/.npm \
  && chown -R agent:agent /opt/ms-playwright
 USER agent
