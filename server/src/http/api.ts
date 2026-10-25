@@ -14,7 +14,7 @@ import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../
 import { stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend } from '../spend.ts';
-import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setPush, ticketInScope, ticketView } from '../tickets.ts';
+import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setDismissed, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { CONTENT_TYPES, extType, validName } from '../workflow/media.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
@@ -52,13 +52,15 @@ export const apiRouter = Router();
 apiRouter.get('/overview', (_req, res) => {
   const s = getSettings();
   const tickets = listTicketViews();
+  const waiting = tickets.filter((t) => t.attention);
   const overview: Overview = {
     mode: s.mode,
     withinHours: withinHours(s, new Date()),
     allowance: allowanceViews(),
     thresholds: { fiveHour: s.fiveHourMax, weekly: s.weeklyMax },
     running: runViews("runs.status IN ('starting', 'running', 'publishing', 'paused')"),
-    needsYou: tickets.filter((t) => t.needsInfo || t.failed || (t.stage === 'pr-review' && !t.activeRunId && t.prStatus !== 'changes_requested')),
+    needsYou: waiting.filter((t) => !t.dismissed),
+    dismissed: waiting.filter((t) => t.dismissed),
     queue: queueView(),
     hosts: hostViews(),
     alerts: alertViews('ack_at IS NULL', 20),
@@ -227,6 +229,15 @@ apiRouter.put('/tickets/:id/nominated', async (req, res) => {
   check(repo.selection === 'nominated', "This repository works on its whole backlog, so tickets don't need nominating.", 409);
   await editLabels(t, nominated ? [label.nominated] : [], nominated ? [] : [label.nominated]);
   if (nominated) kick();
+  res.json(ticketView(t, repo));
+});
+
+apiRouter.put('/tickets/:id/dismissed', (req, res) => {
+  const { t, repo } = pushableTicket(req.params.id);
+  const dismissed = req.body?.dismissed;
+  check(typeof dismissed === 'boolean', 'Say whether to dismiss the ticket.');
+  check(!dismissed || ticketView(t, repo).attention, "This ticket isn't waiting on you, so there's nothing to dismiss.", 409);
+  setDismissed(t, dismissed);
   res.json(ticketView(t, repo));
 });
 

@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import { Link } from 'react-router';
 import type { ConnectionView, Overview, RepoView, RunView, Settings, TicketView } from '../../../server/src/api-types.ts';
-import { useApi, useNow } from '../api.ts';
+import { api, useApi, useNow } from '../api.ts';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, RUN_STATUS } from '../format.ts';
 
@@ -26,24 +27,49 @@ function RunLine({ run, now }: { run: RunView; now: number }) {
   );
 }
 
-function NeedsYou({ ticket }: { ticket: TicketView }) {
-  const [text, href] = ticket.needsInfo
-    ? ['Answer the question on the ticket, then remove the workshop/needs-info label', ticket.url]
-    : ticket.failed
-      ? ['Stopped after failures. Read the comment, then remove workshop/failed to retry', ticket.url]
-      : ['Review the pull request', ticket.prUrl ?? ticket.url];
+function NeedsYou({ ticket, dismissed }: { ticket: TicketView; dismissed?: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [text, href] =
+    ticket.attention === 'question'
+      ? ['Answer the question on the ticket, then remove the workshop/needs-info label', ticket.url]
+      : ticket.attention === 'failed'
+        ? ['Stopped after failures. Read the comment, then remove workshop/failed to retry', ticket.url]
+        : ['Review the pull request', ticket.prUrl ?? ticket.url];
+  const toggle = () => {
+    setBusy(true);
+    setError(null);
+    api(`/tickets/${ticket.id}/dismissed`, { method: 'PUT', body: { dismissed: !dismissed } })
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
+  const name = `${ticket.repo}#${ticket.number}`;
   return (
     <div className="stack" style={{ gap: 4 }}>
       <div className="spread">
         <a href={ticket.url} target="_blank" rel="noreferrer">
-          {ticket.repo}#{ticket.number}
+          {name}
         </a>
-        <Status tone={ticket.failed ? 'error' : 'attention'}>{ticket.failed ? 'Stopped' : ticket.needsInfo ? 'Question' : 'Review'}</Status>
+        <span className="row">
+          <Status tone={ticket.attention === 'failed' ? 'error' : 'attention'}>
+            {ticket.attention === 'failed' ? 'Stopped' : ticket.attention === 'question' ? 'Question' : 'Review'}
+          </Status>
+          <button
+            className="link small"
+            disabled={busy}
+            onClick={toggle}
+            aria-label={`${dismissed ? 'Bring back' : 'Dismiss'} ${name}`}
+            title={dismissed ? undefined : 'Hide this until the ticket needs you for something new'}
+          >
+            {dismissed ? 'Bring back' : 'Dismiss'}
+          </button>
+        </span>
       </div>
       <Link to={`/tickets/${ticket.id}`}>{ticket.title}</Link>
       <a className="small" href={href} target="_blank" rel="noreferrer">
         {text}
       </a>
+      {error && <span className="small error-text">{error}</span>}
     </div>
   );
 }
@@ -66,6 +92,7 @@ export function Dashboard() {
   const { data: repos } = useApi<RepoView[]>('/repos', ['repos']);
   const { data: settings } = useApi<Settings>('/settings', ['settings']);
   const now = useNow();
+  const [showDismissed, setShowDismissed] = useState(false);
   if (!data) return <ErrorNote error={error} />;
 
   const steps = setupSteps(connections ?? [], repos ?? [], settings, data);
@@ -109,6 +136,22 @@ export function Dashboard() {
             </ul>
           ) : (
             <p className="empty">Nothing is waiting on you.</p>
+          )}
+          {data.dismissed.length > 0 && (
+            <>
+              <button className="link small" style={{ padding: '8px 16px' }} onClick={() => setShowDismissed(!showDismissed)}>
+                {showDismissed ? 'Hide dismissed' : `Show ${data.dismissed.length} dismissed`}
+              </button>
+              {showDismissed && (
+                <ul className="list">
+                  {data.dismissed.map((t) => (
+                    <li key={t.id}>
+                      <NeedsYou ticket={t} dismissed />
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
           )}
         </Panel>
         <Panel title="Up next" action={<Link to="/tickets">All tickets</Link>}>

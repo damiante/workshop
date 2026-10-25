@@ -65,6 +65,8 @@ Either push also ends where Workshop would wait for you anyway: your pull reques
 
 `PUT /api/tickets/:id/nominated` with `{"nominated": true}` or `false` adds or removes the `workshop/nominated` label on a ticket in a repository that only works on nominated tickets. It answers with the ticket; 409 if the repository works on its whole backlog.
 
+`PUT /api/tickets/:id/dismissed` with `{"dismissed": true}` or `false` hides a ticket from **Needs you** on the dashboard, or brings it back. `/api/overview` lists dismissed tickets under `dismissed`. A dismissed ticket comes back by itself when the reason it needs you changes: a new question, a new failure stop or a new pull request to review (anything that starts a new run). It also comes back if cleanup removes the ticket's latest run after the retention period. Nothing changes on GitHub. It answers with the ticket; 400 if `dismissed` isn't a boolean, 409 when dismissing a ticket that isn't waiting on you.
+
 A push is refused with 409 and the reason when the ticket is closed, failed, skipped, waiting on a question or waiting for your review, or (for `stage`) already has an agent working on that stage. A ticket that doesn't exist, belongs to a disabled repository or was opened by someone outside the author allowlist is 404, and a missing or invalid scope is 400.
 
 ## Media

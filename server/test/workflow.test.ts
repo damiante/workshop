@@ -414,3 +414,16 @@ describe('reconcile (a rescued push)', () => {
     expect(prompt).toContain('git merge origin/workshop/3-x-unmerged-abc');
   });
 });
+
+describe('attentionOf', () => {
+  const base = { needsInfo: false, failed: false, stage: null, activeRunId: null, prStatus: null } as const;
+  it('says why a ticket needs you, in order of precedence', async () => {
+    const { attentionOf } = await import('../src/tickets.ts');
+    expect(attentionOf(base)).toBeNull();
+    expect(attentionOf({ ...base, stage: 'pr-review' })).toBe('review');
+    expect(attentionOf({ ...base, stage: 'pr-review', failed: true })).toBe('failed');
+    expect(attentionOf({ ...base, stage: 'pr-review', failed: true, needsInfo: true })).toBe('question');
+    expect(attentionOf({ ...base, stage: 'pr-review', activeRunId: 'r' })).toBeNull();
+    expect(attentionOf({ ...base, stage: 'pr-review', prStatus: 'changes_requested' })).toBeNull();
+  });
+});

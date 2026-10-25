@@ -112,7 +112,7 @@ Scripts can do the same, launch agents and read usage over HTTP with an API toke
 
 ## Day to day
 
-- **Needs you** on the dashboard lists questions to answer, pull requests to review, and tickets that stopped after failures.
+- **Needs you** on the dashboard lists questions to answer, pull requests to review, and tickets that stopped after failures. Dismiss hides an item you don't want to deal with yet; it comes back when the ticket needs you for something new.
 - **Answer a question:** reply on the issue, then remove `workshop/needs-info`.
 - **Review:** approve the pull request on GitHub to merge it, or request changes. Plain comments don't count. You can also merge it yourself on GitHub; Workshop notices at its next check and tidies up the labels. Closing the issue stops work on it, and Workshop closes its pull request and deletes its branch. Closing the pull request closes the issue as not planned.
 - **A ticket that failed twice** gets `workshop/failed` and a comment with the error. Fix what's needed and remove the label to retry.
