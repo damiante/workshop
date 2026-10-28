@@ -115,7 +115,8 @@ export function activeRunId(ticketId: number) {
 type Attention = NonNullable<TicketView['attention']>;
 
 /** Why a ticket is waiting on you, or null when it isn't. */
-export function attentionOf(v: Pick<TicketView, 'needsInfo' | 'failed' | 'stage' | 'activeRunId' | 'prStatus'>): TicketView['attention'] {
+export function attentionOf(v: Pick<TicketView, 'needsInfo' | 'failed' | 'stage' | 'activeRunId' | 'prStatus' | 'skipped'>): TicketView['attention'] {
+  if (v.skipped) return null;
   if (v.needsInfo) return 'question';
   if (v.failed) return 'failed';
   if (v.stage === 'pr-review' && !v.activeRunId && v.prStatus !== 'changes_requested') return 'review';
@@ -144,7 +145,7 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
     ? 'Not nominated'
     : state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : (step && dependencyBlock(blockersOf(t))) || describeStep(step, state.stage);
   const activeRun = activeRunId(t.id);
-  const attention = attentionOf({ ...state, prStatus: t.pr_status, activeRunId: activeRun });
+  const attention = attentionOf({ ...state, skipped: state.skip, prStatus: t.pr_status, activeRunId: activeRun });
   return {
     id: t.id,
     repo: repo.full_name,

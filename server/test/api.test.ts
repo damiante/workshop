@@ -721,3 +721,15 @@ describe('live streams', () => {
     expect(rest.ended).toBe(true);
   });
 });
+
+describe('repository enrolment', () => {
+  it('moves disabled repositories to nominated tickets and leaves enabled ones alone', async () => {
+    const { MIGRATIONS } = await import('../src/db.ts');
+    const add = (name: string, enabled: number) => Number(run('INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (1, ?, ?, ?, ?)', name, 'main', 'u', enabled).lastInsertRowid);
+    const off = add('me/off', 0);
+    const on = add('me/on', 1);
+    run(MIGRATIONS[MIGRATIONS.length - 1]);
+    expect(one<{ selection: string }>('SELECT selection FROM repos WHERE id = ?', off)?.selection).toBe('nominated');
+    expect(one<{ selection: string }>('SELECT selection FROM repos WHERE id = ?', on)?.selection).toBe('all');
+  });
+});

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 // Append-only: each entry upgrades the schema by one version (PRAGMA user_version).
-const MIGRATIONS = [
+export const MIGRATIONS = [
   `
   CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
@@ -185,6 +185,8 @@ const MIGRATIONS = [
   `ALTER TABLE tickets ADD COLUMN rescue TEXT;`,
   // The attention key you dismissed from Needs you; hidden while it still matches.
   `ALTER TABLE tickets ADD COLUMN dismissed TEXT;`,
+  // New repositories only work on nominated tickets until you choose otherwise (#59).
+  `UPDATE repos SET selection = 'nominated' WHERE enabled = 0;`,
 ];
 
 export let db: DatabaseSync;

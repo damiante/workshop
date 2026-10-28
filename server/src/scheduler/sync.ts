@@ -39,8 +39,9 @@ export async function syncRepo(repo: RepoRow) {
       t.updatedAt,
       t.createdAt ?? null,
     );
-    const active = existing && t.state === 'closed' ? activeRunId(existing.id) : null;
-    if (active) await stopRun(active, 'The ticket was closed.', false);
+    const stopReason = t.state === 'closed' ? 'The ticket was closed.' : t.labels.includes(label.skip) ? `The ticket was labelled ${label.skip}.` : null;
+    const active = existing && stopReason ? activeRunId(existing.id) : null;
+    if (active) await stopRun(active, stopReason!, false);
     if (existing?.state === 'open' && t.state === 'closed') {
       deleteMedia(existing.id); // before the tidy-up, so it happens even if that throws
       try {
@@ -96,6 +97,7 @@ async function syncReviews(repo: RepoRow) {
   for (const t of tickets) {
     try {
       const state = parseLabels(labelsOf(t));
+      if (state.skip && t.state === 'open') continue; // you took it out of Workshop
       if (state.stage !== 'pr-review' && state.stage !== 'merge') continue;
       if (state.stage === 'pr-review' && state.needsInfo && t.state === 'open') continue;
       const pr = await vcs.pullRequestState(ref, t.pr_number!, authors);
