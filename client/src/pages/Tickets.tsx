@@ -16,10 +16,10 @@ export const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
 ];
 
 const FILTERS: { label: string; match: (t: TicketView) => boolean }[] = [
-  { label: 'All', match: () => true },
-  { label: 'Needs you', match: (t) => t.needsInfo || (t.stage === 'pr-review' && t.prStatus !== 'changes_requested') },
-  { label: 'Running', match: (t) => Boolean(t.activeRunId) },
-  { label: 'Failed', match: (t) => t.failed },
+  { label: 'All', match: (t) => !t.skipped },
+  { label: 'Needs you', match: (t) => !t.skipped && (t.needsInfo || (t.stage === 'pr-review' && t.prStatus !== 'changes_requested')) },
+  { label: 'Running', match: (t) => !t.skipped && Boolean(t.activeRunId) },
+  { label: 'Failed', match: (t) => !t.skipped && t.failed },
   { label: 'Skipped', match: (t) => t.skipped },
 ];
 
@@ -263,6 +263,9 @@ export function Tickets() {
           ))}
         </div>
       </div>
+      {filter.label === 'Skipped' && (
+        <p className="muted small">Workshop leaves skipped tickets alone. To bring one back, remove the workshop/skip label or use Change status.</p>
+      )}
       <ErrorNote error={error} />
       {data && !data.length && (
         <p className="notice">

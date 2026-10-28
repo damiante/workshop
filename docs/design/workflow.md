@@ -19,7 +19,7 @@ Workshop stores a ticket's state in labels on the issue, all prefixed `workshop/
 | `workshop/stage:reclassify` | Changes requested: re-classify the requested changes |
 | `workshop/stage:reconcile` | Pushed work conflicted with new commits on the branch: Merge agent next |
 | `workshop/needs-info` | An agent asked a question in a comment. Answer it, then remove this label to resume the same stage |
-| `workshop/skip` | The Classifier declined the ticket (the reason is in a comment). Remove it to classify again |
+| `workshop/skip` | The Classifier declined the ticket (the reason is in a comment). Remove it to classify again. Adding it yourself stops any run, clears a push and hides the ticket on the next sync |
 | `workshop/failed` | A stage failed twice, or you pressed Stop. Remove it to retry |
 | `workshop/running` | An agent is working on it now (information only) |
 | `workshop/nominated` | You want this ticket worked on. Only matters in a repository set to nominated tickets |
@@ -92,7 +92,7 @@ For a ticket in `stage:merge`, Workshop reads the pull request's mergeability:
 
 ## Nominated tickets only
 
-Each repository has a "Tickets to work on" setting: all open tickets (the default) or only nominated ones. In a nominated-only repository, Workshop still syncs every ticket from an allowed author, but queues, merges and pushes only those with `workshop/nominated`. Add the label on GitHub or press Nominate on the Tickets page. Removing the label doesn't stop a run already in progress; it finishes its stage, then the ticket isn't picked up again. The author allowlist still applies.
+Each repository has a "Tickets to work on" setting: all open tickets or only nominated ones (the default for newly enrolled repositories; repositories already on keep their setting). In a nominated-only repository, Workshop still syncs every ticket from an allowed author, but queues, merges and pushes only those with `workshop/nominated`. Add the label on GitHub or press Nominate on the Tickets page. Removing the label doesn't stop a run already in progress; it finishes its stage, then the ticket isn't picked up again. The author allowlist still applies.
 
 ## Pushing a ticket by hand
 

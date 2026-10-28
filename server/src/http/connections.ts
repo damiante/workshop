@@ -249,7 +249,7 @@ connectionsRouter.post('/repos/refresh', async (_req, res) => {
   for (const c of listConnections('vcs')) {
     for (const r of await vcsOf(c).listRepos()) {
       run(
-        `INSERT INTO repos (vcs_connection_id, full_name, default_branch, private, url) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO repos (vcs_connection_id, full_name, default_branch, private, url, selection) VALUES (?, ?, ?, ?, ?, 'nominated')
          ON CONFLICT (vcs_connection_id, full_name) DO UPDATE SET default_branch = excluded.default_branch, private = excluded.private, url = excluded.url`,
         c.id,
         r.fullName,
