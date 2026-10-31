@@ -351,7 +351,7 @@ function Repos() {
       }
     >
       <div className="panel-body stack">
-        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. Repositories with a higher priority go first: a lower one waits until every open ticket in the higher ones has been classified. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on.</p>
+        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. A new repository only works on tickets you nominate with the workshop/nominated label. Switch it to all open tickets when you're ready. Repositories with a higher priority go first: a lower one waits until every open ticket in the higher ones has been classified. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on.</p>
         <input type="search" placeholder="Search repositories" aria-label="Search repositories" value={query} onChange={(e) => setQuery(e.target.value)} />
         <ErrorNote error={actionError ?? error} />
       </div>

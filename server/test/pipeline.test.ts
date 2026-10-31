@@ -677,6 +677,42 @@ describe('sync', () => {
     });
   });
 
+  describe('when you add workshop/skip', () => {
+    const skipped = [label.size('s'), label.stage('implement'), label.skip];
+    beforeEach(() => {
+      fake.tickets.listChanged = async () => [remote({ labels: skipped })];
+    });
+
+    it.each(['running', 'paused'])('cancels a %s run without marking the ticket failed', async (status) => {
+      run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-skip', 1, 'implement', 1, 'm', 'subscription', ?, 0)", status);
+      try {
+        await syncRepo(repo());
+        const r = one<{ status: string; error: string }>("SELECT status, error FROM runs WHERE id = 'r-skip'");
+        expect(r?.status).toBe('cancelled');
+        expect(r?.error).toContain('workshop/skip');
+        expect(fake.tickets.setLabels).not.toHaveBeenCalledWith(expect.anything(), 3, expect.arrayContaining([label.failed]), expect.anything());
+      } finally {
+        run("DELETE FROM runs WHERE id = 'r-skip'");
+      }
+    });
+
+    it('leaves a skipped ticket in review alone', async () => {
+      const labels = [label.size('s'), label.stage('pr-review'), label.skip];
+      run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(labels));
+      fake.tickets.listChanged = async () => [remote({ labels })];
+      fake.vcs.pullRequestState = async () => pr({ decision: 'approved' });
+      await syncRepo(repo());
+      expect(fake.tickets.setLabels).not.toHaveBeenCalled();
+    });
+
+    it('clears a hand push', async () => {
+      setPush(getTicket(1)!, 'lifecycle');
+      await syncRepo(repo());
+      await settlePushes();
+      expect(getTicket(1)!.push).toBeNull();
+    });
+  });
+
   it('resets the failure count when you remove workshop/failed', async () => {
     run('UPDATE tickets SET failures = 2, labels = ? WHERE id = 1', JSON.stringify([label.stage('implement'), label.failed]));
     fake.tickets.listChanged = async () => [remote({ labels: [label.stage('implement')] })];
