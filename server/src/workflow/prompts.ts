@@ -1,4 +1,5 @@
 import type { AgentName, Size } from '../api-types.ts';
+import { captionLine } from './media.ts';
 
 export const AGENT_INFO: Record<AgentName, { label: string; description: string; maxTurns: number; timeoutMin: number }> = {
   classifier: { label: 'Classifier', description: 'Sizes new tickets XS–XL, or declines them.', maxTurns: 40, timeoutMin: 20 },
@@ -168,11 +169,11 @@ export function taskPrompt(c: TaskContext): string {
     if (left > 0) parts.push('', `_${left} more open ticket(s) left out._`);
   }
   parts.push('', '## Media', '');
-  if (c.media.length) for (const m of c.media) parts.push(`- /work/media/${m.name}: ${SOURCE_TEXT(m)}${m.caption ? `: ${m.caption}` : ''}`);
+  if (c.media.length) for (const m of c.media) parts.push(`- /work/media/${m.name}: ${SOURCE_TEXT(m)}${m.caption ? `: ${captionLine(m.caption)}` : ''}`);
   else parts.push('(Empty.)');
   parts.push(
     '',
-    'This folder is shared by every agent working on this ticket. Open an image with the Read tool. To add images, write them straight into `/work/media/` (no subfolders; PNG, JPEG, GIF or WebP; 10 MB each) and list each file you add in the result\'s `media` field with a one-line caption. Files anywhere else are lost when you finish, and deleting a file here does not remove it from the store.',
+    'This folder is shared by every agent working on this ticket. Open an image with the Read tool. To add images, write them straight into `/work/media/` (no subfolders; PNG, JPEG, GIF or WebP; 10 MB each) and list each file you add in the result\'s `media` field with a caption saying what it shows (a sentence is usually enough; up to 1000 characters, line breaks allowed, when the image needs explaining). Files anywhere else are lost when you finish, and deleting a file here does not remove it from the store.',
   );
   parts.push('', '## Your task', taskLine(c));
   return parts.join('\n');

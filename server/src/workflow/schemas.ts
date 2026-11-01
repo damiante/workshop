@@ -60,7 +60,7 @@ const WORK_SCHEMA = {
     media: {
       type: 'array',
       items: { type: 'object', properties: { path: { type: 'string' }, caption: { type: 'string' } }, required: ['path', 'caption'], additionalProperties: false },
-      description: 'Images this run added to /work/media/, with a one-line caption each.',
+      description: 'Images this run added to /work/media/, each with a caption saying what it shows (up to 1000 characters; line breaks allowed).',
     },
   },
   required: ['outcome', 'summary'],

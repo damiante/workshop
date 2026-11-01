@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TarEntry } from '../src/providers/docker/tar.ts';
-import { checkAgentFile, cleanCaption, imageKey, isGitHubImageUrl, isGitHubRedirect, MAX_FILE, replaceImageLinks, screenshotsLine, sniffImage, validName } from '../src/workflow/media.ts';
+import { checkAgentFile, captionLine, cleanCaption, imageKey, isGitHubImageUrl, isGitHubRedirect, MAX_FILE, replaceImageLinks, screenshotsLine, sniffImage, validName } from '../src/workflow/media.ts';
 import { imageRefs } from '../src/providers/github/index.ts';
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(24)]);
@@ -117,17 +117,24 @@ describe('prompt and PR text', () => {
     expect(line).toContain('3 more on the page');
   });
 
-  it('cleans captions to one short line', () => {
-    expect(cleanCaption('a\n[b](c)\n  d')).toBe('a b(c) d');
-    expect(cleanCaption('x'.repeat(300))).toHaveLength(200);
+  it('cleans captions, keeping line breaks', () => {
+    expect(cleanCaption('a\r\n\r\n\r\n  b   c \n[d]')).toBe('a\n\nb c\n[d]');
+    expect(cleanCaption('x'.repeat(1200))).toHaveLength(1000);
+  });
+
+  it('makes a caption one line', () => {
+    expect(captionLine('a\n\n b')).toBe('a b');
+    const cut = captionLine('x'.repeat(200), 120);
+    expect(cut).toHaveLength(120);
+    expect(cut.endsWith('…')).toBe(true);
   });
 
   it('builds the Screenshots line, with a fallback when there is no public URL', () => {
-    const items = [{ name: 'a.png', caption: 'Dark [mode]' }, { name: 'b.png', caption: null }];
+    const items = [{ name: 'a.png', caption: 'Dark [mode]' }, { name: 'b.png', caption: null }, { name: 'c.png', caption: 'Line one\nline two' }];
     expect(screenshotsLine([], 'https://w.example', 3)).toBe('');
     expect(screenshotsLine(items, null, 3)).toBe('**Screenshots:** open this ticket in Workshop');
     expect(screenshotsLine(items, 'https://w.example/', 3)).toBe(
-      '**Screenshots:** [all screenshots](https://w.example/tickets/3/media) · [Dark mode](https://w.example/api/tickets/3/media/a.png) · [b.png](https://w.example/api/tickets/3/media/b.png)',
+      '**Screenshots:** [all screenshots](https://w.example/tickets/3/media) · [Dark mode](https://w.example/api/tickets/3/media/a.png) · [b.png](https://w.example/api/tickets/3/media/b.png) · [Line one line two](https://w.example/api/tickets/3/media/c.png)',
     );
   });
 });

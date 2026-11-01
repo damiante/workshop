@@ -233,11 +233,13 @@ describe('taskPrompt', () => {
         { name: 'issue-1.png', source: 'issue', runId: null, caption: null },
         { name: 'comment-1.png', source: 'comment', runId: null, caption: null },
         { name: 'after.png', source: 'Implementation', runId: 'abcdef12-0000', caption: 'Dark mode' },
+        { name: 'multi.png', source: 'Implementation', runId: null, caption: 'One\ntwo' },
       ],
     });
     expect(prompt).toContain('- /work/media/issue-1.png: from the issue');
     expect(prompt).toContain('- /work/media/comment-1.png: from a comment');
     expect(prompt).toContain('- /work/media/after.png: added by Implementation (run abcdef12): Dark mode');
+    expect(prompt).toContain('- /work/media/multi.png: added by Implementation: One two');
     expect(prompt).toContain('Read tool');
     expect(prompt).toContain('`media` field');
   });

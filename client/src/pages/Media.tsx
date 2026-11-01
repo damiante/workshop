@@ -1,14 +1,16 @@
+import { useCallback, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import type { MediaItem, TicketMedia } from '../../../server/src/api-types.ts';
+import type { TicketMedia } from '../../../server/src/api-types.ts';
 import { useApi } from '../api.ts';
+import { Gallery, plainClick, sourceText } from '../components/Gallery.tsx';
 import { ErrorNote, Panel } from '../components/ui.tsx';
-
-const sourceText = (m: MediaItem) => (m.source === 'issue' ? 'From the issue' : m.source === 'comment' ? 'From a comment' : `Added by ${m.source}`);
 
 export function Media() {
   const { id } = useParams();
   const [params] = useSearchParams();
   const runId = params.get('run');
+  const [open, setOpen] = useState<string | null>(null);
+  const close = useCallback(() => setOpen(null), []);
   const { data, error } = useApi<TicketMedia>(`/tickets/${id}/media`, ['media']);
   if (error) return <ErrorNote error={error} />;
   if (!data) return null;
@@ -35,11 +37,21 @@ export function Media() {
           <div className="media-grid">
             {items.map((m) => (
               <figure key={m.name}>
-                <a href={m.url} target="_blank" rel="noreferrer">
+                <a
+                  href={m.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => {
+                    if (plainClick(e)) {
+                      e.preventDefault();
+                      setOpen(m.name);
+                    }
+                  }}
+                >
                   <img src={m.url} alt={m.caption ?? m.name} loading="lazy" />
                 </a>
                 <figcaption>
-                  <span>{m.caption ?? m.name}</span>
+                  <span className="clamp">{m.caption ?? m.name}</span>
                   <span className="small muted">
                     {sourceText(m)}
                     {m.runId && (
@@ -57,6 +69,7 @@ export function Media() {
           <p className="muted">No images yet. Agents add screenshots here, and images in the issue are copied in when an agent next runs.</p>
         )}
       </Panel>
+      {open && <Gallery items={items} name={open} onSelect={setOpen} onClose={close} />}
     </div>
   );
 }

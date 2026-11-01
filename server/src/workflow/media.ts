@@ -100,8 +100,25 @@ export function checkAgentFile(entry: TarEntry, existing: ExistingFile | undefin
   return { ok: true };
 }
 
-/** One line, no brackets (they would break Markdown links), at most 200 characters. */
-export const cleanCaption = (text: string) => text.replace(/\s+/g, ' ').replace(/[[\]]/g, '').trim().slice(0, 200);
+export const MAX_CAPTION = 1000;
+
+/** Up to a few short paragraphs: line breaks kept, other whitespace collapsed, at most 1000 characters. */
+export const cleanCaption = (text: string) =>
+  text
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((l) => l.replace(/[ \t]+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, MAX_CAPTION)
+    .trim();
+
+/** A caption on one line, cut to `max` characters with an ellipsis, for Markdown and lists. */
+export function captionLine(text: string, max = Infinity): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
 
 /** Replaces GitHub image URLs in ticket text with the local path of the stored copy. */
 export function replaceImageLinks(text: string, byKey: Map<string, string>): string {
@@ -127,6 +144,6 @@ export function screenshotsLine(items: ScreenshotItem[], publicUrl: string | nul
   const base = publicUrl.replace(/\/+$/, '');
   const shown = items.slice(0, MAX_LINKS);
   const more = items.length > shown.length ? [`${items.length - shown.length} more on the page`] : [];
-  const links = shown.map((i) => `[${cleanCaption(i.caption ?? '') || i.name}](${base}/api/tickets/${ticketId}/media/${i.name})`);
+  const links = shown.map((i) => `[${captionLine(i.caption ?? '', 120).replace(/[[\]]/g, '') || i.name}](${base}/api/tickets/${ticketId}/media/${i.name})`);
   return `**Screenshots:** [all screenshots](${base}/tickets/${ticketId}/media) · ${[...links, ...more].join(' · ')}`;
 }

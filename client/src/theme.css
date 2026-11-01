@@ -737,3 +737,70 @@ input[type='checkbox'] {
   gap: 2px;
   overflow-wrap: anywhere;
 }
+
+/* Screenshot gallery */
+.modal.gallery {
+  width: min(1100px, 100%);
+}
+.gallery-stage {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+}
+.gallery-stage img {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  justify-self: center;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.gallery-nav {
+  min-width: 40px;
+  min-height: 40px;
+  font-size: 24px;
+  line-height: 1;
+}
+.gallery-caption {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+.gallery-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+}
+.gallery-strip button {
+  flex: none;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  background: none;
+}
+.gallery-strip button[aria-current] {
+  border-color: var(--accent);
+}
+.gallery-strip img {
+  display: block;
+  height: 64px;
+  width: auto;
+  max-width: 120px;
+  object-fit: cover;
+  border-radius: 2px;
+}
+.clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+.media-grid.thumbs .clamp {
+  -webkit-line-clamp: 2;
+}
+@media (max-width: 760px) {
+  .gallery-stage img {
+    max-height: 50vh;
+  }
+}
