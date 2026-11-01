@@ -1,6 +1,8 @@
+import { useCallback, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import type { MediaItem, RunView, TicketLifecycle } from '../../../server/src/api-types.ts';
 import { useApi, useNow } from '../api.ts';
+import { Gallery, plainClick } from '../components/Gallery.tsx';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, RUN_STATUS, STAGE_TEXT } from '../format.ts';
 import { TicketStatus } from './Tickets.tsx';
@@ -8,16 +10,29 @@ import { TicketStatus } from './Tickets.tsx';
 const stageText = (r: RunView) => AGENT_LABEL[r.agent] + (r.mode === 'delta' ? ', requested changes' : '') + (r.attempt > 1 ? `, attempt ${r.attempt}` : '');
 
 function Thumbs({ items }: { items: MediaItem[] }) {
+  const [open, setOpen] = useState<string | null>(null);
+  const close = useCallback(() => setOpen(null), []);
   return (
     <div className="media-grid thumbs">
       {items.map((m) => (
         <figure key={m.name}>
-          <a href={m.url} target="_blank" rel="noreferrer">
+          <a
+            href={m.url}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => {
+              if (plainClick(e)) {
+                e.preventDefault();
+                setOpen(m.name);
+              }
+            }}
+          >
             <img src={m.url} alt={m.caption ?? m.name} loading="lazy" />
           </a>
-          <figcaption className="small muted">{m.caption ?? m.name}</figcaption>
+          <figcaption className="small muted clamp">{m.caption ?? m.name}</figcaption>
         </figure>
       ))}
+      {open && <Gallery items={items} name={open} onSelect={setOpen} onClose={close} />}
     </div>
   );
 }

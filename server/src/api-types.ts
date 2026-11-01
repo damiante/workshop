@@ -202,6 +202,7 @@ export interface MediaItem {
   /** 'issue', 'comment', or the agent that added it. */
   source: string;
   runId: string | null;
+  /** What the image shows; may contain line breaks. */
   caption: string | null;
   size: number;
   createdAt: number;
