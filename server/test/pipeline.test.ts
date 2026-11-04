@@ -392,6 +392,18 @@ describe('runner', () => {
     expect(fake.vcs.openPullRequest).toHaveBeenCalled();
   });
 
+  it('takes over a pull request an earlier run opened but never recorded, without needing new commits', async () => {
+    fake.vcs.findPullRequest.mockResolvedValue(7);
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'done', summary: 'Already built.' })],
+      publish: [line({ before: 'bbb', after: 'bbb', ahead: 2 })],
+    });
+    expect((await settle(go())).status).toBe('succeeded');
+    expect(fake.vcs.openPullRequest).toHaveBeenCalled();
+    expect(getTicket(1)!.pr_number).toBe(7);
+  });
+
   it('after a review, comments on the existing pull request instead of opening another', async () => {
     run('UPDATE tickets SET pr_number = 7 WHERE id = 1');
     fake.env = new FakeEnv({

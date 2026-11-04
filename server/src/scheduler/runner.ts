@@ -386,7 +386,9 @@ async function openOrUpdatePr(ctx: Ctx, t: TicketRow, result: WorkResult, pushed
   const vcs = vcsFor(ctx.repo);
   const branch = branchOf(t);
   const tests = result.tests ? `\n\n**Tests:** ${result.tests}` : '';
-  let number = t.pr_number ?? (await vcs.findPullRequest(repo, branch));
+  // Only a recorded PR means "update after review". One opened but never recorded (a retried request, a
+  // restart) goes through openPullRequest, which takes it over.
+  let number = t.pr_number;
   // A new pull request needs commits on the branch; an update after review needs new ones. (Judging a
   // new PR by "ahead" also covers a restart between pushing and opening the PR, when nothing is new.)
   if (number ? pushed.before === pushed.after : !pushed.ahead) throw new Error('The implementation agent finished without committing any changes.');

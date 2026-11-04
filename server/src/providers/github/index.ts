@@ -342,8 +342,17 @@ export class GitHubApp implements VcsHost, TicketSource {
 
   async openPullRequest(repo: RepoRef, p: { branch: string; title: string; body: string }) {
     const kit = await this.kit(repo);
-    const { data } = await kit.request('POST /repos/{owner}/{repo}/pulls', { ...split(repo), head: p.branch, base: repo.defaultBranch, title: p.title, body: p.body });
-    return { number: data.number, url: data.html_url };
+    try {
+      const { data } = await kit.request('POST /repos/{owner}/{repo}/pulls', { ...split(repo), head: p.branch, base: repo.defaultBranch, title: p.title, body: p.body });
+      return { number: data.number, url: data.html_url };
+    } catch (err) {
+      // "A pull request already exists": a retried POST or an earlier run opened it. Take it over.
+      if (status(err) !== 422) throw err;
+      const { data } = await kit.request('GET /repos/{owner}/{repo}/pulls', { ...split(repo), head: `${split(repo).owner}:${p.branch}`, state: 'open' });
+      if (!data[0]) throw err;
+      await kit.request('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', { ...split(repo), pull_number: data[0].number, body: p.body });
+      return { number: data[0].number, url: data[0].html_url };
+    }
   }
 
   async updatePullRequest(repo: RepoRef, number: number, body: string) {

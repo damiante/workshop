@@ -113,3 +113,26 @@ describe('GitHub git access', () => {
     expect(perms()).toEqual([{ contents: 'read' }]);
   });
 });
+
+describe('GitHub openPullRequest', () => {
+  function gh(open: object[]) {
+    const app = new GitHubApp({ appId: 1, slug: 'workshop', owner: 'me', htmlUrl: '', installations: [1] }, { privateKey: 'unused' });
+    const request = vi.fn(async (route: string) => {
+      if (route.startsWith('POST')) throw Object.assign(new Error('Validation Failed: A pull request already exists for me:b.'), { status: 422 });
+      return { data: route.startsWith('GET') ? open : {} };
+    });
+    vi.spyOn(app as unknown as { kit: () => unknown }, 'kit').mockResolvedValue({ request });
+    return { app, request };
+  }
+  const pr = { branch: 'b', title: 't', body: 'new body' };
+
+  it('takes over the open pull request when one already exists for the branch', async () => {
+    const { app, request } = gh([{ number: 253, html_url: 'https://github.com/me/app/pull/253' }]);
+    await expect(app.openPullRequest({ ...repo, defaultBranch: 'main' }, pr)).resolves.toEqual({ number: 253, url: 'https://github.com/me/app/pull/253' });
+    expect(request).toHaveBeenCalledWith('PATCH /repos/{owner}/{repo}/pulls/{pull_number}', expect.objectContaining({ pull_number: 253, body: 'new body' }));
+  });
+
+  it('still fails when no open pull request explains the 422', async () => {
+    await expect(gh([]).app.openPullRequest({ ...repo, defaultBranch: 'main' }, pr)).rejects.toThrow('already exists');
+  });
+});
