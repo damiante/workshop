@@ -1,4 +1,4 @@
-import { Writable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { finished } from 'node:stream/promises';
 import Docker from 'dockerode';
 import type { ProviderInfo } from '../../api-types.ts';
@@ -142,6 +142,27 @@ export class DockerEnvironment implements Environment {
   async imageLabels(image: string) {
     const info = await this.docker.getImage(image).inspect().catch(ignore(404));
     return info?.Config?.Labels ?? {};
+  }
+
+  async imageId(image: string) {
+    return (await this.docker.getImage(image).inspect().catch(ignore(404)))?.Id ?? null;
+  }
+
+  async build(p: { tag: string; files: Record<string, Buffer>; args: Record<string, string>; labels: Record<string, string>; onLine: (text: string) => void }) {
+    const stream = await this.docker.buildImage(Readable.from([tar(p.files, 0, 0)]), { t: p.tag, buildargs: p.args, labels: p.labels, rm: true, forcerm: true });
+    let failure = '';
+    await new Promise((resolve, reject) =>
+      this.docker.modem.followProgress(
+        stream,
+        (err) => (err ? reject(err) : resolve(null)),
+        // A failing build still answers 200; the error arrives as an event in the stream.
+        (e: { stream?: string; error?: string }) => {
+          for (const line of (e.stream ?? '').split('\n')) if (line.trim()) p.onLine(line);
+          if (e.error) failure = e.error;
+        },
+      ),
+    );
+    if (failure) throw new Error(failure);
   }
 
   async createVolume(name: string, labels: Record<string, string>) {

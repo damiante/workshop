@@ -34,9 +34,9 @@ import {
   type RepoRow,
   type TicketRow,
 } from '../tickets.ts';
-import { imageFor, label, moveTo, parseLabels } from '../workflow/labels.ts';
+import { imageFor, label, moveTo, parseLabels, REPO_IMAGE_DIR, repoImageTag } from '../workflow/labels.ts';
 import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
-import { AGENT_INFO, capabilitiesOf, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
+import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type Rescue, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
 import { joinRefs } from './gates.ts';
@@ -88,9 +88,52 @@ function context(r: RunRow): Ctx {
     repo,
     env: environmentOf(conn),
     host: { name: conn.name, cfg: conn.config as unknown as DockerConfig },
-    image: imageFor(r.agent, parseLabels(labelsOf(ticket)), { repo: repo.image || null, base: config.agentImage, browser: config.agentBrowserImage }, Boolean(ticket.ui)),
+    image: r.image ?? imageFor(r.agent, parseLabels(labelsOf(ticket)), { repo: repo.image || null, base: config.agentImage, browser: config.agentBrowserImage }, Boolean(ticket.ui)),
     labels: { 'workshop.instance': config.instance, 'workshop.run': r.id, 'workshop.ticket': `${repo.full_name}#${ticket.number}`, 'workshop.agent': r.agent },
   };
+}
+
+const builds = new Map<string, Promise<void>>();
+
+/**
+ * The image for a new run. A repository with `.workshop/Dockerfile` on its default branch (and no
+ * hand-set image) gets that Dockerfile built on the standard image this run would otherwise use.
+ * Problems with it fall back to the standard image, so a broken Dockerfile never stops work.
+ */
+async function chooseImage(ctx: Ctx): Promise<string> {
+  const standard = ctx.image;
+  if (ctx.repo.image) return standard;
+  const r = ctx.run;
+  const name = `${ctx.repo.full_name}'s ${REPO_IMAGE_DIR}/Dockerfile`;
+  try {
+    const files = await vcsFor(ctx.repo).readFolder(repoRef(ctx.repo), ctx.repo.default_branch, REPO_IMAGE_DIR);
+    if (!files?.Dockerfile) return standard;
+    await ctx.env.ensureImage(standard);
+    const tag = repoImageTag(ctx.repo.id, files, (await ctx.env.imageId(standard)) ?? standard);
+    if (!(await ctx.env.imageId(tag))) {
+      // Runs on the same host share one build of the same tag.
+      const key = `${r.environment_id}:${tag}`;
+      if (!builds.has(key)) {
+        appendLog(r.id, { step: 'workshop', stream: 'stdout', text: `Building the agent image from ${name}` });
+        const build = ctx.env.build({
+          tag,
+          files,
+          args: { WORKSHOP_BASE: standard },
+          labels: { 'workshop.instance': config.instance, 'workshop.repo': ctx.repo.full_name },
+          onLine: (text) => appendLog(r.id, { step: 'workshop', stream: 'stdout', text }),
+        });
+        builds.set(key, build.finally(() => builds.delete(key)));
+      }
+      await builds.get(key);
+    }
+    clearAlert('repo-image', `repo:${ctx.repo.id}`);
+    return tag;
+  } catch (err) {
+    const message = `Couldn't use ${name}, so agents use the standard image: ${(err as Error).message}`;
+    warn(r.id, message);
+    raiseAlert('warning', 'repo-image', `${message} The run log has the details.`, `repo:${ctx.repo.id}`);
+    return standard;
+  }
 }
 
 /** Starts (or re-attaches to) the container for one step, streams its log, and waits for it to exit. */
@@ -208,8 +251,9 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
             t.id,
           ).filter((o) => isAllowedAuthor(o.author))
         : undefined;
-    const caps = capabilitiesOf(await ctx.env.imageLabels(ctx.image).catch(() => ({})));
-    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}\n\n${environmentText(caps)}`;
+    const imageLabels: Record<string, string> = await ctx.env.imageLabels(ctx.image).catch(() => ({}));
+    const environment = environmentText(capabilitiesOf(imageLabels), imageLabels[ENVIRONMENT_LABEL]);
+    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}\n\n${environment}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
       mode: r.mode,
@@ -509,6 +553,12 @@ export async function drive(runId: string) {
     const ctx = context(r);
     if (r.status === 'starting') {
       await markRunning(ctx.ticket, true);
+      if (!r.image) {
+        ctx.image = await chooseImage(ctx);
+        setRun(runId, { image: ctx.image });
+        ctx.run.image = ctx.image;
+        if (getRun(runId)!.status !== 'starting') return; // stopped during a build
+      }
       if (!r.container_id) {
         await ctx.env.createVolume(r.volume!, ctx.labels);
       }

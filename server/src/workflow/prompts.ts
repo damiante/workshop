@@ -187,11 +187,42 @@ export function capabilitiesOf(labels: Record<string, string>): string[] {
   return [...new Set(parts)];
 }
 
-/** What the agent's container can do, for the system prompt. */
-export function environmentText(caps: string[]): string {
+export const ENVIRONMENT_LABEL = 'workshop.environment';
+
+/** What the agent's container can do, for the system prompt. `note` is the image's own description (its `workshop.environment` label). */
+export function environmentText(caps: string[], note?: string): string {
   const browser = caps.includes('browser')
     ? 'A headless Chromium is available through Playwright (installed globally; browsers in $PLAYWRIGHT_BROWSERS_PATH). For a screenshot, start the app and run `playwright screenshot --full-page <url> <file>.png`; for scripted checks, `require(\'playwright\')` from a CommonJS script (`.cjs`: the global install resolves through NODE_PATH, which `import` ignores). Browsers for the last few Playwright minor versions are preinstalled, so a repository\'s own pinned `playwright` should find its Chromium; if it reports a missing executable, run `npx playwright install chromium` once. Everything left under /work/repo is committed and pushed when you finish, so save screenshots to /work/media/ (Workshop keeps them and shows them to the owner), not under /work/repo, unless you mean to commit them.'
     : 'No browser is installed in this environment. If the task needs one (screenshots, browser tests), do the rest and say in your summary what you couldn\'t check. Workshop runs Implementation with a browser when the ticket has the `workshop/needs:browser` label, so suggest that the owner add it.';
   const other = caps.filter((c) => c !== 'browser');
-  return `## Environment\n\n${browser}${other.length ? `\n\nOther capabilities declared by this image: ${other.join(', ')}.` : ''}`;
+  const own = note?.trim() ? `\n\nThis repository's image says: ${note.trim().slice(0, 2000)}` : '';
+  return `## Environment\n\n${browser}${other.length ? `\n\nOther capabilities declared by this image: ${other.join(', ')}.` : ''}${own}`;
 }
+
+/** The ticket Set up agent image opens: an agent adds `.workshop/Dockerfile` when the standard image lacks what the repository needs. */
+export const IMAGE_TICKET = {
+  title: 'Set up a Workshop agent image for this repository',
+  body: `Workshop's agents run in a container built from its standard agent image: Debian with Node 24, Python 3, a C toolchain, git, jq, curl and ripgrep, running as the unprivileged user \`agent\` (no sudo). Find out whether this repository needs anything more to build, test and lint it, and if it does, add an image definition that Workshop builds for every later ticket.
+
+**If the standard image is enough, decline this ticket and say why.** Nothing needs to change then.
+
+## What to look at
+
+You are running in the standard image now, so anything missing here is what the image has to add. Check the CI workflows, README, contributing notes, build files and version files (\`.nvmrc\`, \`.tool-versions\`, \`gradle-wrapper.properties\`, \`go.mod\`, \`rust-toolchain.toml\`, \`pyproject.toml\` and the like) for the languages, SDKs, system libraries and command-line tools the project uses, and the versions it pins.
+
+## What to add
+
+Create \`.workshop/Dockerfile\` at the root of the repository. Workshop builds it on each agent host from the default branch once this is merged, and rebuilds it when the folder or Workshop's own image changes. It must:
+
+- start with \`ARG WORKSHOP_BASE\` then \`FROM \${WORKSHOP_BASE}\`. Workshop passes its standard image, or the same image with a headless Chromium when a ticket needs a browser, so don't name a base image yourself;
+- switch to \`USER root\` to install things and end with \`USER agent\`, and leave \`ENTRYPOINT\`, \`WORKDIR\` and \`CLAUDE_CONFIG_DIR\` as they are;
+- install only what the standard image lacks, pinned to the versions the project uses, with no IDEs or GUI tools (agents work headless). For example, an Android app needs a JDK and the Android SDK command-line tools with the platforms and build tools it targets, not Android Studio;
+- put SDKs somewhere readable by \`agent\` (for example under \`/opt\`, owned by \`agent\`) and set the environment variables and \`PATH\` that the project's build expects;
+- end with \`LABEL workshop.environment="…"\`: one or two sentences, shown to every later agent, saying what the image adds and the commands that build and test the project.
+
+Only the files directly inside \`.workshop/\` are sent to the build (no subfolders, nothing else from the repository), so \`COPY\` can only use files you put there.
+
+## Check your work
+
+You can't run Docker here, so check the Dockerfile another way: confirm that the download URLs and package names exist, and where you can, install the same tools under your home directory and run the project's build and tests with them. Say in your summary what you checked and what you couldn't. If the build fails after merging, Workshop keeps using the standard image and raises an alert; the build output is in that run's log.`,
+};

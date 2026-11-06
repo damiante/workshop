@@ -187,6 +187,8 @@ export const MIGRATIONS = [
   `ALTER TABLE tickets ADD COLUMN dismissed TEXT;`,
   // New repositories only work on nominated tickets until you choose otherwise (#59).
   `UPDATE repos SET selection = 'nominated' WHERE enabled = 0;`,
+  // The image a run uses, chosen (and maybe built) when it starts, so every step and re-attach uses the same one.
+  `ALTER TABLE runs ADD COLUMN image TEXT;`,
 ];
 
 export let db: DatabaseSync;

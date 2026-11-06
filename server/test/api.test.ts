@@ -16,7 +16,7 @@ import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
 
 // Only the ticket source is faked, so label edits can be recorded or made to fail.
-const fakeTickets = vi.hoisted(() => ({ setLabels: null as any }));
+const fakeTickets = vi.hoisted(() => ({ setLabels: null as any, createTicket: null as any }));
 vi.mock('../src/providers/index.ts', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   ticketsOf: () => fakeTickets,
@@ -249,6 +249,28 @@ describe('repository priority', () => {
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('Priority must be a whole number from -100 to 100.');
     }
+  });
+});
+
+describe('Set up agent image', () => {
+  it('opens a ticket for an agent, nominated when the repository needs that, and only one at a time', async () => {
+    const conn = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('tickets', 'github', 'Issues img', '{}', '', 'ok', 0, 0)").lastInsertRowid);
+    const id = Number(run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled, selection) VALUES (1, ?, 'me/android', 'main', 'u', 0, 'nominated')", conn).lastInsertRowid);
+    fakeTickets.createTicket = vi.fn(async () => ({ number: 21, url: 'https://github.com/me/android/issues/21' }));
+    const post = () => request(app).post(`/api/repos/${id}/image-ticket`).set('cookie', cookie).send({});
+
+    expect((await post()).body.error).toBe('Turn the repository on first.');
+    run('UPDATE repos SET enabled = 1 WHERE id = ?', id);
+    const ok = await post();
+    expect(ok.body).toEqual({ number: 21, url: 'https://github.com/me/android/issues/21' });
+    const [, ticket] = fakeTickets.createTicket.mock.calls[0];
+    expect(ticket).toMatchObject({ title: 'Set up a Workshop agent image for this repository', labels: ['workshop/nominated'] });
+    expect(ticket.body).toContain('FROM ${WORKSHOP_BASE}');
+
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 21, ?, '', 'u', 'bot[bot]', 'open', '[]', 'x')", id, ticket.title);
+    const again = await post();
+    expect(again.status).toBe(409);
+    expect(again.body.error).toBe('Ticket #21 already asks for an agent image.');
   });
 });
 
@@ -728,7 +750,7 @@ describe('repository enrolment', () => {
     const add = (name: string, enabled: number) => Number(run('INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (1, ?, ?, ?, ?)', name, 'main', 'u', enabled).lastInsertRowid);
     const off = add('me/off', 0);
     const on = add('me/on', 1);
-    run(MIGRATIONS[MIGRATIONS.length - 1]);
+    run(MIGRATIONS.find((m) => m.startsWith("UPDATE repos SET selection = 'nominated'"))!);
     expect(one<{ selection: string }>('SELECT selection FROM repos WHERE id = ?', off)?.selection).toBe('nominated');
     expect(one<{ selection: string }>('SELECT selection FROM repos WHERE id = ?', on)?.selection).toBe('all');
   });

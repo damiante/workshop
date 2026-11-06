@@ -274,6 +274,14 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
     onChange(repo.id, { enabled }).finally(() => setEnabling(null));
   };
   const [priority, setPriority] = useState(String(repo.priority));
+  const [imageTicket, setImageTicket] = useState<{ busy?: boolean; opened?: { number: number; url: string }; error?: string }>({});
+  const openImageTicket = () => {
+    setImageTicket({ busy: true });
+    api<{ number: number; url: string }>(`/repos/${repo.id}/image-ticket`, { body: {} }).then(
+      (opened) => setImageTicket({ opened }),
+      (e: Error) => setImageTicket({ error: e.message }),
+    );
+  };
   return (
     <li className={`spread${enabling === null ? '' : ' pending'}`} aria-busy={enabling !== null}>
       <label className="row">
@@ -312,6 +320,16 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
             <input className="mono small" style={{ width: 300 }} aria-label={`Agent image for ${repo.fullName}`} placeholder="Agent image (default)" value={image} onChange={(e) => setImage(e.target.value)} />
             <button>Save image</button>
           </form>
+          {imageTicket.opened ? (
+            <a className="small" href={imageTicket.opened.url} target="_blank" rel="noreferrer">
+              Opened #{imageTicket.opened.number}
+            </a>
+          ) : (
+            <button onClick={openImageTicket} disabled={imageTicket.busy}>
+              {imageTicket.busy ? 'Opening ticket…' : 'Set up agent image'}
+            </button>
+          )}
+          {imageTicket.error && <span className="small error-text">{imageTicket.error}</span>}
         </div>
       )}
     </li>
@@ -351,7 +369,7 @@ function Repos() {
       }
     >
       <div className="panel-body stack">
-        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. A new repository only works on tickets you nominate with the workshop/nominated label. Switch it to all open tickets when you're ready. Repositories with a higher priority go first: a lower one waits until every open ticket in the higher ones has been classified. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on.</p>
+        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. A new repository only works on tickets you nominate with the workshop/nominated label. Switch it to all open tickets when you're ready. Repositories with a higher priority go first: a lower one waits until every open ticket in the higher ones has been classified. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on. Set up agent image opens a ticket asking an agent to add .workshop/Dockerfile if the repository needs more tools than the standard image has. Once you merge it, Workshop builds that image and later runs use it.</p>
         <input type="search" placeholder="Search repositories" aria-label="Search repositories" value={query} onChange={(e) => setQuery(e.target.value)} />
         <ErrorNote error={actionError ?? error} />
       </div>

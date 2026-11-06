@@ -53,6 +53,17 @@ class FakeEnv {
     this.ensured.push(image);
   };
   imageLabels = async (_image: string) => this.labels;
+  /** Images built on this host (tag → id). Workshop's standard images are always present. */
+  images = new Map<string, string>();
+  imageId = async (image: string) => this.images.get(image) ?? (image.startsWith('workshop-repo-') ? null : `id:${image}`);
+  builds: { tag: string; files: Record<string, Buffer>; args: Record<string, string> }[] = [];
+  buildError: string | null = null;
+  build = async (p: { tag: string; files: Record<string, Buffer>; args: Record<string, string>; onLine: (t: string) => void }) => {
+    this.builds.push(p);
+    p.onLine('STEP 1/2: FROM base');
+    if (this.buildError) throw new Error(this.buildError);
+    this.images.set(p.tag, `id:${p.tag}`);
+  };
   createVolume = async () => {};
   removeVolume = async () => {};
   remove = async () => {};
@@ -117,6 +128,7 @@ beforeEach(() => {
     }),
     fileUrl: (repo: { fullName: string }, branch: string, path: string) => `https://github.com/${repo.fullName}/blob/${branch}/${path}`,
     reviewFeedback: async () => [],
+    readFolder: vi.fn(async () => null),
     findPullRequest: vi.fn(async () => null),
     openPullRequest: vi.fn(async () => ({ number: 7, url: 'https://github.com/me/app/pull/7' })),
     commentOnPullRequest: vi.fn(async () => {}),
@@ -296,6 +308,60 @@ describe('runner', () => {
       await settle(go('classifier'));
       expect(new Set(fake.env.started.map((s: StepSpec) => s.image))).toEqual(new Set([config.agentImage]));
     });
+    describe("a repository's own Dockerfile", () => {
+      const DOCKERFILE = { Dockerfile: Buffer.from('ARG WORKSHOP_BASE\nFROM ${WORKSHOP_BASE}\n') };
+      beforeEach(() => {
+        fake.vcs.readFolder = vi.fn(async () => DOCKERFILE);
+        run('DELETE FROM alerts');
+      });
+      afterEach(() => run('UPDATE repos SET image = NULL WHERE id = 1'));
+
+      it('is built on the standard image from the default branch, used for every step and described to the agent', async () => {
+        fake.env = script();
+        fake.env.labels = { 'workshop.environment': 'Adds JDK 21 and the Android SDK. Build with ./gradlew assembleDebug.' };
+        const r = await settle(go());
+        expect(r.status).toBe('succeeded');
+        expect(fake.vcs.readFolder).toHaveBeenCalledWith(expect.objectContaining({ fullName: 'me/app' }), 'main', '.workshop');
+        const [built] = fake.env.builds;
+        expect(built.args).toEqual({ WORKSHOP_BASE: config.agentImage });
+        expect(built.tag).toMatch(/^workshop-repo-1:[0-9a-f]{16}$/);
+        expect(new Set(fake.env.started.map((s: StepSpec) => s.image))).toEqual(new Set([built.tag]));
+        expect(fake.env.spec('run')!.files!['.workshop/system.md']).toContain("This repository's image says: Adds JDK 21");
+        expect(readLog(r.id).some((e) => e.text === 'STEP 1/2: FROM base')).toBe(true);
+
+        // The next run on this host reuses the build.
+        const env = fake.env;
+        env.started = [];
+        await settle(go());
+        expect(env.builds).toHaveLength(1);
+        expect(env.started[0].image).toBe(built.tag);
+      });
+
+      it('is built on the browser image for a ticket that needs a browser', async () => {
+        setLabels(label.needs('browser'));
+        fake.env = script();
+        await settle(go());
+        expect(fake.env.builds[0].args).toEqual({ WORKSHOP_BASE: config.agentBrowserImage });
+      });
+
+      it('falls back to the standard image with an alert when the build fails', async () => {
+        fake.env = script();
+        fake.env.buildError = 'apt-get: package openjdk-99 not found';
+        const r = await settle(go());
+        expect(r.status).toBe('succeeded');
+        expect(new Set(fake.env.started.map((s: StepSpec) => s.image))).toEqual(new Set([config.agentImage]));
+        expect(one<{ message: string }>("SELECT message FROM alerts WHERE kind = 'repo-image'")?.message).toContain('openjdk-99');
+      });
+
+      it('is ignored when the repository has a hand-set image', async () => {
+        run("UPDATE repos SET image = 'my/own:1' WHERE id = 1");
+        fake.env = script();
+        await settle(go());
+        expect(fake.vcs.readFolder).not.toHaveBeenCalled();
+        expect(new Set(fake.env.started.map((s: StepSpec) => s.image))).toEqual(new Set(['my/own:1']));
+      });
+    });
+
     it('pulls the image before starting every container', async () => {
       setLabels(label.needs('browser'));
       fake.env = script();
@@ -587,6 +653,14 @@ describe('sync', () => {
     await syncRepo(repo());
     expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.stage('merge')], [label.stage('pr-review')]);
     expect(one('SELECT id FROM tickets WHERE number = 4')).toBeUndefined();
+  });
+
+  it("syncs tickets Workshop's own GitHub App opened", async () => {
+    fake.tickets.listChanged = async () => [remote({ number: 5, author: 'bot[bot]', labels: [] })];
+    fake.vcs.pullRequestState = async () => pr({});
+    await syncRepo(repo());
+    expect(one('SELECT id FROM tickets WHERE number = 5')).toBeDefined();
+    run('DELETE FROM tickets WHERE number = 5');
   });
 
   it('sends requested changes back to the classifier', async () => {

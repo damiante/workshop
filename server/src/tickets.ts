@@ -104,8 +104,12 @@ export function sourceFor(repo: RepoRow) {
   return ticketsOf(conn);
 }
 
+/** Whether Workshop works on tickets by `login`: the authors you allow, plus Workshop's own GitHub App, which opens tickets like Set up agent image. */
 export function isAllowedAuthor(login: string) {
-  return getSettings().authors.some((a) => a.toLowerCase() === login.toLowerCase());
+  const l = login.toLowerCase();
+  if (getSettings().authors.some((a) => a.toLowerCase() === l)) return true;
+  const apps = all<{ config: string }>("SELECT config FROM connections WHERE kind = 'vcs' AND provider = 'github'");
+  return apps.some((c) => `${(JSON.parse(c.config) as { slug?: string }).slug}[bot]`.toLowerCase() === l);
 }
 
 export function activeRunId(ticketId: number) {

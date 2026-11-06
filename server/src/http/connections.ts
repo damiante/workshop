@@ -23,7 +23,8 @@ import {
 import { kick, probeAllowance, syncSoon } from '../scheduler/loop.ts';
 import { getSettings, getValue, saveSettings, setValue } from '../settings.ts';
 import { repoRef, repoView, sourceFor, type RepoRow } from '../tickets.ts';
-import { LABEL_DEFS } from '../workflow/labels.ts';
+import { label, LABEL_DEFS } from '../workflow/labels.ts';
+import { IMAGE_TICKET } from '../workflow/prompts.ts';
 import { check, HttpError, int } from './util.ts';
 
 const visible = (f: FieldDef, values: Record<string, unknown>, existing?: Connection) =>
@@ -261,6 +262,18 @@ connectionsRouter.post('/repos/refresh', async (_req, res) => {
   }
   publish('repos');
   res.json(reposList());
+});
+
+connectionsRouter.post('/repos/:id/image-ticket', async (req, res) => {
+  const repo = one<RepoRow>('SELECT * FROM repos WHERE id = ?', Number(req.params.id));
+  check(repo, 'Repository not found.', 404);
+  check(repo.enabled, 'Turn the repository on first.', 409);
+  const open = one<{ number: number }>("SELECT number FROM tickets WHERE repo_id = ? AND state = 'open' AND title = ?", repo.id, IMAGE_TICKET.title);
+  check(!open, `Ticket #${open?.number} already asks for an agent image.`, 409);
+  const labels = repo.selection === 'nominated' ? [label.nominated] : [];
+  const ticket = await sourceFor(repo).createTicket(repoRef(repo), { title: IMAGE_TICKET.title, body: IMAGE_TICKET.body, labels });
+  syncSoon();
+  res.json(ticket);
 });
 
 connectionsRouter.put('/repos/:id', async (req, res) => {

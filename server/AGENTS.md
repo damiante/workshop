@@ -80,7 +80,8 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - SSH hosts run `docker system dial-stdio` remotely (docker-modem), so they need the `docker` CLI. The host key is pinned on first connect (`config.hostKey`).
 - Prompt files reach a created container through `putArchive`, with a small tar writer in `providers/docker/tar.ts`. Names must be under 100 bytes. Contents may be `Buffer`s, and `untar()` reads what `Environment.readArchive()` returns (media is copied back from a never-started container on the run's volume).
 - `imageFor` (in `workflow/labels.ts`) picks the image per run: a repository's own image, else the browser image for Implementation on `workshop/needs:browser` tickets and for Design and Design adversary when the Classifier set `ui`, else the base image.
-- Image capabilities come from the `workshop.capabilities` label (`imageLabels`), read per run and described to the agent in `system.md`.
+- `chooseImage` (in `scheduler/runner.ts`) runs once when a run starts, and its choice is stored in `runs.image`. With no hand-set image, a `.workshop/Dockerfile` on the default branch is built on top of `imageFor`'s choice (`WORKSHOP_BASE` build arg), tagged `workshop-repo-<id>:<hash of files + base image id>`. Any failure falls back to the standard image with a `repo-image` alert. Tickets Workshop's own App opens (Set up agent image) count as allowed authors.
+- Image capabilities come from the `workshop.capabilities` label (`imageLabels`), read per run and described to the agent in `system.md`. The `workshop.environment` label's text is added there too.
 
 ## Trying the agent image locally
 

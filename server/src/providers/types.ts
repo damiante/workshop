@@ -69,6 +69,8 @@ export interface TicketSource {
   blockers(repo: RepoRef, number: number): Promise<TicketLink[]>;
   /** Marks `blocker` (a ticket in the same repo) as blocking `number`. Idempotent. Returns the blocker. */
   addBlocker(repo: RepoRef, number: number, blocker: number): Promise<TicketLink>;
+  /** Opens a ticket as Workshop's own identity. */
+  createTicket(repo: RepoRef, t: { title: string; body: string; labels: string[] }): Promise<{ number: number; url: string }>;
 }
 
 export interface GitAccess {
@@ -106,6 +108,8 @@ export interface VcsHost {
   createBranch(repo: RepoRef, branch: string, ticket: { number: number; nodeId?: string }): Promise<void>;
   gitAccess(repo: RepoRef, write: boolean): Promise<GitAccess>;
   fileUrl(repo: RepoRef, branch: string, path: string): string;
+  /** The files directly inside folder `path` on `ref`, by name (subfolders are skipped). Null when the folder doesn't exist. */
+  readFolder(repo: RepoRef, ref: string, path: string): Promise<Record<string, Buffer> | null>;
   findPullRequest(repo: RepoRef, branch: string): Promise<number | null>;
   openPullRequest(repo: RepoRef, p: { branch: string; title: string; body: string }): Promise<{ number: number; url: string }>;
   updatePullRequest(repo: RepoRef, number: number, body: string): Promise<void>;
@@ -160,6 +164,10 @@ export interface Environment {
   ensureImage(image: string): Promise<void>;
   /** An image's labels; empty when the image isn't on the host. */
   imageLabels(image: string): Promise<Record<string, string>>;
+  /** An image's id; null when the image isn't on the host. */
+  imageId(image: string): Promise<string | null>;
+  /** Builds a context (file name → content, with a Dockerfile at its root) into `tag`, passing each output line to `onLine`. Throws with the build's error. */
+  build(p: { tag: string; files: Record<string, Buffer>; args: Record<string, string>; labels: Record<string, string>; onLine: (text: string) => void }): Promise<void>;
   createVolume(name: string, labels: Record<string, string>): Promise<void>;
   removeVolume(name: string): Promise<void>;
   /** Creates and starts a container; returns its id. */

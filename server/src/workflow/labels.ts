@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { AgentName, Size, Stage, TicketStatePatch } from '../api-types.ts';
 import type { LabelDef } from '../providers/types.ts';
 
@@ -151,6 +152,19 @@ export function imageFor(agent: AgentName, state: TicketState, images: { repo: s
   if (images.repo) return images.repo;
   const browser = (agent === 'implement' && state.needs.includes('browser')) || ((agent === 'design' || agent === 'design-review') && ui);
   return browser ? images.browser : images.base;
+}
+
+/** Where a repository keeps the build context for its own agent image, on its default branch. */
+export const REPO_IMAGE_DIR = '.workshop';
+
+/**
+ * The local tag for a repository's image built on `baseId`. It changes whenever the folder's files or
+ * the base image change, so either one triggers a rebuild.
+ */
+export function repoImageTag(repoId: number, files: Record<string, Buffer>, baseId: string): string {
+  const hash = crypto.createHash('sha256').update(baseId);
+  for (const name of Object.keys(files).sort()) hash.update(`\0${name}\0`).update(files[name]);
+  return `workshop-repo-${repoId}:${hash.digest('hex').slice(0, 16)}`;
 }
 
 /** Label edits that apply `patch`, keeping one stage and one size label at most. Fields left out stay as they are. */

@@ -2,8 +2,9 @@
 # Two targets: `base` (the default for every run) and `browser` (base plus Playwright with headless
 # Chromium, used for Implementation runs on tickets labelled workshop/needs:browser). With no
 # --target Docker builds the last stage, browser, so build the base image with `--target base`.
-# A repository that needs other toolchains can use its own image built FROM one of these
-# (set it on the repository in Workshop's Connections page). Images built FROM the browser image keep
+# A repository that needs other toolchains can add .workshop/Dockerfile (ARG WORKSHOP_BASE, then
+# FROM ${WORKSHOP_BASE}), which Workshop builds on top of one of these, or set a prebuilt image
+# on the repository in Workshop's Connections page. Images built FROM the browser image keep
 # its workshop.capabilities label, which Workshop reads and reports to the agent.
 FROM node:24-trixie-slim AS base
 

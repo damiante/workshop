@@ -30,6 +30,7 @@ export interface RunRow {
   resets_at: number | null;
   started_at: number;
   ended_at: number | null;
+  image: string | null;
 }
 
 export const ACTIVE_STATUSES: RunStatus[] = ['starting', 'running', 'publishing', 'paused'];

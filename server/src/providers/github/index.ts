@@ -251,6 +251,12 @@ export class GitHubApp implements VcsHost, TicketSource {
     }
   }
 
+  async createTicket(repo: RepoRef, t: { title: string; body: string; labels: string[] }) {
+    const kit = await this.kit(repo);
+    const { data } = await kit.request('POST /repos/{owner}/{repo}/issues', { ...split(repo), ...t });
+    return { number: data.number, url: data.html_url };
+  }
+
   async comment(repo: RepoRef, number: number, body: string) {
     const kit = await this.kit(repo);
     await kit.request('POST /repos/{owner}/{repo}/issues/{issue_number}/comments', { ...split(repo), issue_number: number, body });
@@ -327,6 +333,25 @@ export class GitHubApp implements VcsHost, TicketSource {
       this.identity = { name: login, email: `${data.id}+${login}@users.noreply.github.com` };
     }
     return this.identity;
+  }
+
+  async readFolder(repo: RepoRef, ref: string, path: string) {
+    const kit = await this.kit(repo);
+    const get = (p: string) => kit.request('GET /repos/{owner}/{repo}/contents/{path}', { ...split(repo), path: p, ref });
+    const { data } = await get(path).catch((err) => {
+      if (status(err) === 404) return { data: null };
+      throw err;
+    });
+    if (!Array.isArray(data)) return null;
+    const entries = data.filter((e) => e.type === 'file');
+    // The contents API returns files up to 1 MB inline; a build context should be far smaller anyway.
+    if (entries.length > 20 || entries.some((e) => e.size > 1048576)) throw new Error(`${path}/ holds more than 20 files or a file over 1 MB.`);
+    const files: Record<string, Buffer> = {};
+    for (const e of entries) {
+      const { data: file } = await get(e.path);
+      files[e.name] = Buffer.from((file as { content?: string }).content ?? '', 'base64');
+    }
+    return files;
   }
 
   fileUrl(repo: RepoRef, branch: string, path: string) {
