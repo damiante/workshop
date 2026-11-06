@@ -189,6 +189,8 @@ export const MIGRATIONS = [
   `UPDATE repos SET selection = 'nominated' WHERE enabled = 0;`,
   // The image a run uses, chosen (and maybe built) when it starts, so every step and re-attach uses the same one.
   `ALTER TABLE runs ADD COLUMN image TEXT;`,
+  // Usage warnings were wrongly recorded as limits; clear them (a real limit is re-recorded on the next run).
+  `DELETE FROM allowance_samples WHERE source = 'limit';`,
 ];
 
 export let db: DatabaseSync;

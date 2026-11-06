@@ -105,7 +105,7 @@ export interface ClaudeRun {
   };
   /** The subscription's 5-hour and weekly usage, reported with the first API response of every run. */
   usage?: { fiveHour: UsageWindow | null; sevenDay: UsageWindow | null };
-  /** Set when Claude warned about or hit a usage limit, or started billing paid overage. */
+  /** Set when Claude hit a usage limit or started billing paid overage. */
   limit?: { status: string; resetsAt: number | null };
   /** Latest API error category, e.g. 'rate_limit' or 'authentication_failed' (from retries or the final error). */
   apiError?: string;
@@ -147,7 +147,8 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
       const info = event.rate_limit_info ?? {};
       const windows = info.unifiedWindows;
       if (windows) run.usage = { fiveHour: toWindow(windows.five_hour), sevenDay: toWindow(windows.seven_day) };
-      if (info.status === 'allowed_warning' || info.status === 'rejected') run.limit = { status: info.status, resetsAt: toMs(info.resetsAt) };
+      // 'allowed_warning' is ignored: its utilization is already in unifiedWindows, which Workshop's own thresholds judge.
+      if (info.status === 'rejected') run.limit = { status: info.status, resetsAt: toMs(info.resetsAt) };
       // Past the plan's limits with extra usage enabled: still allowed, but now costs money.
       if (info.isUsingOverage) run.limit = { status: 'overage', resetsAt: toMs(info.resetsAt) };
       break;

@@ -47,7 +47,7 @@ describe('readClaudeLine', () => {
 
   it('pauses on a rejected limit or a rate-limited failure, not on a warning', () => {
     const warn = read({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning', resetsAt: 1791897000 } }, SUCCESS);
-    expect(warn.limit).toEqual({ status: 'allowed_warning', resetsAt: 1791897000_000 });
+    expect(warn.limit).toBeUndefined();
     expect(hitUsageLimit(warn)).toBe(false);
 
     expect(hitUsageLimit(read({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1791897000 } }))).toBe(true);

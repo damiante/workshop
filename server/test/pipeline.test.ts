@@ -497,6 +497,22 @@ describe('runner', () => {
     expect(one<{ failures: number }>('SELECT failures FROM tickets WHERE id = 1')?.failures).toBe(0);
   });
 
+  it("leaves a usage warning to Workshop's own thresholds instead of blocking launches", async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [
+        line({
+          type: 'rate_limit_event',
+          rate_limit_info: { status: 'allowed_warning', resetsAt: 4102444800, rateLimitType: 'seven_day', utilization: 0.25, unifiedWindows: { five_hour: { utilization: 0.3, resetsAt: 1791897000 }, seven_day: { utilization: 0.25, resetsAt: 4102444800 } } },
+        }),
+        result({ outcome: 'done', summary: 'Done.' }),
+      ],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    expect((await settle(go())).status).toBe('succeeded');
+    expect(allowanceOf(ids.model)).toMatchObject({ blockedUntil: null });
+  });
+
   it('records each claude invocation in the spend ledger, which outlives the run', async () => {
     fake.env = new FakeEnv({
       prepare: ['ok'],
