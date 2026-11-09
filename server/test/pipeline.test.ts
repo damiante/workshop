@@ -448,6 +448,16 @@ describe('runner', () => {
     expect(r).toMatchObject({ status: 'failed', error: expect.stringMatching(/Pushing .* failed \(exit 1\)/) });
   });
 
+  it('publishes the reported work when a later wake-up turn ends without a structured result', async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'done', summary: 'Added a dark theme.' }), line({ type: 'result', subtype: 'success', is_error: false, result: 'Nothing is left to do, so I stopped the loop.' })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    expect(await settle(go())).toMatchObject({ status: 'succeeded', summary: 'Added a dark theme.' });
+    expect(fake.vcs.openPullRequest).toHaveBeenCalled();
+  });
+
   it('opens the pull request when the commits were already pushed (restart between push and PR)', async () => {
     fake.env = new FakeEnv({
       prepare: ['ok'],

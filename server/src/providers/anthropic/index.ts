@@ -156,10 +156,13 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
     case 'result': {
       const usage = event.usage ?? {};
       run.sessionId = event.session_id ?? run.sessionId;
+      // A session can go on after the agent reports (a background task finishing, a ScheduleWakeup firing),
+      // and those turns needn't return a result. The latest one reported stands.
+      const reported = run.result?.structured;
       run.result = {
         subtype: event.subtype,
-        isError: Boolean(event.is_error),
-        structured: event.structured_output,
+        isError: Boolean(event.is_error) && reported === undefined,
+        structured: event.structured_output ?? reported,
         text: event.result,
         errors: event.errors ?? [],
         costUsd: event.total_cost_usd,
@@ -174,6 +177,7 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
 
 /** True when the run stopped because the subscription (or API rate) limit was hit, so it should pause, not fail. */
 export function hitUsageLimit(run: ClaudeRun): boolean {
+  if (run.result?.structured !== undefined) return false; // already reported: nothing left to resume
   if (run.limit?.status === 'rejected') return true;
   if (!run.result?.isError) return false;
   return run.apiError === 'rate_limit' || run.result.errors.some((e) => /usage limit|rate limit|limit reached/i.test(e));

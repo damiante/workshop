@@ -45,6 +45,16 @@ describe('readClaudeLine', () => {
     expect(hitUsageLimit(run)).toBe(false);
   });
 
+  it('keeps the reported result when later turns of the session end without one', () => {
+    const report = (summary: string) => ({ type: 'result', subtype: 'success', is_error: false, structured_output: { outcome: 'done', summary } });
+    const wakeup = { type: 'result', subtype: 'success', is_error: false, result: 'Nothing is left to do, so I stopped the loop.' };
+    expect(read(report('first'), report('after review'), wakeup).result?.structured).toEqual({ outcome: 'done', summary: 'after review' });
+
+    const failed = read(report('first'), { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1791897000 } }, { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['boom'] });
+    expect(failed.result).toMatchObject({ isError: false, structured: { outcome: 'done', summary: 'first' } });
+    expect(hitUsageLimit(failed)).toBe(false);
+  });
+
   it('pauses on a rejected limit or a rate-limited failure, not on a warning', () => {
     const warn = read({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning', resetsAt: 1791897000 } }, SUCCESS);
     expect(warn.limit).toBeUndefined();
