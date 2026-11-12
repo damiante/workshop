@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router';
 import type { LogEntry, RunView as Run } from '../../../server/src/api-types.ts';
 import { api, useApi, useNow } from '../api.ts';
+import { Markdown } from '../components/Markdown.tsx';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, money, RUN_STATUS, tokens } from '../format.ts';
 import { LiveStream } from '../live.ts';
@@ -16,7 +17,7 @@ function ItemView({ item }: { item: Item }) {
     case 'log':
       return <pre className={`log mono${item.error ? ' error-text' : ''}`}>{item.text}</pre>;
     case 'say':
-      return <p className="say">{item.text}</p>;
+      return <Markdown className="say" text={item.text} />;
     case 'tool':
       return (
         <details className={item.error ? 'tool-error' : undefined}>
@@ -145,7 +146,7 @@ export function RunView() {
       </div>
       <ErrorNote error={stopError} />
       {run.error && <p className="notice error">{run.error}</p>}
-      {run.summary && <p className="notice ok" style={{ whiteSpace: 'pre-wrap' }}>{run.summary}</p>}
+      {run.summary && <Markdown className="notice ok" text={run.summary} />}
       {todos.length > 0 && (
         <Panel title="The agent's to-do list">
           <ul className="todos panel-body">

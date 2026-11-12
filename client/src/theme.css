@@ -586,8 +586,65 @@ input[type='checkbox'] {
   padding: 12px 0 4px;
 }
 .transcript .say {
-  white-space: pre-wrap;
   max-width: 80ch;
+}
+
+/* Markdown (agent summaries and prose) */
+
+.markdown {
+  overflow-wrap: anywhere;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown :is(p, ul, ol, pre, blockquote, .table-wrap, h3, h4, h5, h6) {
+  margin: 0.5em 0;
+}
+.markdown li > :is(ul, ol) {
+  margin: 0;
+}
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  font-size: 14px;
+  font-weight: 600;
+}
+.markdown h3 {
+  font-size: 15px;
+}
+.markdown :is(ul, ol) {
+  padding-left: 1.5em;
+}
+.markdown :not(pre) > code {
+  background: var(--raised);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+.markdown pre {
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.markdown blockquote {
+  margin-left: 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+.markdown hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+.markdown th,
+.markdown td {
+  padding: 6px 10px;
 }
 .transcript details {
   border: 1px solid var(--line);
