@@ -11,7 +11,8 @@ The Workshop UI: React 19, React Router 8, Vite. Plain CSS with custom propertie
 | `src/live.ts` | `LiveStream`: an EventSource that reconnects itself (backoff, 40 s silence watchdog, `wake()`), testable without a browser |
 | `src/format.ts` | Labels for agents and run statuses, durations, times, money |
 | `src/transcript.ts` | Pure reducer: run log lines → steps, prose, tool calls with results attached, to-do list, outcome. Tested in `test/` |
-| `src/components/` | `Layout` (sidebar, mode switch, allowance meters), `ui.tsx` (`Status`, `Meter`, `Modal`, `Panel`, `ErrorNote`), `ThemeToggle` |
+| `src/markdown.ts` | Pure parser: the Markdown subset agents write → block and inline tree. Tested in `test/` |
+| `src/components/` | `Markdown` (renders that tree as React elements, never raw HTML), `Layout` (sidebar, mode switch, allowance meters), `ui.tsx` (`Status`, `Meter`, `Modal`, `Panel`, `ErrorNote`), `ThemeToggle` |
 | `src/pages/` | Login, Dashboard, Tickets, Runs, RunView, Connections, Agents, Settings, Alerts, Ticket (a ticket's lifecycle, `tickets/:id`), Media (a ticket's screenshots, `tickets/:id/media`) |
 | `src/theme.css` | Every colour, size and component style |
 
@@ -42,4 +43,4 @@ Plain verbs in sentence case. Buttons say what happens ("Save and check", "Creat
 
 ## Testing
 
-`npm test --workspace client` (Vitest) covers `transcript.ts`; add a test there when changing how logs are read. `npm run typecheck` covers the rest. To look at real screens, run the server (`npm run build && npm start`, or both dev servers) and use a browser at phone and desktop widths in both themes.
+`npm test --workspace client` (Vitest) covers `transcript.ts` and `markdown.ts`; add a test there when changing how logs are read. `npm run typecheck` covers the rest. To look at real screens, run the server (`npm run build && npm start`, or both dev servers) and use a browser at phone and desktop widths in both themes.

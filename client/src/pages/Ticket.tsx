@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router';
 import type { MediaItem, RunView, TicketLifecycle } from '../../../server/src/api-types.ts';
 import { useApi, useNow } from '../api.ts';
 import { Gallery, plainClick } from '../components/Gallery.tsx';
+import { Markdown } from '../components/Markdown.tsx';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, RUN_STATUS, STAGE_TEXT } from '../format.ts';
 import { TicketStatus } from './Tickets.tsx';
@@ -93,7 +94,7 @@ export function Ticket() {
                     <span>on {r.environment ?? 'a removed host'}</span>
                   </div>
                   {r.activity && <span className="mono muted">{r.activity}</span>}
-                  {r.summary && <span style={{ overflowWrap: 'anywhere' }}>{r.summary}</span>}
+                  {r.summary && <Markdown text={r.summary} />}
                   {r.error && <span style={{ color: 'var(--error-text)', overflowWrap: 'anywhere' }}>{r.error}</span>}
                   {shots.length > 0 && (
                     <>
