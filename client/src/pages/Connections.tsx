@@ -294,8 +294,10 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
       {repo.enabled && enabling === null && (
         <div className="row">
           <label className="row small">
-            <span className="muted">Tickets to work on</span>
-            <select value={repo.selection} onChange={(e) => onChange(repo.id, { selection: e.target.value })}>
+            <span className="muted" style={{ whiteSpace: 'nowrap' }}>
+              Tickets to work on
+            </span>
+            <select style={{ width: 'auto' }} value={repo.selection} onChange={(e) => onChange(repo.id, { selection: e.target.value })}>
               <option value="all">All open tickets</option>
               <option value="nominated">Only nominated tickets</option>
             </select>
