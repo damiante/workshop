@@ -24,8 +24,8 @@ const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { launch, resume } = await import('../src/scheduler/runner.ts');
-const { buildQueue, launchNow, mergeApproved, settlePushes } = await import('../src/scheduler/loop.ts');
-const { setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
+const { buildQueue, launchNow, mergeApproved, settleManual } = await import('../src/scheduler/loop.ts');
+const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
@@ -104,7 +104,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, prioritised = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.tickets = {
@@ -853,7 +853,7 @@ describe('sync', () => {
     it('clears a hand push', async () => {
       setPush(getTicket(1)!, 'lifecycle');
       await syncRepo(repo());
-      await settlePushes();
+      await settleManual();
       expect(getTicket(1)!.push).toBeNull();
     });
   });
@@ -957,7 +957,7 @@ describe('manual pushes', () => {
     fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'accept', size: 'm', reason: 'Medium.' })] });
     const r = await settle(go('classifier'));
     expect(r.status).toBe('succeeded');
-    settlePushes();
+    settleManual();
     expect(ticket().push).toBeNull();
     expect(queued()?.blockedBy).toBe('Workshop is paused');
   });
@@ -966,23 +966,23 @@ describe('manual pushes', () => {
     setLabels();
     setPush(ticket(), 'lifecycle');
     setLabels(label.size('m'), label.stage('design'));
-    settlePushes();
+    settleManual();
     expect(ticket().push).toBe('lifecycle');
     expect(queued()?.blockedBy).not.toBe('Workshop is paused');
     setLabels(label.size('m'), label.stage('implement'));
-    settlePushes();
+    settleManual();
     expect(ticket().push).toBe('lifecycle');
     setLabels(label.size('m'), label.stage('pr-review'));
-    settlePushes();
+    settleManual();
     expect(ticket().push).toBeNull();
   });
 
   it('keeps a stage push after a first failure and ends it after the second', () => {
     setPush(ticket(), 'stage');
-    settlePushes();
+    settleManual();
     expect(ticket().push).toBe('stage'); // stage unchanged: the retry is still pushed
     setLabels(label.size('s'), label.stage('implement'), label.failed);
-    settlePushes();
+    settleManual();
     expect(ticket().push).toBeNull();
   });
 
@@ -990,7 +990,7 @@ describe('manual pushes', () => {
     setPush(ticket(), 'lifecycle');
     saveSettings({ authors: ['someone-else'] });
     try {
-      settlePushes();
+      settleManual();
       expect(ticket().push).toBeNull();
     } finally {
       saveSettings({ authors: ['me'] });
@@ -1072,6 +1072,73 @@ describe('repository priority', () => {
   });
 });
 
+describe('manual priority', () => {
+  const ticket = () => getTicket(1)!;
+  const queued = () => buildQueue().find((c) => c.ticket.id === 1);
+  let api: number;
+  let added: number[] = [];
+  const other = (repo: number, labels: string[]) => {
+    const id = Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 9, 'Other', '', 'u', 'me', 'open', ?, '2026-10-12T00:00:00Z')", repo, JSON.stringify(labels)).lastInsertRowid);
+    added.push(id);
+    return id;
+  };
+
+  beforeEach(() => {
+    saveSettings({ mode: 'always' });
+    const app = one<{ vcs_connection_id: number; ticket_connection_id: number }>('SELECT * FROM repos WHERE id = 1')!;
+    api = Number(run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled, priority) VALUES (?, ?, 'me/api', 'main', 'u', 1, 1)", app.vcs_connection_id, app.ticket_connection_id).lastInsertRowid);
+  });
+  afterEach(() => {
+    for (const id of added) run('DELETE FROM tickets WHERE id = ?', id);
+    added = [];
+    run('DELETE FROM repos WHERE id = ?', api);
+  });
+
+  it('sorts a prioritised ticket ahead of a better step, and behind a pushed ticket', () => {
+    const t = other(1, [label.stage('merge'), label.size('s')]);
+    run("UPDATE tickets SET pr_status = 'conflict' WHERE id = ?", t);
+    expect(buildQueue()[0].ticket.id).toBe(t);
+    setPrioritised(ticket(), true);
+    expect(buildQueue()[0].ticket.id).toBe(1);
+    expect(buildQueue()[0].prioritised).toBe(true);
+    setPush(getTicket(t)!, 'lifecycle');
+    expect(buildQueue()[0].ticket.id).toBe(t);
+  });
+
+  it('still follows the operation mode', () => {
+    saveSettings({ mode: 'paused' });
+    setPrioritised(ticket(), true);
+    expect(queued()?.blockedBy).toBe('Workshop is paused');
+  });
+
+  it('is not held back by higher-priority repos waiting to be classified', () => {
+    other(api, []);
+    expect(queued()?.blockedBy).toBe('Waiting for me/api to be classified first');
+    setPrioritised(ticket(), true);
+    expect(queued()?.blockedBy ?? '').not.toMatch(/Waiting/);
+    expect(buildQueue()[0].ticket.id).toBe(1);
+  });
+
+  it('uses repository priority between prioritised tickets', () => {
+    const t = other(api, [label.size('s'), label.stage('design')]);
+    setPrioritised(ticket(), true);
+    setPrioritised(getTicket(t)!, true);
+    expect(buildQueue()[0].ticket.id).toBe(t);
+  });
+
+  it('is cleared when the ticket closes, and kept while it waits for you', () => {
+    const closed = other(1, [label.size('s'), label.stage('design')]);
+    setPrioritised(getTicket(closed)!, true);
+    run("UPDATE tickets SET state = 'closed' WHERE id = ?", closed);
+    setPrioritised(ticket(), true);
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('design'), label.needsInfo]));
+    settleManual();
+    expect(getTicket(closed)!.prioritised).toBe(0);
+    expect(ticket().prioritised).toBe(1);
+    expect(ticketView(ticket(), getRepo(1)!).prioritised).toBe(true);
+  });
+});
+
 describe('nominated tickets only', () => {
   const setLabels = (...labels: string[]) => run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(labels));
   const queued = () => buildQueue().find((c) => c.ticket.id === 1);
@@ -1110,10 +1177,10 @@ describe('nominated tickets only', () => {
     run("UPDATE repos SET selection = 'nominated'");
     setLabels(label.size('s'), label.stage('implement'), label.nominated);
     setPush(getTicket(1)!, 'lifecycle');
-    settlePushes();
+    settleManual();
     expect(getTicket(1)!.push).toBe('lifecycle');
     setLabels(label.size('s'), label.stage('implement'));
-    settlePushes();
+    settleManual();
     expect(getTicket(1)!.push).toBeNull();
   });
 });

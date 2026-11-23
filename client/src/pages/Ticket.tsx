@@ -59,6 +59,7 @@ export function Ticket() {
         <div className="row small">
           <span className="tag">{t.stage ? STAGE_TEXT[t.stage] : 'To classify'}</span>
           {t.size && <span className="tag">{t.size.toUpperCase()}</span>}
+          {t.prioritised && <span className="tag">Prioritised</span>}
           {t.state === 'closed' && <span className="muted">Closed</span>}
           <TicketStatus t={t} />
           {t.prUrl && (

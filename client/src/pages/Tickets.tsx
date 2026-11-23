@@ -189,15 +189,50 @@ function NominateControls({ t }: { t: TicketView }) {
   );
 }
 
+function PriorityControls({ t }: { t: TicketView }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (t.state !== 'open' && !t.prioritised) return null;
+  const send = (prioritised: boolean) => {
+    setBusy(true);
+    setError(null);
+    api(`/tickets/${t.id}/prioritised`, { method: 'PUT', body: { prioritised } })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <>
+      <div className="row small">
+        {t.prioritised ? (
+          <>
+            <span className="muted">Prioritised</span>
+            <button onClick={() => send(false)} disabled={busy}>
+              Remove priority
+            </button>
+          </>
+        ) : (
+          <button onClick={() => send(true)} disabled={busy}>
+            Prioritise
+          </button>
+        )}
+      </div>
+      <ErrorNote error={error} />
+    </>
+  );
+}
+
 function Card({ t }: { t: TicketView }) {
   const [editing, setEditing] = useState(false);
   return (
-    <article className="card">
+    <article className={t.prioritised ? 'card prioritised' : 'card'}>
       <div className="spread small muted">
         <Link to={`/tickets/${t.id}`}>
           {t.repo}#{t.number}
         </Link>
-        {t.size && <span className="tag">{t.size.toUpperCase()}</span>}
+        <span className="row">
+          {t.prioritised && <span className="tag">Prioritised</span>}
+          {t.size && <span className="tag">{t.size.toUpperCase()}</span>}
+        </span>
       </div>
       <a href={t.url} target="_blank" rel="noreferrer">
         {t.title}
@@ -222,7 +257,12 @@ function Card({ t }: { t: TicketView }) {
       )}
       {editing && <StatusEditor t={t} onClose={() => setEditing(false)} />}
       <NominateControls t={t} />
-      {t.nominated !== false && <PushControls t={t} />}
+      {t.nominated !== false && (
+        <>
+          <PriorityControls t={t} />
+          <PushControls t={t} />
+        </>
+      )}
     </article>
   );
 }
@@ -275,7 +315,7 @@ export function Tickets() {
       )}
       <div className="board">
         {COLUMNS.map((col) => {
-          const tickets = shown.filter(col.match);
+          const tickets = shown.filter(col.match).sort((a, b) => Number(b.prioritised) - Number(a.prioritised));
           return (
             <section key={col.title} className="column" aria-label={col.title}>
               <h3>

@@ -42,9 +42,9 @@ At most one stage label is present. `needs-info`, `skip` and `failed` sit alongs
 
 When several tickets are ready, work already under way goes first: merge, then implementation and re-classification, then design review, design, and new classifications. Oldest first within each group. Agents start one at a time, a scheduler tick apart, so allowance readings catch up between launches.
 
-**Repository priority.** Each repository has a priority (a whole number, default 0, higher first). A ticket in a lower-priority repo waits until every open ticket in higher-priority repos has been classified; a ticket the Classifier held for a dependency, or that is skipped, waiting on a question or failed, counts as classified. Repos with equal priority don't hold each other. Once that's satisfied, higher-priority repos' tickets still go first, ahead of the step order above. Hand pushes and **Start now** bypass the gate.
+**Repository priority.** Each repository has a priority (a whole number, default 0, higher first). A ticket in a lower-priority repo waits until every open ticket in higher-priority repos has been classified; a ticket the Classifier held for a dependency, or that is skipped, waiting on a question or failed, counts as classified. Repos with equal priority don't hold each other. Once that's satisfied, higher-priority repos' tickets still go first, ahead of the step order above. Hand pushes, prioritised tickets and **Start now** bypass the gate.
 
-**Queue order.** The queue sorts by hand push, then repository priority, then step order, then the `ticketOrder` setting: least recently updated first (default), most recently updated first, oldest first or newest first. Tickets without a stored creation time sort by their update time.
+**Queue order.** The queue sorts by hand push, then manual priority, then repository priority, then step order, then the `ticketOrder` setting: least recently updated first (default), most recently updated first, oldest first or newest first. Tickets without a stored creation time sort by their update time.
 
 ## Transitions
 
@@ -104,6 +104,12 @@ Whatever the operation mode, you can push one ticket from its card on the Ticket
 Either push also ends where Workshop would wait for you anyway: your pull request review, a question (`needs-info`), `skip`, `failed`, or the ticket closing. So an approved pull request isn't merged while Workshop is paused until you push the ticket again. A failed first attempt is retried as usual; the push ends after the second failure.
 
 A push lifts only the mode gate. Dependencies, model settings, allowance, the API cap, free hosts and one agent per ticket still apply. Pushed tickets go to the front of the queue. **Cancel push** ends a push without stopping a running agent.
+
+## Prioritising a ticket
+
+**Prioritise** on a ticket's card puts it ahead of every ticket you haven't prioritised, in every stage. A running agent isn't interrupted; the prioritised ticket is the next one picked up when an agent host is free. Among several prioritised tickets the usual order decides (repository priority, step, ticket order), and pushed tickets still go first.
+
+Priority only changes the order. It doesn't lift the operation mode or hours, or any other gate; it does skip waiting for higher-priority repositories to be classified. Unlike a push, it lasts through waits for you (questions, your review, failures and skip): once you act, the ticket goes first again. It's cleared when the ticket closes, or with **Remove priority**. Prioritised tickets show a "Prioritised" tag, a brown left edge and sit at the top of their column.
 
 ## Failures, pauses and stops
 

@@ -46,6 +46,7 @@ export interface TicketRow {
   ui: number;
   rescue: string | null;
   dismissed: string | null;
+  prioritised: number;
   updated_at: string;
   created_at: string | null;
 }
@@ -76,6 +77,13 @@ export function setPush(t: TicketRow, push: Push | null) {
   run('UPDATE tickets SET push = ?, push_stage = ? WHERE id = ?', push, stage, t.id);
   t.push = push;
   t.push_stage = stage;
+  publish('tickets');
+  publish('runs');
+}
+
+export function setPrioritised(t: TicketRow, on: boolean) {
+  run('UPDATE tickets SET prioritised = ? WHERE id = ?', on ? 1 : 0, t.id);
+  t.prioritised = on ? 1 : 0;
   publish('tickets');
   publish('runs');
 }
@@ -174,6 +182,7 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
     attention,
     dismissed: attention !== null && t.dismissed === attentionKey(t, attention),
     push: t.push,
+    prioritised: Boolean(t.prioritised),
     mediaCount: mediaCount(t.id),
     updatedAt: t.updated_at,
   };

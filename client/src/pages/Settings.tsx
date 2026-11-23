@@ -285,7 +285,7 @@ export function SettingsPage() {
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
-            <span className="help">Pushed tickets, higher-priority repositories and work already in progress still go first. This decides the order among the rest.</span>
+            <span className="help">Pushed and prioritised tickets, higher-priority repositories and work already in progress still go first. This decides the order among the rest.</span>
           </label>
           <NumberField label="Check for changes every (minutes)" value={draft.pollMinutes} min={1} max={60} onChange={(n) => set({ pollMinutes: n })} />
           <NumberField label="Keep run history for (days)" value={draft.retentionDays} min={1} max={365} onChange={(n) => set({ retentionDays: n })} />

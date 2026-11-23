@@ -14,7 +14,7 @@ import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../
 import { stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend } from '../spend.ts';
-import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setDismissed, setPush, ticketInScope, ticketView } from '../tickets.ts';
+import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { CONTENT_TYPES, extType, validName } from '../workflow/media.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
@@ -238,6 +238,19 @@ apiRouter.put('/tickets/:id/dismissed', (req, res) => {
   check(typeof dismissed === 'boolean', 'Say whether to dismiss the ticket.');
   check(!dismissed || ticketView(t, repo).attention, "This ticket isn't waiting on you, so there's nothing to dismiss.", 409);
   setDismissed(t, dismissed);
+  res.json(ticketView(t, repo));
+});
+
+apiRouter.put('/tickets/:id/prioritised', (req, res) => {
+  const { t, repo } = pushableTicket(req.params.id);
+  const prioritised = req.body?.prioritised;
+  check(typeof prioritised === 'boolean', 'Say whether to prioritise the ticket.');
+  if (prioritised) {
+    check(t.state === 'open', 'This ticket is closed.', 409);
+    check(ticketInScope(t, repo), 'This repository only works on nominated tickets. Nominate this ticket first.', 409);
+  }
+  setPrioritised(t, prioritised);
+  if (prioritised) kick();
   res.json(ticketView(t, repo));
 });
 

@@ -114,6 +114,7 @@ const schemas: Record<string, Schema> = {
     dismissed: bool,
     push: nullable(enumOf('stage', 'lifecycle')),
     nominated: nullable(bool),
+    prioritised: bool,
     mediaCount: int,
     updatedAt: str,
   }),
@@ -131,7 +132,7 @@ const schemas: Record<string, Schema> = {
     [],
   ),
   HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), available: bool, slots: int, busy: int, specs: nullable(str) }),
-  QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str) }),
+  QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str), push: nullable(enumOf('stage', 'lifecycle')), prioritised: bool }),
   AlertView: object({
     id: int,
     level: enumOf('error', 'warning', 'info'),
@@ -284,6 +285,16 @@ const paths: Record<string, Record<string, Op>> = {
         'Dismisses a ticket from Needs you on the dashboard, or brings it back. Send { "dismissed": true | false }. It comes back by itself when the reason changes: a new question, failure or pull request to review. Changes nothing on GitHub.',
       params: ['id'],
       body: object({ dismissed: bool }),
+      ok: ref('TicketView'),
+      errors: [400, 403, 404, 409],
+    },
+  },
+  '/tickets/{id}/prioritised': {
+    put: {
+      summary:
+        'Puts the ticket ahead of every ticket you haven\'t prioritised, for its whole lifecycle, or removes that. Send { "prioritised": true | false }. Workshop\'s mode and hours still apply. Cleared when the ticket closes.',
+      params: ['id'],
+      body: object({ prioritised: bool }),
       ok: ref('TicketView'),
       errors: [400, 403, 404, 409],
     },

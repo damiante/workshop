@@ -564,6 +564,9 @@ input[type='checkbox'] {
   flex-direction: column;
   gap: 6px;
 }
+.card.prioritised {
+  border-left: 3px solid var(--accent);
+}
 @media (max-width: 760px) {
   .board {
     grid-auto-flow: row;

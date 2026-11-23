@@ -21,7 +21,7 @@ export interface Settings {
   pollMinutes: number;
   /** GitHub logins whose tickets Workshop acts on. */
   authors: string[];
-  /** Order of tickets within the same push, repo priority and step. */
+  /** Order of tickets within the same push, prioritisation, repo priority and step. */
   ticketOrder: TicketOrder;
   retentionDays: number;
 }
@@ -162,6 +162,8 @@ export interface TicketView {
   dismissed: boolean;
   /** Set while you've pushed this ticket by hand. */
   push: Push | null;
+  /** You put this ticket ahead of the rest of the queue; it stays until you remove it or the ticket closes. */
+  prioritised: boolean;
   /** How many images the ticket's media store holds. */
   mediaCount: number;
   updatedAt: string;
@@ -257,6 +259,7 @@ export interface QueueItem {
   next: string;
   blockedBy: string | null;
   push: Push | null;
+  prioritised: boolean;
 }
 
 export interface AlertView {

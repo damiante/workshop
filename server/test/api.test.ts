@@ -637,6 +637,40 @@ describe('dismissing Needs you items', () => {
   });
 });
 
+describe('prioritising a ticket', () => {
+  it('sets and removes priority, and refuses closed tickets', async () => {
+    const { run, one } = await import('../src/db.ts');
+    const id = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
+    const prioritise = (body: object, tid: number = id) => request(app).put(`/api/tickets/${tid}/prioritised`).set('cookie', cookie).send(body);
+
+    expect((await prioritise({ prioritised: 'yes' })).status).toBe(400);
+    expect((await prioritise({ prioritised: true }, 99999)).status).toBe(404);
+    run("UPDATE repos SET selection = 'nominated' WHERE id = 1");
+    expect((await prioritise({ prioritised: true })).body.error).toMatch(/Nominate this ticket first/);
+    run("UPDATE repos SET selection = 'all' WHERE id = 1");
+    const on = await prioritise({ prioritised: true });
+    expect(on.status).toBe(200);
+    expect(on.body.prioritised).toBe(true);
+    const queue = (await request(app).get('/api/overview').set('cookie', cookie)).body.queue as { ticketId: number; prioritised: boolean }[];
+    expect(queue.find((q) => q.ticketId === id)?.prioritised ?? true).toBe(true);
+    const off = await prioritise({ prioritised: false });
+    expect(off.status).toBe(200);
+    expect(off.body.prioritised).toBe(false);
+
+    run("UPDATE tickets SET state = 'closed', prioritised = 1 WHERE id = ?", id);
+    try {
+      const refused = await prioritise({ prioritised: true });
+      expect(refused.status).toBe(409);
+      expect(refused.body.error).toBe('This ticket is closed.');
+      const removed = await prioritise({ prioritised: false });
+      expect(removed.status).toBe(200);
+      expect(removed.body.prioritised).toBe(false);
+    } finally {
+      run("UPDATE tickets SET state = 'open', prioritised = 0 WHERE id = ?", id);
+    }
+  });
+});
+
 describe('alert links', () => {
   it('points run and ticket alerts at a run, and leaves other alerts unlinked', async () => {
     const tid = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;

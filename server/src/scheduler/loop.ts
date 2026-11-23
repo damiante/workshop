@@ -11,7 +11,7 @@ import { environmentOf, getConnection, listConnections, modelsOf, setConnectionS
 import { deleteLog, RUNNING_SQL, type RunRow } from '../runs.ts';
 import { check } from '../http/util.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
@@ -65,7 +65,7 @@ export async function tick() {
     await checkHosts();
     reattachRuns();
     await syncRepos();
-    settlePushes();
+    settleManual();
     const s = getSettings();
     const now = Date.now();
     await mergeApproved(s.mode === 'paused');
@@ -154,12 +154,13 @@ async function syncRepos() {
 
 const openTicketsSql = `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE r.enabled = 1 AND t.state = 'open'`;
 
-/** Clears hand pushes that are finished, or whose repository or author is no longer eligible. */
-export function settlePushes() {
+/** Clears hand pushes that are finished or no longer eligible, and priority on closed tickets. */
+export function settleManual() {
   for (const t of all<TicketRow>('SELECT * FROM tickets WHERE push IS NOT NULL')) {
     const repo = getRepo(t.repo_id);
     if (!repo?.enabled || !isAllowedAuthor(t.author) || !inScope(repo.selection, labelsOf(t)) || pushEnded(t.push!, t.push_stage, labelsOf(t), t.state === 'open')) setPush(t, null);
   }
+  for (const t of all<TicketRow>("SELECT * FROM tickets WHERE prioritised = 1 AND state = 'closed'")) setPrioritised(t, false);
 }
 
 /** With `pushedOnly` (Workshop is paused), only tickets you've pushed are merged. */
@@ -207,6 +208,7 @@ export interface Candidate {
   model: string | null;
   billing: Billing;
   pushed: boolean;
+  prioritised: boolean;
 }
 
 function startCandidate(c: Candidate): string | null {
@@ -276,17 +278,17 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const cls = getAgent(agent);
     const conn = getConnection(cls.model_connection_id);
     const name = AGENT_INFO[agent].label;
-    let blockedBy = dependencyBlock(blockersOf(t)) ?? (t.push ? null : modeReason ?? priorityReason);
+    let blockedBy = dependencyBlock(blockersOf(t)) ?? (t.push ? null : modeReason ?? (t.prioritised ? null : priorityReason));
     if (!blockedBy && (!cls.model || !conn)) blockedBy = `Choose a model for ${name} on the Agents page`;
     if (!blockedBy && !modelsOf(conn!).billing().includes(cls.billing)) {
       blockedBy = `${conn!.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`;
     }
     if (!blockedBy) blockedBy = cls.billing === 'api' ? apiCapBlock(spentToday, s) : allowanceBlock(allowanceOf(conn!.id), s, now);
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: conn?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), priority: stepPriority(step), repoPriority: repo.priority });
+    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: conn?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), priority: stepPriority(step), repoPriority: repo.priority });
   }
   // The sort is stable, so the ticket order setting (from the query) decides ties.
-  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || b.repoPriority - a.repoPriority || a.priority - b.priority);
+  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.prioritised) - Number(a.prioritised) || b.repoPriority - a.repoPriority || a.priority - b.priority);
 }
 
 export function queueView(): QueueItem[] {
@@ -297,6 +299,7 @@ export function queueView(): QueueItem[] {
     next: c.mode === 'delta' ? 'Re-classify requested changes' : AGENT_INFO[c.agent].label,
     blockedBy: c.blockedBy,
     push: c.ticket.push,
+    prioritised: c.prioritised,
   }));
 }
 

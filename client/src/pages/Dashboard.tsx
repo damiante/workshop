@@ -166,6 +166,7 @@ export function Dashboard() {
                     <span className="tag">{q.next}</span>
                   </div>
                   {q.push && <span className="small muted">Pushed by you</span>}
+                  {q.prioritised && !q.push && <span className="small muted">Prioritised by you</span>}
                   {q.blockedBy && <span className="small muted">Waiting: {q.blockedBy}</span>}
                 </li>
               ))}

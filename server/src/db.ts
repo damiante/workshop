@@ -201,6 +201,7 @@ export const MIGRATIONS = [
           FROM runs JOIN tickets ON tickets.id = runs.ticket_id JOIN repos ON repos.id = tickets.repo_id) AS x
     WHERE x.id = spend.run_id;
   `,
+  `ALTER TABLE tickets ADD COLUMN prioritised INTEGER NOT NULL DEFAULT 0; -- you prioritised it by hand; cleared when it closes`,
 ];
 
 export let db: DatabaseSync;
