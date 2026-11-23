@@ -102,6 +102,16 @@ export interface ReviewFeedback {
   images?: ImageRef[];
 }
 
+/** What the default branch's rules mean for merging without a human review. */
+export interface MergeRules {
+  /** An approving review is required and Workshop can't bypass it. */
+  reviewRequired: boolean;
+  /** At least one status check must pass before merging. */
+  checksRequired: boolean;
+  /** Things that couldn't be read, phrased to follow "Workshop couldn't check …". Empty when everything was read. */
+  unknown: string[];
+}
+
 /** Version-control host (GitHub first). */
 export interface VcsHost {
   listRepos(): Promise<RepoRef[]>;
@@ -123,6 +133,8 @@ export interface VcsHost {
   /** Merge the base branch into the PR branch server-side (no conflicts). */
   updateBranch(repo: RepoRef, number: number): Promise<void>;
   merge(repo: RepoRef, number: number): Promise<{ merged: boolean; message?: string }>;
+  /** The rules on the default branch that affect merging. */
+  mergeRules(repo: RepoRef): Promise<MergeRules>;
 }
 
 export interface HostSpecs {

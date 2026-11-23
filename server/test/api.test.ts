@@ -15,11 +15,13 @@ import { saveSettings } from '../src/settings.ts';
 import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
 
-// Only the ticket source is faked, so label edits can be recorded or made to fail.
+// The ticket source is faked, so label edits can be recorded or made to fail, and the code host's branch rules.
 const fakeTickets = vi.hoisted(() => ({ setLabels: null as any, createTicket: null as any }));
+const fakeVcs = vi.hoisted(() => ({ mergeRules: null as any }));
 vi.mock('../src/providers/index.ts', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   ticketsOf: () => fakeTickets,
+  vcsOf: () => fakeVcs,
 }));
 
 const PASSWORD = 'correct horse battery'; // see vitest.config.ts
@@ -822,5 +824,75 @@ describe('repository enrolment', () => {
     run(MIGRATIONS.find((m) => m.startsWith("UPDATE repos SET selection = 'nominated'"))!);
     expect(one<{ selection: string }>('SELECT selection FROM repos WHERE id = ?', off)?.selection).toBe('nominated');
     expect(one<{ selection: string }>('SELECT selection FROM repos WHERE id = ?', on)?.selection).toBe('all');
+  });
+});
+
+describe('merge without review', () => {
+  let id = 0;
+  beforeAll(() => {
+    const conn = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('vcs', 'github', 'GH merge', '{}', '', 'ok', 0, 0)").lastInsertRowid);
+    id = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (?, 'me/overnight', 'main', 'u', 0)", conn).lastInsertRowid);
+  });
+  const put = (mergeWithoutReview: unknown) => request(app).put(`/api/repos/${id}`).set('cookie', cookie).send({ mergeWithoutReview });
+  const row = () => one<{ merge_without_review: number; merge_warning: string | null }>('SELECT merge_without_review, merge_warning FROM repos WHERE id = ?', id)!;
+  const rules = (over: object) => vi.fn(async () => ({ reviewRequired: false, checksRequired: true, unknown: [], ...over }));
+
+  it('is refused when an approving review is required', async () => {
+    fakeVcs.mergeRules = rules({ reviewRequired: true });
+    const res = await put(true);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/^main requires an approving review/);
+    expect(res.body.error).toContain('add the App as a bypass actor');
+    expect(row().merge_without_review).toBe(0);
+  });
+
+  it('is turned on without a warning when the branch requires checks and no review', async () => {
+    fakeVcs.mergeRules = rules({});
+    const res = await put(true);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ mergeWithoutReview: true, mergeWarning: null });
+  });
+
+  it('warns when no status checks are required', async () => {
+    fakeVcs.mergeRules = rules({ checksRequired: false });
+    const res = await put(true);
+    expect(res.status).toBe(200);
+    expect(res.body.mergeWithoutReview).toBe(true);
+    expect(res.body.mergeWarning).toMatch(/^No status checks are required on main, so failing CI won't stop a merge\./);
+    expect(row().merge_warning).toBe(res.body.mergeWarning);
+  });
+
+  it('warns about what it couldn\'t check', async () => {
+    fakeVcs.mergeRules = rules({ unknown: ["the review settings of main's branch protection"] });
+    const res = await put(true);
+    expect(res.status).toBe(200);
+    expect(res.body.mergeWarning).toBe(
+      "Workshop couldn't check the review settings of main's branch protection. If that requires an approving review, pull requests will wait in merge until you approve them.",
+    );
+  });
+
+  it('warns when the rules can\'t be read at all', async () => {
+    fakeVcs.mergeRules = vi.fn(async () => {
+      throw new Error('Resource not accessible by integration');
+    });
+    const res = await put(true);
+    expect(res.status).toBe(200);
+    expect(res.body.mergeWarning).toMatch(/^Workshop couldn't read the rules for main \(Resource not accessible by integration\)\./);
+  });
+
+  it('is turned off without a check, clearing the warning', async () => {
+    run("UPDATE repos SET merge_without_review = 1, merge_warning = 'old' WHERE id = ?", id);
+    fakeVcs.mergeRules = rules({});
+    const res = await put(false);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ mergeWithoutReview: false, mergeWarning: null });
+    expect(row()).toEqual({ merge_without_review: 0, merge_warning: null });
+    expect(fakeVcs.mergeRules).not.toHaveBeenCalled();
+  });
+
+  it('must be true or false', async () => {
+    const res = await put('yes');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Say whether to merge without review.');
   });
 });

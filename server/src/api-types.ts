@@ -88,6 +88,10 @@ export interface RepoView {
   /** Higher goes first. Lower-priority repos wait until every open ticket here has been classified. */
   priority: number;
   selection: RepoSelection;
+  /** Merge pull requests once they're mergeable, without waiting for your approval. */
+  mergeWithoutReview: boolean;
+  /** What the branch check couldn't confirm when the setting was turned on (null when all was well or it's off). */
+  mergeWarning: string | null;
 }
 
 export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'merge';

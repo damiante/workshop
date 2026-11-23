@@ -6,6 +6,7 @@ import type {
   ImageRef,
   LabelDef,
   Mergeability,
+  MergeRules,
   PullRequestState,
   RemoteTicket,
   RepoRef,
@@ -459,6 +460,55 @@ export class GitHubApp implements VcsHost, TicketSource {
       if ([405, 409, 422].includes(status(err) ?? 0)) return { merged: false, message: (err as Error).message };
       throw err;
     }
+  }
+
+  async mergeRules(repo: RepoRef): Promise<MergeRules> {
+    const kit = await this.kit(repo);
+    const branch = repo.defaultBranch;
+    const result: MergeRules = { reviewRequired: false, checksRequired: false, unknown: [] };
+    // Rulesets: every active rule on the branch, whether or not Workshop can bypass it.
+    const rules = (await kit.paginate('GET /repos/{owner}/{repo}/rules/branches/{branch}', { ...split(repo), branch, per_page: 100 })) as {
+      type: string;
+      ruleset_id?: number;
+      parameters?: { required_status_checks?: unknown[]; required_approving_review_count?: number };
+    }[];
+    const bypass = new Map<number, { name: string; canBypass: string | undefined }>();
+    for (const rule of rules) {
+      if (rule.type === 'required_status_checks' && rule.parameters?.required_status_checks?.length) result.checksRequired = true;
+      if (rule.type !== 'pull_request' || !((rule.parameters?.required_approving_review_count ?? 0) >= 1)) continue;
+      const id = rule.ruleset_id;
+      if (id !== undefined && !bypass.has(id)) {
+        const set = await kit
+          .request('GET /repos/{owner}/{repo}/rulesets/{ruleset_id}', { ...split(repo), ruleset_id: id, includes_parents: true })
+          .then(({ data }) => ({ name: data.name, canBypass: (data as { current_user_can_bypass?: string }).current_user_can_bypass }))
+          .catch(() => ({ name: `#${id}`, canBypass: undefined }));
+        bypass.set(id, set);
+      }
+      const set = id === undefined ? undefined : bypass.get(id);
+      // Workshop only merges pull requests, so a bypass for pull requests is enough.
+      if (set?.canBypass === 'always' || set?.canBypass === 'pull_requests_only') continue;
+      if (set?.canBypass === 'never') result.reviewRequired = true;
+      else {
+        const what = `whether it can bypass the "${set?.name ?? 'unnamed'}" ruleset on ${branch}`;
+        if (!result.unknown.includes(what)) result.unknown.push(what);
+      }
+    }
+    // Classic branch protection.
+    const { data } = await kit.request('GET /repos/{owner}/{repo}/branches/{branch}', { ...split(repo), branch });
+    const checks = data.protection?.required_status_checks;
+    if (checks?.contexts?.length || checks?.checks?.length) result.checksRequired = true;
+    if (data.protection?.enabled ?? data.protected) {
+      try {
+        const { data: reviews } = await kit.request('GET /repos/{owner}/{repo}/branches/{branch}/protection/required_pull_request_reviews', { ...split(repo), branch });
+        if ((reviews.required_approving_review_count ?? 0) >= 1) result.reviewRequired = true;
+      } catch (err) {
+        // Normally a 403: reading these needs the administration permission, which the App doesn't ask for.
+        if (status(err) !== 404) {
+          result.unknown.push(`the review settings of ${branch}'s branch protection (reading them needs the administration permission, which the Workshop App doesn't request)`);
+        }
+      }
+    }
+    return result;
   }
 }
 

@@ -100,6 +100,8 @@ The connection check runs a tiny Claude Code session on an agent host (about 700
 
 Once the App is installed, the **Repositories** list shows every repository it can see. Tick the ones Workshop should work on. Turning a repository on creates its `workshop/` labels. A newly enrolled repository starts with nominated tickets only, so nothing is picked up until you nominate it or switch it to all open tickets. Adding `workshop/skip` to a ticket removes it from Workshop on the next sync (any run stops, and it leaves the board) until you remove the label. A repository can work on all its open tickets or only those you nominate by adding the `workshop/nominated` label (or pressing **Nominate** on the Tickets page). Give a repository a priority to have its tickets go first: a lower-priority repository waits until every open ticket in the higher ones has been classified.
 
+**Merge without review** (off by default) merges each pull request as soon as GitHub allows it, without waiting for your approval: useful for letting a batch of tickets run overnight on a new project. Workshop still opens the pull request and requests your review, and requesting changes before it merges still sends the ticket back. Turning it on is refused if the default branch requires an approving review, since the App can't approve its own pull requests. Make CI a required status check first, or failing CI won't stop a merge.
+
 ### 5. Settings
 
 - **Ticket authors:** Workshop only works on issues opened by these GitHub users, and leaves other people's comments out of what agents read. Keep this to yourself on public repositories.

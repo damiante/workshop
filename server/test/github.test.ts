@@ -136,3 +136,50 @@ describe('GitHub openPullRequest', () => {
     await expect(gh([]).app.openPullRequest({ ...repo, defaultBranch: 'main' }, pr)).rejects.toThrow('already exists');
   });
 });
+
+describe('GitHub mergeRules', () => {
+  const main = { ...repo, defaultBranch: 'main' };
+  const reviewRule = { type: 'pull_request', ruleset_id: 4, parameters: { required_approving_review_count: 1 } };
+  const checksRule = { type: 'required_status_checks', ruleset_id: 5, parameters: { required_status_checks: [{ context: 'test' }] } };
+  function gh(opts: { rules?: object[]; ruleset?: object | Error; branch?: object; reviews?: object | Error }) {
+    const app = new GitHubApp({ appId: 1, slug: 'workshop', owner: 'me', htmlUrl: '', installations: [1] }, { privateKey: 'unused' });
+    const answer = (x: object | Error | undefined) => (x instanceof Error ? Promise.reject(x) : Promise.resolve({ data: x ?? {} }));
+    const request = vi.fn(async (route: string) => {
+      if (route.includes('/rulesets/')) return answer(opts.ruleset);
+      if (route.endsWith('required_pull_request_reviews')) return answer(opts.reviews);
+      return answer(opts.branch ?? { protected: false });
+    });
+    vi.spyOn(app as unknown as { kit: () => unknown }, 'kit').mockResolvedValue({ request, paginate: async () => opts.rules ?? [] });
+    return app;
+  }
+  const denied = Object.assign(new Error('Resource not accessible by integration'), { status: 403 });
+
+  it('finds required checks in rulesets and in classic protection', async () => {
+    await expect(gh({ rules: [checksRule] }).mergeRules(main)).resolves.toEqual({ reviewRequired: false, checksRequired: true, unknown: [] });
+    const branch = { protected: true, protection: { enabled: true, required_status_checks: { contexts: ['ci'] } } };
+    await expect(gh({ branch, reviews: Object.assign(new Error('Not Found'), { status: 404 }) }).mergeRules(main)).resolves.toEqual({ reviewRequired: false, checksRequired: true, unknown: [] });
+  });
+
+  it('requires a review only when the ruleset says Workshop can never bypass it', async () => {
+    const rules = [reviewRule, reviewRule];
+    await expect(gh({ rules, ruleset: { name: 'Main', current_user_can_bypass: 'never' } }).mergeRules(main)).resolves.toMatchObject({ reviewRequired: true });
+    await expect(gh({ rules, ruleset: { name: 'Main', current_user_can_bypass: 'pull_requests_only' } }).mergeRules(main)).resolves.toMatchObject({ reviewRequired: false, unknown: [] });
+    await expect(gh({ rules, ruleset: { name: 'Main' } }).mergeRules(main)).resolves.toMatchObject({
+      reviewRequired: false,
+      unknown: ['whether it can bypass the "Main" ruleset on main'],
+    });
+  });
+
+  it("ignores a pull request rule that doesn't need an approval", async () => {
+    const rules = [{ ...reviewRule, parameters: { required_approving_review_count: 0 } }];
+    await expect(gh({ rules }).mergeRules(main)).resolves.toEqual({ reviewRequired: false, checksRequired: false, unknown: [] });
+  });
+
+  it("reads classic protection's reviews, and says so when it can't", async () => {
+    const branch = { protected: true, protection: { enabled: true } };
+    await expect(gh({ branch, reviews: { required_approving_review_count: 2 } }).mergeRules(main)).resolves.toMatchObject({ reviewRequired: true });
+    const unread = await gh({ branch, reviews: denied }).mergeRules(main);
+    expect(unread.reviewRequired).toBe(false);
+    expect(unread.unknown).toEqual([expect.stringContaining("the review settings of main's branch protection")]);
+  });
+});

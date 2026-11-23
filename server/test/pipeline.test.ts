@@ -714,6 +714,41 @@ describe('sync', () => {
     expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.stage('reclassify')], [label.stage('pr-review')]);
   });
 
+  it('leaves an open pull request without a review in pr-review', async () => {
+    fake.tickets.listChanged = async () => [];
+    fake.vcs.pullRequestState = async () => pr({});
+    await syncRepo(repo());
+    expect(fake.tickets.setLabels).not.toHaveBeenCalled();
+  });
+
+  describe('with merge without review', () => {
+    beforeEach(() => run('UPDATE repos SET merge_without_review = 1 WHERE id = 1'));
+    afterEach(() => run('UPDATE repos SET merge_without_review = 0 WHERE id = 1'));
+
+    it('moves an open pull request to merge without an approval', async () => {
+      fake.tickets.listChanged = async () => [];
+      fake.vcs.pullRequestState = async () => pr({});
+      await syncRepo(repo());
+      expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.stage('merge')], [label.stage('pr-review')]);
+    });
+
+    it.each(['pr-review', 'merge'] as const)('still sends requested changes at %s back to the classifier', async (stage) => {
+      run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage(stage)]));
+      fake.tickets.listChanged = async () => [];
+      fake.vcs.pullRequestState = async () => pr({ decision: 'changes_requested' });
+      await syncRepo(repo());
+      expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.stage('reclassify')], [label.stage(stage)]);
+    });
+
+    it('leaves a pull request already at merge to the merge step', async () => {
+      run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('merge')]));
+      fake.tickets.listChanged = async () => [];
+      fake.vcs.pullRequestState = async () => pr({});
+      await syncRepo(repo());
+      expect(fake.tickets.setLabels).not.toHaveBeenCalled();
+    });
+  });
+
   it('records requested changes even when the label change fails, and keeps checking other tickets', async () => {
     fake.tickets.listChanged = async () => [];
     fake.vcs.pullRequestState = async () => pr({ decision: 'changes_requested' });
@@ -914,6 +949,48 @@ describe('sync', () => {
         run('DELETE FROM tickets WHERE number = 8');
       }
     });
+  });
+});
+
+describe('merge step', () => {
+  const pr = (over: object) => ({ number: 7, url: 'u', state: 'open', headSha: 'abc', mergeable: 'clean', decision: null, ...over });
+  const labels = () => JSON.parse(getTicket(1)!.labels);
+
+  beforeEach(() => {
+    run('UPDATE tickets SET pr_number = 7, labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('merge')]));
+    fake.vcs.merge = vi.fn(async () => ({ merged: true }));
+  });
+  afterEach(() => run('UPDATE repos SET merge_without_review = 0 WHERE id = 1'));
+
+  it('sends a blocked pull request without an approval back for your review', async () => {
+    fake.vcs.pullRequestState = vi.fn(async () => pr({ mergeable: 'blocked' }));
+    await mergeApproved(false);
+    expect(labels()).toContain(label.stage('pr-review'));
+    expect(fake.vcs.requestReview).toHaveBeenCalledWith(expect.anything(), 7, 'me');
+  });
+
+  it('keeps waiting on a blocked pull request without an approval with merge without review', async () => {
+    run('UPDATE repos SET merge_without_review = 1 WHERE id = 1');
+    fake.vcs.pullRequestState = vi.fn(async () => pr({ mergeable: 'blocked' }));
+    await mergeApproved(false);
+    expect(labels()).toContain(label.stage('merge'));
+    expect(fake.vcs.requestReview).not.toHaveBeenCalled();
+    expect(fake.vcs.merge).not.toHaveBeenCalled();
+  });
+
+  it("doesn't merge a pull request you requested changes on with merge without review", async () => {
+    run('UPDATE repos SET merge_without_review = 1 WHERE id = 1');
+    fake.vcs.pullRequestState = vi.fn(async () => pr({ decision: 'changes_requested' }));
+    await mergeApproved(false);
+    expect(fake.vcs.merge).not.toHaveBeenCalled();
+    expect(labels()).toContain(label.stage('reclassify'));
+  });
+
+  it('merges a clean pull request without an approval with merge without review', async () => {
+    run('UPDATE repos SET merge_without_review = 1 WHERE id = 1');
+    fake.vcs.pullRequestState = vi.fn(async () => pr({}));
+    await mergeApproved(false);
+    expect(fake.vcs.merge).toHaveBeenCalledWith(expect.anything(), 7);
   });
 });
 

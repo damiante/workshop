@@ -72,6 +72,7 @@ The design document lives at `docs/workshop/<n>-<slug>.md` on the ticket's branc
 Each sync checks every pull request waiting on you. Only a formal review counts (Approve or Request changes, not a plain comment), and only one made **on the current head commit** by a ticket author. Pushing new work asks for a fresh decision.
 
 - **Approved:** `stage:merge`.
+- **Merge without review:** in a repository with this setting on, an open pull request goes to `stage:merge` on the next sync without an approval. Workshop still opens it and requests your review, so you can read it afterwards. Changes you request before it merges still send it to `stage:reclassify`, from `stage:pr-review` or `stage:merge`.
 - **Dependencies:** a ticket that GitHub shows as blocked by an open issue starts no agent at any stage, and an approved pull request isn't merged through the API. The queue says "Depends on #2". Every sync re-reads the blockers of held tickets, because closing a blocker may not change the blocked ticket's update time.
 - **Changes requested:** `stage:reclassify`. The Classifier sizes just the requested changes, then the usual route runs on the same branch. Agents receive your review comments, with file and line. The Implementation agent comments on the existing pull request instead of opening a new one, and your review is requested again.
 - **Pull request closed without merging:** Workshop closes the issue as not planned and comments; reopen the issue to start again from classification.
@@ -88,7 +89,16 @@ For a ticket in `stage:merge`, Workshop reads the pull request's mergeability:
 | behind | Update the branch from the base on GitHub, then wait |
 | conflict | Run the Merge agent; after its push, try the merge again |
 | blocked, still approved | Wait (required checks or reviews pending) |
-| blocked, approval dismissed | Back to `stage:pr-review` and request your review |
+| blocked, approval dismissed (setting off) | Back to `stage:pr-review` and request your review |
+| blocked, merge without review on | Wait (required checks pending) |
+
+Turning **Merge without review** on checks the rules on the repository's default branch through the provider (`VcsHost.mergeRules`):
+
+- **A required approving review applies** (a ruleset's pull request rule Workshop can't bypass, or classic branch protection requiring reviews): the setting is refused, because the Workshop App can't approve its own pull requests. Remove the requirement or add the App as a bypass actor.
+- **No required status checks:** allowed, with a warning that failing CI won't stop a merge. GitHub reports failing checks that aren't required as unstable, and Workshop merges those. Make CI a required status check on repositories that use this setting.
+- **Can't tell:** allowed, with a warning that says what couldn't be checked. Classic protection's review settings need the `administration` permission, which the App doesn't request, so they usually can't be read.
+
+The warning is saved when the setting is turned on and shown under the repository's settings. Rules changed later on GitHub aren't checked again; turn the setting off and on to check them.
 
 ## Nominated tickets only
 

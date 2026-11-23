@@ -113,9 +113,9 @@ async function syncReviews(repo: RepoRow) {
         if (active) await stopRun(active, 'The pull request was closed.', false);
         await stopAfterClosedPr(t);
       }
-      else if (state.stage === 'merge') continue; // still open and approved: the merge step handles it
-      else if (pr.decision === 'approved') move = moveTo(labelsOf(t), 'merge');
-      else if (pr.decision === 'changes_requested') move = moveTo(labelsOf(t), 'reclassify');
+      else if (pr.decision === 'changes_requested' && (state.stage === 'pr-review' || repo.merge_without_review)) move = moveTo(labelsOf(t), 'reclassify');
+      else if (state.stage === 'merge') continue; // still open: the merge step handles it
+      else if (pr.decision === 'approved' || repo.merge_without_review) move = moveTo(labelsOf(t), 'merge');
       if (move) await editLabels(t, move.add, move.remove);
     } catch (err) {
       // One failing pull request mustn't stop the others from being checked.

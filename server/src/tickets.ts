@@ -22,6 +22,8 @@ export interface RepoRow {
   priority: number;
   synced_at: string | null;
   selection: RepoSelection;
+  merge_without_review: number;
+  merge_warning: string | null;
 }
 
 export interface TicketRow {
@@ -97,7 +99,20 @@ export function setBlockers(t: TicketRow, refs: string[]) {
 }
 
 export function repoView(r: RepoRow): RepoView {
-  return { id: r.id, connectionId: r.vcs_connection_id, fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url, enabled: Boolean(r.enabled), image: r.image, priority: r.priority, selection: r.selection };
+  return {
+    id: r.id,
+    connectionId: r.vcs_connection_id,
+    fullName: r.full_name,
+    defaultBranch: r.default_branch,
+    private: Boolean(r.private),
+    url: r.url,
+    enabled: Boolean(r.enabled),
+    image: r.image,
+    priority: r.priority,
+    selection: r.selection,
+    mergeWithoutReview: Boolean(r.merge_without_review),
+    mergeWarning: r.merge_without_review ? r.merge_warning : null,
+  };
 }
 
 export function vcsFor(repo: RepoRow) {

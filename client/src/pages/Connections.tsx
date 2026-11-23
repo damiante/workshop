@@ -273,7 +273,7 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
     setEnabling(enabled);
     onChange(repo.id, { enabled }).finally(() => setEnabling(null));
   };
-  const saved = (): RepoDraft => ({ selection: repo.selection, priority: String(repo.priority), image: repo.image ?? '' });
+  const saved = (): RepoDraft => ({ selection: repo.selection, priority: String(repo.priority), image: repo.image ?? '', mergeWithoutReview: repo.mergeWithoutReview });
   const [draft, setDraft] = useState(saved);
   const [saving, setSaving] = useState(false);
   const changes = repoChanges(repo, draft);
@@ -297,6 +297,7 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
         <span>{repo.fullName}</span>
         {repo.private && <span className="tag">Private</span>}
         {repo.priority !== 0 && <span className="tag">Priority {repo.priority}</span>}
+        {repo.mergeWithoutReview && <span className="tag">Merges without review</span>}
         {enabling !== null && <span className="spinner" role="status" aria-label={enabling ? 'Turning on' : 'Turning off'} />}
       </label>
       {repo.enabled && enabling === null && (
@@ -322,6 +323,10 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
               <input type="number" step={1} min={-100} max={100} style={{ width: 80 }} value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: e.target.value })} />
             </label>
             <label className="row small">
+              <input type="checkbox" checked={draft.mergeWithoutReview} onChange={(e) => setDraft({ ...draft, mergeWithoutReview: e.target.checked })} />
+              <span className="muted">Merge without review</span>
+            </label>
+            <label className="row small">
               <span className="muted">Image</span>
               <input className="mono" style={{ width: 300 }} placeholder="Standard agent image" value={draft.image} onChange={(e) => setDraft({ ...draft, image: e.target.value })} />
             </label>
@@ -334,6 +339,11 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
               </button>
             )}
           </form>
+          {repo.mergeWithoutReview && repo.mergeWarning && (
+            <p className="row small">
+              <Status tone="attention">{repo.mergeWarning}</Status>
+            </p>
+          )}
           <p className="row small muted">
             <span>Needs more tools than the standard image?</span>
             {imageTicket.opened ? (
@@ -386,7 +396,7 @@ function Repos() {
       }
     >
       <div className="panel-body stack">
-        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. A new repository only works on tickets you nominate with the workshop/nominated label. Switch it to all open tickets when you're ready. Repositories with a higher priority go first: a lower one waits until every open ticket in the higher ones has been classified. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on. Set up agent image opens a ticket asking an agent to add .workshop/Dockerfile if the repository needs more tools than the standard image has. Once you merge it, Workshop builds that image and later runs use it.</p>
+        <p className="small muted">Workshop only works on repositories you turn on. Turning one on creates its workshop/ labels on GitHub. A new repository only works on tickets you nominate with the workshop/nominated label. Switch it to all open tickets when you're ready. Repositories with a higher priority go first: a lower one waits until every open ticket in the higher ones has been classified. For a repository set to nominated tickets, add the workshop/nominated label to the tickets you want worked on. Set up agent image opens a ticket asking an agent to add .workshop/Dockerfile if the repository needs more tools than the standard image has. Once you merge it, Workshop builds that image and later runs use it. Merge without review merges each pull request as soon as GitHub allows it, without waiting for your approval. Make CI a required status check first.</p>
         <input type="search" placeholder="Search repositories" aria-label="Search repositories" value={query} onChange={(e) => setQuery(e.target.value)} />
         <ErrorNote error={actionError ?? error} />
       </div>

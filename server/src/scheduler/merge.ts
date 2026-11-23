@@ -1,6 +1,7 @@
 import { raiseAlert } from '../alerts.ts';
 import { run } from '../db.ts';
 import { deleteMedia } from '../media.ts';
+import type { MergeRules } from '../providers/types.ts';
 import { getSettings } from '../settings.ts';
 import { branchOf, editLabels, getRepo, labelsOf, repoRef, rescueOf, sourceFor, vcsFor, type TicketRow } from '../tickets.ts';
 import { label, moveTo } from '../workflow/labels.ts';
@@ -64,8 +65,24 @@ export async function cleanUpClosedIssue(t: TicketRow) {
   await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running, label.needsInfo]);
 }
 
+/** What follows a warning about rules Workshop couldn't read. */
+export const UNCHECKED_TAIL = 'If that requires an approving review, pull requests will wait in merge until you approve them.';
+
+/** Whether merge without review can be turned on for `branch`, and what to warn about. */
+export function mergeWithoutReviewVerdict(branch: string, rules: MergeRules): { error: string } | { warning: string | null } {
+  if (rules.reviewRequired) {
+    return {
+      error: `${branch} requires an approving review before merging, and the Workshop App can't approve its own pull requests. Remove the review requirement, or add the App as a bypass actor, then turn this on again.`,
+    };
+  }
+  const warnings: string[] = [];
+  if (!rules.checksRequired) warnings.push(`No status checks are required on ${branch}, so failing CI won't stop a merge. Make CI a required status check.`);
+  if (rules.unknown.length) warnings.push(`Workshop couldn't check ${rules.unknown.join(' or ')}. ${UNCHECKED_TAIL}`);
+  return { warning: warnings.join(' ') || null };
+}
+
 /**
- * Moves an approved ticket towards merged without an LLM where possible.
+ * Moves an approved ticket (or any, with merge without review) towards merged without an LLM where possible.
  * Returns 'agent' when only the Merge agent can help (conflicts).
  */
 export async function advanceMerge(t: TicketRow): Promise<'merged' | 'agent' | 'waiting'> {
@@ -88,6 +105,12 @@ export async function advanceMerge(t: TicketRow): Promise<'merged' | 'agent' | '
     return 'waiting';
   }
   setPrStatus(t, pr.mergeable);
+  // With merge without review, nothing else stops a merge, so requested changes are checked here.
+  if (repo.merge_without_review && pr.decision === 'changes_requested') {
+    const back = moveTo(labelsOf(t), 'reclassify');
+    await editLabels(t, back.add, back.remove);
+    return 'waiting';
+  }
   switch (pr.mergeable) {
     case 'clean': {
       const result = await vcs.merge(ref, number);
@@ -105,7 +128,8 @@ export async function advanceMerge(t: TicketRow): Promise<'merged' | 'agent' | '
       return 'waiting';
     case 'blocked':
       // New commits (e.g. the Merge agent's) can dismiss your approval: ask for a fresh review.
-      if (pr.decision !== 'approved') {
+      // With merge without review on, Workshop waits for required checks instead of for you.
+      if (pr.decision !== 'approved' && !repo.merge_without_review) {
         const back = moveTo(labelsOf(t), 'pr-review');
         await editLabels(t, back.add, back.remove);
         await vcs.requestReview(ref, number, t.author);
