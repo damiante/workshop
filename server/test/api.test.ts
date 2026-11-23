@@ -269,6 +269,24 @@ describe('repository priority', () => {
   });
 });
 
+describe('repository settings', () => {
+  it('saves several fields at once, and none of them when one is rejected', async () => {
+    const id = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled, selection) VALUES (1, 'me/settings', 'main', 'u', 1, 'nominated')").lastInsertRowid);
+    const put = (body: object) => request(app).put(`/api/repos/${id}`).set('cookie', cookie).send(body);
+    const ok = await put({ selection: 'all', priority: 2, image: 'ghcr.io/me/agent:1' });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ selection: 'all', priority: 2, image: 'ghcr.io/me/agent:1' });
+
+    const bad = await put({ selection: 'nominated', image: 'not an image', priority: 5 });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('The image must be a Docker image reference.');
+    const badPriority = await put({ selection: 'nominated', image: '', priority: 500 });
+    expect(badPriority.status).toBe(400);
+    const row = one<{ selection: string; priority: number; image: string | null }>('SELECT selection, priority, image FROM repos WHERE id = ?', id)!;
+    expect(row).toEqual({ selection: 'all', priority: 2, image: 'ghcr.io/me/agent:1' });
+  });
+});
+
 describe('Set up agent image', () => {
   it('opens a ticket for an agent, nominated when the repository needs that, and only one at a time', async () => {
     const conn = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('tickets', 'github', 'Issues img', '{}', '', 'ok', 0, 0)").lastInsertRowid);

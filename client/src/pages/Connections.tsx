@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router';
 import type { ConnectionKind, ConnectionView, FieldDef, Installation, ProviderInfo, RepoView, TestResult } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Modal, Panel, Status } from '../components/ui.tsx';
+import { repoChanges, type RepoDraft } from '../repo-settings.ts';
 
 const SECTIONS: { kind: ConnectionKind; title: string; blurb: string }[] = [
   { kind: 'vcs', title: 'Code host', blurb: 'Where your code lives. Workshop acts through its own GitHub App.' },
@@ -267,13 +268,20 @@ function GitHubSetup({ onExisting }: { onExisting: () => void }) {
 }
 
 function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, body: object) => Promise<unknown> }) {
-  const [image, setImage] = useState(repo.image ?? '');
   const [enabling, setEnabling] = useState<boolean | null>(null);
   const toggle = (enabled: boolean) => {
     setEnabling(enabled);
     onChange(repo.id, { enabled }).finally(() => setEnabling(null));
   };
-  const [priority, setPriority] = useState(String(repo.priority));
+  const saved = (): RepoDraft => ({ selection: repo.selection, priority: String(repo.priority), image: repo.image ?? '' });
+  const [draft, setDraft] = useState(saved);
+  const [saving, setSaving] = useState(false);
+  const changes = repoChanges(repo, draft);
+  const dirty = Object.keys(changes).length > 0;
+  const save = () => {
+    setSaving(true);
+    onChange(repo.id, changes).finally(() => setSaving(false));
+  };
   const [imageTicket, setImageTicket] = useState<{ busy?: boolean; opened?: { number: number; url: string }; error?: string }>({});
   const openImageTicket = () => {
     setImageTicket({ busy: true });
@@ -292,46 +300,53 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
         {enabling !== null && <span className="spinner" role="status" aria-label={enabling ? 'Turning on' : 'Turning off'} />}
       </label>
       {repo.enabled && enabling === null && (
-        <div className="row">
-          <label className="row small">
-            <span className="muted" style={{ whiteSpace: 'nowrap' }}>
-              Tickets to work on
-            </span>
-            <select style={{ width: 'auto' }} value={repo.selection} onChange={(e) => onChange(repo.id, { selection: e.target.value })}>
-              <option value="all">All open tickets</option>
-              <option value="nominated">Only nominated tickets</option>
-            </select>
-          </label>
+        <div className="repo-settings">
           <form
             className="row"
             onSubmit={(e) => {
               e.preventDefault();
-              onChange(repo.id, { priority: Number(priority) });
+              if (dirty) save();
             }}
           >
-            <input type="number" step={1} min={-100} max={100} className="small" style={{ width: 80 }} aria-label={`Priority for ${repo.fullName}`} value={priority} onChange={(e) => setPriority(e.target.value)} />
-            <button>Save priority</button>
-          </form>
-          <form
-            className="row"
-            onSubmit={(e) => {
-              e.preventDefault();
-              onChange(repo.id, { image });
-            }}
-          >
-            <input className="mono small" style={{ width: 300 }} aria-label={`Agent image for ${repo.fullName}`} placeholder="Agent image (default)" value={image} onChange={(e) => setImage(e.target.value)} />
-            <button>Save image</button>
-          </form>
-          {imageTicket.opened ? (
-            <a className="small" href={imageTicket.opened.url} target="_blank" rel="noreferrer">
-              Opened #{imageTicket.opened.number}
-            </a>
-          ) : (
-            <button onClick={openImageTicket} disabled={imageTicket.busy}>
-              {imageTicket.busy ? 'Opening ticket…' : 'Set up agent image'}
+            <label className="row small">
+              <span className="muted" style={{ whiteSpace: 'nowrap' }}>
+                Tickets to work on
+              </span>
+              <select style={{ width: 'auto' }} value={draft.selection} onChange={(e) => setDraft({ ...draft, selection: e.target.value })}>
+                <option value="all">All open tickets</option>
+                <option value="nominated">Only nominated tickets</option>
+              </select>
+            </label>
+            <label className="row small">
+              <span className="muted">Priority</span>
+              <input type="number" step={1} min={-100} max={100} style={{ width: 80 }} value={draft.priority} onChange={(e) => setDraft({ ...draft, priority: e.target.value })} />
+            </label>
+            <label className="row small">
+              <span className="muted">Image</span>
+              <input className="mono" style={{ width: 300 }} placeholder="Standard agent image" value={draft.image} onChange={(e) => setDraft({ ...draft, image: e.target.value })} />
+            </label>
+            <button className="primary" disabled={!dirty || saving}>
+              {saving ? 'Saving…' : 'Save changes'}
             </button>
-          )}
-          {imageTicket.error && <span className="small error-text">{imageTicket.error}</span>}
+            {dirty && !saving && (
+              <button type="button" className="link small" onClick={() => setDraft(saved())}>
+                Discard
+              </button>
+            )}
+          </form>
+          <p className="row small muted">
+            <span>Needs more tools than the standard image?</span>
+            {imageTicket.opened ? (
+              <a href={imageTicket.opened.url} target="_blank" rel="noreferrer">
+                Opened #{imageTicket.opened.number}
+              </a>
+            ) : (
+              <button type="button" className="link" onClick={openImageTicket} disabled={imageTicket.busy}>
+                {imageTicket.busy ? 'Opening ticket…' : 'Set up agent image'}
+              </button>
+            )}
+            {imageTicket.error && <span className="error-text">{imageTicket.error}</span>}
+          </p>
         </div>
       )}
     </li>

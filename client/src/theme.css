@@ -861,3 +861,18 @@ input[type='checkbox'] {
     max-height: 50vh;
   }
 }
+
+.repo-settings {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.repo-settings > p {
+  margin: 0;
+}
+@media (max-width: 760px) {
+  .repo-settings {
+    align-items: flex-start;
+  }
+}
