@@ -54,11 +54,20 @@ export const ALLOWANCE_MAX_AGE_MS = 10 * 60_000;
 export function allowanceBlock(a: AllowanceView | undefined, s: Settings, now: number): string | null {
   if (a?.blockedUntil && a.blockedUntil > now) return `Claude reported you're at or near a usage limit; resumes ${formatTime(a.blockedUntil, s.timezone, now)}`;
   if (!a?.sampledAt || now - a.sampledAt > ALLOWANCE_MAX_AGE_MS) return 'Checking allowance';
-  const resets = (w: UsageWindow | null) => (w?.resetsAt ? `, resets ${formatTime(w.resetsAt, s.timezone, now)}` : '');
-  const five = used(a.fiveHour, now);
-  if (five > s.fiveHourMax) return `5-hour allowance at ${Math.round(five)}%${resets(a.fiveHour)}`;
-  const week = used(a.sevenDay, now);
-  if (week > s.weeklyMax) return `Weekly allowance at ${Math.round(week)}%${resets(a.sevenDay)}`;
+  return thresholdBlock(a, s, now)?.reason ?? null;
+}
+
+/** Which usage window is over the thresholds in Settings, or null. Launches and running agents both stop on it. */
+export function thresholdBlock(
+  w: { fiveHour: UsageWindow | null; sevenDay: UsageWindow | null },
+  s: Settings,
+  now: number,
+): { reason: string; resetsAt: number | null } | null {
+  const resets = (u: UsageWindow | null) => (u?.resetsAt ? `, resets ${formatTime(u.resetsAt, s.timezone, now)}` : '');
+  const five = used(w.fiveHour, now);
+  if (five > s.fiveHourMax) return { reason: `5-hour allowance at ${Math.round(five)}%${resets(w.fiveHour)}`, resetsAt: w.fiveHour?.resetsAt ?? null };
+  const week = used(w.sevenDay, now);
+  if (week > s.weeklyMax) return { reason: `Weekly allowance at ${Math.round(week)}%${resets(w.sevenDay)}`, resetsAt: w.sevenDay?.resetsAt ?? null };
   return null;
 }
 

@@ -88,6 +88,7 @@ const schemas: Record<string, Schema> = {
     startedAt: int,
     endedAt: nullable(int),
     resetsAt: nullable(int),
+    pauseReason: nullable(enumOf('limit', 'threshold')),
     mediaCount: int,
   }),
   TicketView: object({

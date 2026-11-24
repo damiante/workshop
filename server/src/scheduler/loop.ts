@@ -178,12 +178,13 @@ export async function mergeApproved(pushedOnly: boolean) {
   }
 }
 
-function resumePaused(s: Settings, now: number) {
+export function resumePaused(s: Settings, now: number) {
   const modeReason = modeBlock(s, new Date(now));
   const hosts = hostLoads();
   for (const r of all<RunRow>("SELECT * FROM runs WHERE status = 'paused'")) {
     if (modeReason && !getTicket(r.ticket_id)?.push) continue;
-    if (r.resets_at && r.resets_at > now) continue;
+    // A threshold pause also ends early when you raise the thresholds: allowanceBlock below decides.
+    if (r.pause_reason !== 'threshold' && r.resets_at && r.resets_at > now) continue;
     if (r.billing === 'subscription' && r.model_connection_id) {
       const block = allowanceBlock(allowanceOf(r.model_connection_id), s, now);
       if (block === 'Checking allowance') void probeAllowance(r.model_connection_id).catch(() => {});

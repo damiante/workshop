@@ -142,7 +142,8 @@ export function RunView() {
         {run.attempt > 1 && <span>Attempt {run.attempt}</span>}
         {tokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0) || null) && <span>{tokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))}</span>}
         {run.billing === 'api' && money(run.costUsd) && <span>{money(run.costUsd)}</span>}
-        {run.status === 'paused' && run.resetsAt && <span>Resumes after {clock(run.resetsAt)}</span>}
+        {run.status === 'paused' && run.pauseReason === 'threshold' && <span>Resumes when usage is under your limit{run.resetsAt ? `, by ${clock(run.resetsAt)}` : ''}</span>}
+        {run.status === 'paused' && run.pauseReason !== 'threshold' && run.resetsAt && <span>Resumes after {clock(run.resetsAt)}</span>}
       </div>
       <ErrorNote error={stopError} />
       {run.error && <p className="notice error">{run.error}</p>}

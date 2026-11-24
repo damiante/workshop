@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, clockTopics, dependencyBlock, inScope, isUnclassified, modeBlock, priorityBlock, pickHost, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
+import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isUnclassified, modeBlock, priorityBlock, pickHost, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -75,6 +75,16 @@ describe('allowance gate', () => {
 
   it('honours a limit Claude reported mid-run', () => {
     expect(allowanceBlock(a({ blockedUntil: now + 60_000 }), s(), now)).toMatch(/usage limit/);
+  });
+
+  it('says which window is over the thresholds and when it resets, for pausing running agents', () => {
+    const five = { pct: 74, resetsAt: now + 600_000 };
+    const week = { pct: 81, resetsAt: now + 86400_000 };
+    expect(thresholdBlock({ fiveHour: five, sevenDay: null }, s(), now)).toEqual({ reason: expect.stringMatching(/^5-hour allowance at 74%, resets \d\d:\d\d$/), resetsAt: five.resetsAt });
+    expect(thresholdBlock({ fiveHour: null, sevenDay: week }, s(), now)).toEqual({ reason: expect.stringMatching(/^Weekly allowance at 81%, resets /), resetsAt: week.resetsAt });
+    expect(thresholdBlock({ fiveHour: { pct: 70, resetsAt: null }, sevenDay: { pct: 80, resetsAt: null } }, s(), now)).toBeNull();
+    expect(thresholdBlock({ fiveHour: { pct: 95, resetsAt: now - 1 }, sevenDay: null }, s(), now)).toBeNull();
+    expect(thresholdBlock({ fiveHour: five, sevenDay: null }, s({ fiveHourMax: 80 }), now)).toBeNull();
   });
 });
 

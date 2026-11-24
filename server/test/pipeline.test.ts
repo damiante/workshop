@@ -23,11 +23,11 @@ const { createConnection, setConnectionStatus } = await import('../src/providers
 const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
-const { launch, resume } = await import('../src/scheduler/runner.ts');
-const { buildQueue, launchNow, mergeApproved, settleManual } = await import('../src/scheduler/loop.ts');
+const { launch, PAUSE_GRACE_MS, resume } = await import('../src/scheduler/runner.ts');
+const { buildQueue, launchNow, mergeApproved, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
-const { saveSettings } = await import('../src/settings.ts');
+const { getSettings, saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
 
 const line = (event: object) => JSON.stringify(event);
@@ -522,6 +522,159 @@ describe('runner', () => {
     expect(r).toMatchObject({ status: 'paused', resets_at: 1791897000_000, step: 'run' });
     expect(fake.env.spec('publish')).toBeUndefined();
     expect(one<{ failures: number }>('SELECT failures FROM tickets WHERE id = 1')?.failures).toBe(0);
+  });
+
+  describe('pausing at the usage thresholds', () => {
+    const RESET = Math.floor(Date.now() / 1000) + 3600;
+    const resetsAt = () => RESET;
+    const rate = (five: number) =>
+      line({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: five, resetsAt: resetsAt() }, seven_day: { utilization: 0.1, resetsAt: resetsAt() + 86400 } } } });
+    const toolUse = (id: string, parent: string | null = null) =>
+      line({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'npm test' } }] }, parent_tool_use_id: parent });
+    const toolResult = (id: string, parent: string | null = null) =>
+      line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] }, parent_tool_use_id: parent });
+    const DONE = result({ outcome: 'done', summary: 'Done.' });
+
+    /** A host whose run container prints `lines` and stops printing (exit 137) once killed. */
+    const killable = (lines: string[]) => {
+      const env = new FakeEnv({ prepare: ['ok'], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+      const state = { killedAt: -1, printed: 0 };
+      env.kill = async () => {
+        if (state.killedAt < 0) state.killedAt = state.printed;
+      };
+      env.follow = async (id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+        if (id.startsWith('publish')) return onLine({ stream: 'stdout', text: line({ before: '', after: 'def5678', ahead: 1 }) });
+        if (!id.startsWith('run')) return onLine({ stream: 'stdout', text: 'ok' });
+        for (const text of lines) {
+          if (state.killedAt >= 0) break;
+          state.printed++;
+          onLine({ stream: 'stdout', text });
+        }
+      };
+      env.wait = async (id: string) => ({ running: false, exitCode: id.startsWith('run') && state.killedAt >= 0 ? 137 : 0, oomKilled: false });
+      return { env, state };
+    };
+    const low = () => recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+
+    beforeEach(() => {
+      setConnectionStatus(ids.env, 'ok');
+      saveSettings({ mode: 'always' });
+      run('DELETE FROM alerts');
+      run('DELETE FROM allowance_samples'); // an earlier test leaves one stamped in the future
+      low();
+    });
+    afterEach(() => {
+      saveSettings({ fiveHourMax: 70, mode: 'paused' });
+      low();
+    });
+
+    it('stops the agent once its open tool calls have returned, and pauses instead of failing', async () => {
+      const { env, state } = killable([rate(0.75), toolUse('a'), toolUse('b'), toolResult('a'), toolResult('b'), toolUse('c'), DONE]);
+      fake.env = env;
+      const r = await settle(go());
+      // Not after the first result: 'b' was still running.
+      expect(state.killedAt).toBe(5);
+      expect(r).toMatchObject({ status: 'paused', step: 'run', pause_reason: 'threshold', resets_at: resetsAt() * 1000, container_id: null });
+      expect(fake.env.spec('publish')).toBeUndefined();
+      expect(JSON.parse(getTicket(1)!.labels)).not.toContain(label.running);
+      expect(one<{ failures: number }>('SELECT failures FROM tickets WHERE id = 1')?.failures).toBe(0);
+      expect(all("SELECT id FROM alerts WHERE kind = 'container-killed'")).toHaveLength(0);
+    });
+
+    it("ignores a subagent's tool calls and uses the account's stored reading", async () => {
+      // Another run on the same account reported 80%; this one hasn't had a reading of its own yet.
+      recordProbe(ids.model, { pct: 80, resetsAt: Date.now() + 1800_000 }, null);
+      const { env, state } = killable([toolUse('task'), toolUse('x', 'task'), toolResult('x', 'task'), toolResult('task'), DONE]);
+      fake.env = env;
+      const r = await settle(go());
+      expect(state.killedAt).toBe(4);
+      expect(r).toMatchObject({ status: 'paused', pause_reason: 'threshold' });
+    });
+
+    it('finishes normally when the result arrives before a turn boundary', async () => {
+      const { env, state } = killable([rate(0.75), toolUse('a'), DONE]);
+      fake.env = env;
+      expect((await settle(go())).status).toBe('succeeded');
+      expect(state.killedAt).toBe(-1);
+    });
+
+    it('lets API-billed runs carry on', async () => {
+      const { env, state } = killable([rate(0.75), toolUse('a'), toolResult('a'), DONE]);
+      fake.env = env;
+      const id = launch({ ticketId: 1, agent: 'implement', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'api' })!;
+      expect((await settle(id)).status).toBe('succeeded');
+      expect(state.killedAt).toBe(-1);
+    });
+
+    it('stops anyway after the grace period when a tool call stays open', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const { env, state } = killable([rate(0.75), toolUse('task')]);
+        let release = () => {};
+        const follow = env.follow;
+        env.follow = async (id: string, skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+          await follow(id, skip, onLine);
+          // The subagent keeps working: the stream stays open until the container is killed.
+          if (id.startsWith('run')) await new Promise<void>((resolve) => (release = resolve));
+        };
+        env.kill = async () => {
+          state.killedAt = state.printed;
+          release();
+        };
+        fake.env = env;
+        const id = go();
+        await vi.waitFor(() => expect(state.printed).toBe(2));
+        await vi.advanceTimersByTimeAsync(PAUSE_GRACE_MS - 1000);
+        expect(state.killedAt).toBe(-1);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(state.killedAt).toBe(2);
+        vi.useRealTimers();
+        expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'threshold' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('resumes when usage drops under the threshold or the threshold is raised, but a usage limit waits for its reset', async () => {
+      const { env } = killable([rate(0.75), toolUse('a'), toolResult('a'), DONE]);
+      fake.env = env;
+      const id = go();
+      await settle(id);
+      fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+      const over = () => recordProbe(ids.model, { pct: 75, resetsAt: Date.now() + 3600_000 }, null);
+
+      over();
+      resumePaused(getSettings(), Date.now());
+      expect(getRun(id)!.status).toBe('paused');
+
+      saveSettings({ fiveHourMax: 80 });
+      resumePaused(getSettings(), Date.now());
+      expect(getRun(id)).toMatchObject({ pause_reason: null, resets_at: null });
+      await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+
+      // The same reading under the threshold: a run Claude itself stopped still waits for the reset.
+      fake.env = new FakeEnv({
+        prepare: ['ok'],
+        run: [line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: resetsAt() } }), line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Usage limit reached'] })],
+      });
+      const limited = go();
+      expect(await settle(limited)).toMatchObject({ status: 'paused', pause_reason: 'limit' });
+      run("DELETE FROM allowance_samples WHERE source = 'limit'");
+      low();
+      resumePaused(getSettings(), Date.now());
+      expect(getRun(limited)!.status).toBe('paused');
+    });
+
+    it('resumes a threshold pause once a fresh reading is under the threshold', async () => {
+      const { env } = killable([rate(0.75), toolUse('a'), toolResult('a'), DONE]);
+      fake.env = env;
+      const id = go();
+      await settle(id);
+      fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+      low();
+      resumePaused(getSettings(), Date.now());
+      await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+    });
   });
 
   it("leaves a usage warning to Workshop's own thresholds instead of blocking launches", async () => {

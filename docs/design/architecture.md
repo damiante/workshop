@@ -61,11 +61,12 @@ One agent per ticket is enforced by a unique index over active runs (`runs_one_a
 
 ### Reading the 5-hour and weekly allowance
 
-Claude Code reports both windows in the first `rate_limit_event` of every headless run, as `rate_limit_info.unifiedWindows.{five_hour,seven_day}.utilization` (a fraction) and `resetsAt` (epoch seconds). This was verified with Claude Code 2.1.289 and 2.1.296 in October 2026.
+Claude Code reports both windows in every `rate_limit_event` of a headless run, as `rate_limit_info.unifiedWindows.{five_hour,seven_day}.utilization` (a fraction) and `resetsAt` (epoch seconds). This was verified with Claude Code 2.1.289 and 2.1.296 in October 2026.
 
 - Every agent run refreshes the reading for free.
 - When no reading is newer than 10 minutes and a launch is waiting, Workshop runs `usage-probe`. That's a one-turn `claude -p` with a replaced system prompt and no tools: about 700 input tokens on Haiku.
 - If Claude reports `allowed_warning`, `rejected`, or paid overage during a run, launches on that connection stop until the reset time.
+- A subscription run that goes over a threshold in Settings is stopped at its next turn boundary, once every tool call it started has returned (or after 10 minutes, if a subagent keeps one open). It waits as `paused` and resumes in the same session when usage is back under the thresholds: after the window resets, or as soon as you raise them.
 - If no reading is available, Workshop fails closed: nothing starts on the subscription and an alert explains why.
 
 The plan originally used the status-line JSON from an interactive session driven in a pseudo-terminal, because headless output didn't report usage until recently. Setup tokens from `claude setup-token` can't read the `/api/oauth/usage` endpoint (it needs `user:profile`) and that endpoint is undocumented, so it isn't used. `unifiedWindows` isn't in the Agent SDK's published types yet. If it disappears, the status-line approach is the fallback, and it fits in `usage-probe` without changing the server.

@@ -15,7 +15,7 @@ interface SampleRow {
 const window = (pct: number | null, resetsAt: number | null): UsageWindow | null => (pct === null ? null : { pct, resetsAt });
 
 export function allowanceOf(connectionId: number, name = ''): AllowanceView {
-  const probe = one<SampleRow>("SELECT * FROM allowance_samples WHERE connection_id = ? AND source = 'probe' ORDER BY ts DESC LIMIT 1", connectionId);
+  const probe = one<SampleRow>("SELECT * FROM allowance_samples WHERE connection_id = ? AND source = 'probe' ORDER BY ts DESC, rowid DESC LIMIT 1", connectionId);
   const block = one<{ blocked_until: number }>(
     "SELECT blocked_until FROM allowance_samples WHERE connection_id = ? AND source = 'limit' ORDER BY ts DESC LIMIT 1",
     connectionId,

@@ -103,7 +103,7 @@ export interface ClaudeRun {
     inputTokens?: number;
     outputTokens?: number;
   };
-  /** The subscription's 5-hour and weekly usage, reported with the first API response of every run. */
+  /** The subscription's 5-hour and weekly usage, reported with every API response. */
   usage?: { fiveHour: UsageWindow | null; sevenDay: UsageWindow | null };
   /** Set when Claude hit a usage limit or started billing paid overage. */
   limit?: { status: string; resetsAt: number | null };
@@ -111,9 +111,16 @@ export interface ClaudeRun {
   apiError?: string;
   /** Short description of the latest thing the agent did, for dashboards. */
   activity?: string;
+  /** Ids of the agent's own tool calls (not a subagent's) that haven't returned a result yet. */
+  openTools?: string[];
+  /**
+   * True right after a line that ended a turn: every tool call has returned and its result is in the session,
+   * so stopping the agent here loses nothing. False after any other line.
+   */
+  boundary?: boolean;
 }
 
-type Block = { type: string; text?: string; name?: string; input?: Record<string, unknown> };
+type Block = { type: string; id?: string; tool_use_id?: string; text?: string; name?: string; input?: Record<string, unknown> };
 
 function describeBlock(block: Block): string | undefined {
   if (block.type === 'text' && block.text?.trim()) return block.text.trim().split('\n')[0];
@@ -133,6 +140,10 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
   } catch {
     return run;
   }
+  run.boundary = false;
+  // Subagent traffic carries the id of the Task call it belongs to; only the agent's own turns count.
+  const topLevel = !event.parent_tool_use_id;
+  const content: Block[] = Array.isArray(event.message?.content) ? event.message.content : [];
   switch (event.type) {
     case 'system':
       if (event.subtype === 'init') run.sessionId = event.session_id;
@@ -141,7 +152,15 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
     case 'assistant':
       // A request that failed outright (e.g. "Not logged in") arrives as an assistant message with `error`.
       if (event.error) run.apiError = event.error;
-      for (const block of (event.message?.content ?? []) as Block[]) run.activity = describeBlock(block)?.slice(0, 200) ?? run.activity;
+      for (const block of content) {
+        run.activity = describeBlock(block)?.slice(0, 200) ?? run.activity;
+        if (topLevel && block.type === 'tool_use' && block.id) run.openTools = [...(run.openTools ?? []), block.id];
+      }
+      break;
+    case 'user':
+      if (!topLevel) break;
+      for (const block of content) if (block.type === 'tool_result') run.openTools = (run.openTools ?? []).filter((id) => id !== block.tool_use_id);
+      run.boundary = !run.openTools?.length;
       break;
     case 'rate_limit_event': {
       const info = event.rate_limit_info ?? {};

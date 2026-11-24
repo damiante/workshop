@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { AgentName, Billing } from '../api-types.ts';
 import { getAgent, promptFor, type AgentRow } from '../agents.ts';
 import { clearAlert, raiseAlert } from '../alerts.ts';
-import { recordLimit, recordProbe } from '../allowance.ts';
+import { allowanceOf, recordLimit, recordProbe } from '../allowance.ts';
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
 import { publish } from '../events.ts';
@@ -39,7 +39,7 @@ import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/medi
 import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type Rescue, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
-import { joinRefs } from './gates.ts';
+import { ALLOWANCE_MAX_AGE_MS, joinRefs, thresholdBlock } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 
 // A run moves starting (prepare) → running (claude) → publishing (push + ticket updates) → succeeded.
@@ -51,6 +51,8 @@ type StepName = 'prepare' | 'run' | 'publish';
 class HostUnreachable extends Error {}
 
 const USAGE_RECORD_MS = 30_000;
+/** How long a run over the thresholds may wait for its open tool calls (a long subagent) before it's stopped anyway. */
+export const PAUSE_GRACE_MS = 10 * 60_000;
 const driving = new Set<string>();
 export const isDriving = (id: string) => driving.has(id);
 
@@ -141,7 +143,7 @@ async function runContainer(
   ctx: Ctx,
   step: StepName,
   makeSpec: () => Promise<Pick<StepSpec, 'cmd' | 'env' | 'files'>>,
-  onStdout?: (text: string) => void,
+  onStdout?: (text: string, replayed: boolean) => void,
   timeoutMs?: number,
 ): Promise<ContainerState & { timedOut: boolean }> {
   let id = ctx.run.step === step ? ctx.run.container_id : null;
@@ -167,7 +169,7 @@ async function runContainer(
   }
   const containerId = id;
   const short = id.slice(0, 12);
-  if (reattached && onStdout) for (const e of readLog(ctx.run.id)) if (e.container === short && e.stream === 'stdout') onStdout(e.text);
+  if (reattached && onStdout) for (const e of readLog(ctx.run.id)) if (e.container === short && e.stream === 'stdout') onStdout(e.text, true);
   let timedOut = false;
   const timer = timeoutMs
     ? setTimeout(() => {
@@ -178,7 +180,7 @@ async function runContainer(
   try {
     await ctx.env.follow(containerId, reattached ? linesFrom(ctx.run.id, short) : 0, (line) => {
       appendLog(ctx.run.id, { step, stream: line.stream, text: line.text, container: short });
-      if (line.stream === 'stdout') onStdout?.(line.text);
+      if (line.stream === 'stdout') onStdout?.(line.text, false);
     });
     const state = await ctx.env.wait(containerId);
     await ctx.env.remove(containerId);
@@ -341,18 +343,56 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     recordedAt = Date.now();
     recordProbe(r.model_connection_id, claude.usage.fiveHour, claude.usage.sevenDay);
   };
+  // Over the thresholds in Settings: judged on this run's own reading and the account's latest fresh one,
+  // which other runs and probes keep current.
+  const overThreshold = () => {
+    if (r.billing !== 'subscription' || claude.result) return null;
+    const s = getSettings();
+    const now = Date.now();
+    const own = claude.usage ? thresholdBlock(claude.usage, s, now) : null;
+    if (own || !r.model_connection_id) return own;
+    const stored = allowanceOf(r.model_connection_id);
+    return stored.sampledAt && now - stored.sampledAt <= ALLOWANCE_MAX_AGE_MS ? thresholdBlock(stored, s, now) : null;
+  };
+  // Set once Workshop stops the agent for the thresholds; the run then pauses instead of failing.
+  let pausedFor = null as { reason: string; resetsAt: number | null } | null;
+  let grace: NodeJS.Timeout | undefined;
+  const pause = (over: { reason: string; resetsAt: number | null }) => {
+    clearTimeout(grace);
+    pausedFor = over;
+    activity.set(r.id, `Pausing: ${over.reason}.`);
+    publish('runs');
+    const id = getRun(r.id)?.container_id;
+    if (id) void ctx.env.kill(id).catch(() => {});
+  };
   let trailing: NodeJS.Timeout | undefined;
   const running = runContainer(
     ctx,
     'run',
     () => runSpec(ctx, agent),
-    (text) => {
+    (text, replayed) => {
       const before = claude.activity;
       const hadResult = !!claude.result;
       readClaudeLine(claude, text);
       // Every run reports current subscription usage: a free, fresh reading for the allowance gate and
       // the usage bars. Recorded whenever it changes, at most every 30 seconds.
-      if (Date.now() - recordedAt >= USAGE_RECORD_MS) recordUsage();
+      if (!replayed && Date.now() - recordedAt >= USAGE_RECORD_MS) recordUsage();
+      // Stop only where a turn ends, so no tool is cut off half-way. Lines replayed after a re-attach are history.
+      if (!replayed && !pausedFor && (claude.boundary || !grace)) {
+        const over = overThreshold();
+        if (over && claude.boundary) pause(over);
+        else if (over && claude.openTools?.length) {
+          grace = setTimeout(() => {
+            grace = undefined;
+            const still = overThreshold(); // null once the result is in, or usage is back under
+            if (still) pause(still);
+          }, PAUSE_GRACE_MS);
+        }
+        else if (!over && claude.boundary) {
+          clearTimeout(grace);
+          grace = undefined;
+        }
+      }
       if (claude.result && !hadResult) {
         // Say what the log says, the moment it says it: the container may take a while to exit.
         activity.set(r.id, claude.result.isError ? 'The agent stopped with an error.' : 'The agent finished.');
@@ -379,7 +419,10 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     agent.timeout_min * 60_000,
   );
   // Record what the run reported even if the container failed.
-  const state = await running.finally(recordUsage);
+  const state = await running.finally(() => {
+    clearTimeout(grace);
+    recordUsage();
+  });
   clearTimeout(trailing);
   activity.delete(r.id);
   publish('runs');
@@ -389,12 +432,19 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   if (res) recordSpend(r, res);
 
   if (claude.limit && r.model_connection_id) recordLimit(r.model_connection_id, claude.limit.resetsAt ?? Date.now() + 3600_000);
+  if (pausedFor && res?.structured === undefined) {
+    // Killed between turns, so the session resumes cleanly. A killed segment prints no result, so its
+    // tokens and notional cost don't reach the spend ledger; acceptable for subscription runs.
+    setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: pausedFor.resetsAt, pause_reason: 'threshold' });
+    await markRunning(ctx.ticket, false);
+    return false;
+  }
   if (state.oomKilled) {
     raiseAlert('warning', 'container-killed', `${ctx.labels['workshop.ticket']}: the ${name} agent ran out of memory on ${ctx.host.name}.`, `run:${r.id}`);
     throw new Error(`Ran out of memory (limit ${ctx.host.cfg.memoryGb ?? '?'} GB per agent on ${ctx.host.name}).`);
   }
   if (hitUsageLimit(claude)) {
-    setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: claude.limit?.resetsAt ?? Date.now() + 3600_000 });
+    setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: claude.limit?.resetsAt ?? Date.now() + 3600_000, pause_reason: 'limit' });
     await markRunning(ctx.ticket, false);
     return false;
   }
@@ -626,11 +676,11 @@ export function launch(p: {
   return id;
 }
 
-/** Continues a run paused by a usage limit, in the same Claude session on the same host. */
+/** Continues a run paused by a usage limit or the thresholds, in the same Claude session on the same host. */
 export function resume(runId: string) {
   const r = getRun(runId);
   if (r?.status !== 'paused') return;
-  setRun(runId, { status: 'running', step: 'run', container_id: null, resets_at: null, resumes: r.resumes + 1 });
+  setRun(runId, { status: 'running', step: 'run', container_id: null, resets_at: null, pause_reason: null, resumes: r.resumes + 1 });
   void drive(runId);
 }
 

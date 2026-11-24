@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AgentName, Billing, LogEntry, RunStatus, RunView } from './api-types.ts';
+import type { AgentName, Billing, LogEntry, PauseReason, RunStatus, RunView } from './api-types.ts';
 import { config } from './config.ts';
 import { all, one } from './db.ts';
 
@@ -28,6 +28,8 @@ export interface RunRow {
   output_tokens: number | null;
   cost_usd: number | null;
   resets_at: number | null;
+  /** Why a paused run waits: a usage limit Claude reported, or the thresholds in Settings. Null on older rows means 'limit'. */
+  pause_reason: PauseReason | null;
   started_at: number;
   ended_at: number | null;
   image: string | null;
@@ -74,6 +76,7 @@ function toView(r: ViewRow): RunView {
     startedAt: r.started_at,
     endedAt: r.ended_at,
     resetsAt: r.resets_at,
+    pauseReason: r.pause_reason,
     mediaCount: r.media_count,
   };
 }

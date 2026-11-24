@@ -199,9 +199,13 @@ export interface RunView {
   startedAt: number;
   endedAt: number | null;
   resetsAt: number | null;
+  /** Why a paused run waits: 'limit' (Claude reported a usage limit) or 'threshold' (usage is over your Settings limit). */
+  pauseReason: PauseReason | null;
   /** How many images this run added to the ticket's media store. */
   mediaCount: number;
 }
+
+export type PauseReason = 'limit' | 'threshold';
 
 export interface MediaItem {
   name: string;

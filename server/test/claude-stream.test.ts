@@ -82,4 +82,40 @@ describe('readClaudeLine', () => {
     const run = read({ ...RATE_ALLOWED, rate_limit_info: { ...RATE_ALLOWED.rate_limit_info, isUsingOverage: true } });
     expect(run.limit?.status).toBe('overage');
   });
+
+  describe('turn boundaries', () => {
+    // Shapes as in real stream-json: tool calls carry ids, results name the call, subagent lines name their Task call.
+    const use = (ids: string[], parent: string | null = null) => ({
+      type: 'assistant',
+      message: { role: 'assistant', content: ids.map((id) => ({ type: 'tool_use', id, name: 'Bash', input: { command: 'ls' } })) },
+      parent_tool_use_id: parent,
+      session_id: 's1',
+    });
+    const done = (id: string, parent: string | null = null) => ({
+      type: 'user',
+      message: { role: 'user', content: [{ tool_use_id: id, type: 'tool_result', content: 'ok', is_error: false }] },
+      parent_tool_use_id: parent,
+      session_id: 's1',
+    });
+
+    it('ends a turn only once every parallel tool call has returned', () => {
+      const run: ClaudeRun = {};
+      const step = (e: object) => readClaudeLine(run, JSON.stringify(e));
+      step(use(['toolu_a', 'toolu_b']));
+      expect(run).toMatchObject({ openTools: ['toolu_a', 'toolu_b'], boundary: false });
+      step(done('toolu_a'));
+      expect(run).toMatchObject({ openTools: ['toolu_b'], boundary: false });
+      step(done('toolu_b'));
+      expect(run).toMatchObject({ openTools: [], boundary: true });
+      step(RATE_ALLOWED);
+      expect(run.boundary).toBe(false);
+    });
+
+    it("ignores a subagent's tool calls", () => {
+      const run = read(use(['toolu_task']), use(['toolu_x'], 'toolu_task'), done('toolu_x', 'toolu_task'));
+      expect(run).toMatchObject({ openTools: ['toolu_task'], boundary: false });
+      expect(readClaudeLine(run, JSON.stringify(done('toolu_task')))).toMatchObject({ openTools: [], boundary: true });
+    });
+  });
+
 });

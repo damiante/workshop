@@ -21,7 +21,8 @@ function RunLine({ run, now }: { run: RunView; now: number }) {
         <span>{run.model}</span>
         <span>on {run.environment ?? 'a removed host'}</span>
         <span>for {duration(run.startedAt, now)}</span>
-        {run.status === 'paused' && run.resetsAt && <span>resumes after {clock(run.resetsAt)}</span>}
+        {run.status === 'paused' && run.pauseReason === 'threshold' && <span>resumes when usage is under your limit{run.resetsAt ? `, by ${clock(run.resetsAt)}` : ''}</span>}
+        {run.status === 'paused' && run.pauseReason !== 'threshold' && run.resetsAt && <span>resumes after {clock(run.resetsAt)}</span>}
       </div>
     </div>
   );

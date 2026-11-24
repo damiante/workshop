@@ -206,6 +206,7 @@ export const MIGRATIONS = [
   ALTER TABLE repos ADD COLUMN merge_without_review INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE repos ADD COLUMN merge_warning TEXT; -- what the branch check warned about when merge without review was turned on
   `,
+  `ALTER TABLE runs ADD COLUMN pause_reason TEXT; -- while paused: 'limit' (Claude refused) or 'threshold' (your Settings limit)`,
 ];
 
 export let db: DatabaseSync;
