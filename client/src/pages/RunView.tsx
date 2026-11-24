@@ -4,7 +4,7 @@ import type { LogEntry, RunView as Run } from '../../../server/src/api-types.ts'
 import { api, useApi, useNow } from '../api.ts';
 import { Markdown } from '../components/Markdown.tsx';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
-import { AGENT_LABEL, clock, duration, money, RUN_STATUS, tokens } from '../format.ts';
+import { AGENT_LABEL, clock, duration, money, runStatus, tokens } from '../format.ts';
 import { LiveStream } from '../live.ts';
 import { addEntry, emptyTranscript, type Item } from '../transcript.ts';
 
@@ -42,7 +42,8 @@ export function RunView() {
   const transcript = useRef(emptyTranscript());
   const [, setVersion] = useState(0);
   const [following, setFollowing] = useState(true);
-  const [stopError, setStopError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     transcript.current = emptyTranscript();
@@ -93,13 +94,21 @@ export function RunView() {
 
   if (!run) return <ErrorNote error={error} />;
   const active = ACTIVE.includes(run.status);
-  const status = RUN_STATUS[run.status];
+  const status = runStatus(run);
   const { items, todos } = transcript.current;
 
+  const act = (action: 'stop' | 'pause' | 'resume') => {
+    setBusy(true);
+    api(`/runs/${run.id}/${action}`, { body: {} })
+      .then(() => setActionError(null), (e: Error) => setActionError(e.message))
+      .finally(() => setBusy(false));
+  };
   const stop = () => {
     if (!confirm('Stop this run? The ticket gets the workshop/failed label, so it won’t start again until you remove it.')) return;
-    api(`/runs/${run.id}/stop`, { body: {} }).then(() => setStopError(null), (e: Error) => setStopError(e.message));
+    act('stop');
   };
+  const working = run.status === 'starting' || run.status === 'running';
+  const pausedByYou = run.status === 'paused' && run.pauseReason === 'manual';
 
   return (
     <div className="stack">
@@ -124,6 +133,26 @@ export function RunView() {
           <a className="button" href={`/api/runs/${run.id}/export`} download>
             Export log
           </a>
+          {working && !run.pauseRequested && (
+            <button disabled={busy} onClick={() => act('pause')} title="Stop after the current step and free the host until you resume it">
+              Pause
+            </button>
+          )}
+          {working && run.pauseRequested && (
+            <button disabled={busy} onClick={() => act('resume')}>
+              Keep working
+            </button>
+          )}
+          {run.status === 'paused' && !pausedByYou && (
+            <button disabled={busy} onClick={() => act('pause')} title="Stay paused after the limit resets, until you resume it">
+              Keep paused
+            </button>
+          )}
+          {pausedByYou && (
+            <button className="primary" disabled={busy} onClick={() => act('resume')}>
+              Resume
+            </button>
+          )}
           {active && (
             <button className="danger" onClick={stop}>
               Stop
@@ -143,9 +172,13 @@ export function RunView() {
         {tokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0) || null) && <span>{tokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))}</span>}
         {run.billing === 'api' && money(run.costUsd) && <span>{money(run.costUsd)}</span>}
         {run.status === 'paused' && run.pauseReason === 'threshold' && <span>Resumes when usage is under your limit{run.resetsAt ? `, by ${clock(run.resetsAt)}` : ''}</span>}
-        {run.status === 'paused' && run.pauseReason !== 'threshold' && run.resetsAt && <span>Resumes after {clock(run.resetsAt)}</span>}
+        {run.status === 'paused' && (run.pauseReason ?? 'limit') === 'limit' && run.resetsAt && <span>Resumes after {clock(run.resetsAt)}</span>}
+        {working && run.pauseRequested && <span>Pauses after the current step</span>}
       </div>
-      <ErrorNote error={stopError} />
+      {pausedByYou && (
+        <p className="small muted">Resuming continues the same conversation; its first step re-reads the conversation so far, which uses some extra usage.</p>
+      )}
+      <ErrorNote error={actionError} />
       {run.error && <p className="notice error">{run.error}</p>}
       {run.summary && <Markdown className="notice ok" text={run.summary} />}
       {todos.length > 0 && (

@@ -5,7 +5,7 @@ import { useApi, useNow } from '../api.ts';
 import { Gallery, plainClick } from '../components/Gallery.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
-import { AGENT_LABEL, clock, duration, RUN_STATUS, STAGE_TEXT } from '../format.ts';
+import { AGENT_LABEL, clock, duration, runStatus, STAGE_TEXT } from '../format.ts';
 import { TicketStatus } from './Tickets.tsx';
 
 const stageText = (r: RunView) => AGENT_LABEL[r.agent] + (r.mode === 'delta' ? ', requested changes' : '') + (r.attempt > 1 ? `, attempt ${r.attempt}` : '');
@@ -80,7 +80,7 @@ export function Ticket() {
               </li>
             )}
             {runs.map((r) => {
-              const status = RUN_STATUS[r.status];
+              const status = runStatus(r);
               const shots = media.filter((m) => m.runId === r.id);
               return (
                 <li key={r.id} className="stack" style={{ gap: 4 }}>

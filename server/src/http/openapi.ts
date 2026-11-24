@@ -88,7 +88,8 @@ const schemas: Record<string, Schema> = {
     startedAt: int,
     endedAt: nullable(int),
     resetsAt: nullable(int),
-    pauseReason: nullable(enumOf('limit', 'threshold')),
+    pauseReason: nullable(enumOf('limit', 'threshold', 'manual')),
+    pauseRequested: bool,
     mediaCount: int,
   }),
   TicketView: object({
@@ -315,6 +316,22 @@ const paths: Record<string, Record<string, Op>> = {
   '/runs': { get: { summary: 'Agent runs, newest first.', query: { ticket: 'Only runs for this ticket id.' }, ok: array(ref('RunView')) } },
   '/runs/{id}': { get: { summary: 'One run.', params: ['id'], ok: ref('RunView'), errors: [404] } },
   '/runs/{id}/stop': { post: { summary: 'Stops a run.', params: ['id'], ok: ref('RunView'), errors: [403, 404] } },
+  '/runs/{id}/pause': {
+    post: {
+      summary: "Pauses a run at its next turn boundary and frees its host slot. It stays paused until you resume it. On a run paused for usage, it stays paused after the limit resets.",
+      params: ['id'],
+      ok: ref('RunView'),
+      errors: [403, 404, 409],
+    },
+  },
+  '/runs/{id}/resume': {
+    post: {
+      summary: "Resumes a run you paused, in the same Claude session, ignoring the operation mode and hours. Needs a free slot on the run's host and enough Claude allowance. On a run that hasn't stopped yet, cancels the pause.",
+      params: ['id'],
+      ok: ref('RunView'),
+      errors: [403, 404, 409],
+    },
+  },
   '/runs/{id}/log': {
     get: {
       summary: 'The run log as server-sent events: everything so far, then live lines. Each event is a LogEntry; the event id is the line index (send Last-Event-ID or ?after=<index> to resume). Once the run is no longer active the stream sends an `end` event and closes.',

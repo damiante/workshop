@@ -3,10 +3,10 @@ import { Link } from 'react-router';
 import type { ConnectionView, Overview, RepoView, RunView, Settings, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi, useNow } from '../api.ts';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
-import { AGENT_LABEL, clock, duration, RUN_STATUS } from '../format.ts';
+import { AGENT_LABEL, clock, duration, runStatus } from '../format.ts';
 
 function RunLine({ run, now }: { run: RunView; now: number }) {
-  const status = RUN_STATUS[run.status];
+  const status = runStatus(run);
   return (
     <div className="stack" style={{ gap: 4 }}>
       <div className="spread">
@@ -22,7 +22,9 @@ function RunLine({ run, now }: { run: RunView; now: number }) {
         <span>on {run.environment ?? 'a removed host'}</span>
         <span>for {duration(run.startedAt, now)}</span>
         {run.status === 'paused' && run.pauseReason === 'threshold' && <span>resumes when usage is under your limit{run.resetsAt ? `, by ${clock(run.resetsAt)}` : ''}</span>}
-        {run.status === 'paused' && run.pauseReason !== 'threshold' && run.resetsAt && <span>resumes after {clock(run.resetsAt)}</span>}
+        {run.status === 'paused' && (run.pauseReason ?? 'limit') === 'limit' && run.resetsAt && <span>resumes after {clock(run.resetsAt)}</span>}
+        {run.status === 'paused' && run.pauseReason === 'manual' && <span>waits for you to resume it</span>}
+        {run.pauseRequested && <span>pauses after the current step</span>}
       </div>
     </div>
   );

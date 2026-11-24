@@ -1,4 +1,4 @@
-import type { AgentName, RunStatus, Stage } from '../../server/src/api-types.ts';
+import type { AgentName, RunStatus, RunView, Stage } from '../../server/src/api-types.ts';
 
 export const AGENT_LABEL: Record<AgentName, string> = {
   classifier: 'Classifier',
@@ -30,6 +30,11 @@ export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone }> = {
 };
 
 export type Tone = 'ok' | 'attention' | 'error' | 'idle' | 'running';
+
+/** A run's status label, telling a pause you made apart from one for usage. */
+export function runStatus(run: Pick<RunView, 'status' | 'pauseReason'>): { label: string; tone: Tone } {
+  return run.status === 'paused' && run.pauseReason === 'manual' ? { label: 'Paused by you', tone: 'attention' } : RUN_STATUS[run.status];
+}
 
 export function duration(from: number, to = Date.now()) {
   const minutes = Math.max(0, Math.round((to - from) / 60_000));

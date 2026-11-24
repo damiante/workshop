@@ -34,7 +34,7 @@ case "${1:-}" in
     if [ -n "${MAX_TURNS:-}" ]; then args+=(--max-turns "$MAX_TURNS"); fi
     if [ -n "${MAX_BUDGET_USD:-}" ]; then args+=(--max-budget-usd "$MAX_BUDGET_USD"); fi
     if [ -n "${RESUME:-}" ]; then
-      # Paused by a usage limit: same session, same workspace.
+      # Paused (usage or by hand): same session, same workspace.
       exec claude "${args[@]}" --resume "$SESSION_ID" \
         "Continue the task from where you stopped. When it's finished, return the structured result."
     fi

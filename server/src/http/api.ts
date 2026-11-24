@@ -10,8 +10,8 @@ import { listMedia, mediaDir, mediaView } from '../media.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
 import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews, ticketRunViews } from '../runs.ts';
 import { pushRefusal, withinHours } from '../scheduler/gates.ts';
-import { hostViews, kick, launchNow, queueView, startOfDay, syncSoon } from '../scheduler/loop.ts';
-import { stopRun } from '../scheduler/runner.ts';
+import { hostViews, kick, launchNow, queueView, resumeNow, startOfDay, syncSoon } from '../scheduler/loop.ts';
+import { requestPause, stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend } from '../spend.ts';
 import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
@@ -352,6 +352,16 @@ apiRouter.get('/runs/:id', (req, res) => {
 
 apiRouter.post('/runs/:id/stop', async (req, res) => {
   await stopRun(req.params.id, 'Stopped from Workshop.', true);
+  res.json(runView(req.params.id));
+});
+
+apiRouter.post('/runs/:id/pause', (req, res) => {
+  requestPause(req.params.id);
+  res.json(runView(req.params.id));
+});
+
+apiRouter.post('/runs/:id/resume', (req, res) => {
+  resumeNow(req.params.id);
   res.json(runView(req.params.id));
 });
 

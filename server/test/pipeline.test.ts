@@ -23,8 +23,8 @@ const { createConnection, setConnectionStatus } = await import('../src/providers
 const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
-const { launch, PAUSE_GRACE_MS, resume } = await import('../src/scheduler/runner.ts');
-const { buildQueue, launchNow, mergeApproved, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
+const { launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
+const { buildQueue, hostLoads, launchNow, mergeApproved, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
@@ -674,6 +674,218 @@ describe('runner', () => {
       low();
       resumePaused(getSettings(), Date.now());
       await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+    });
+  });
+
+  describe('pausing by hand', () => {
+    const toolUse = (id: string) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'npm test' } }] } });
+    const toolResult = (id: string) => line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+    const DONE = result({ outcome: 'done', summary: 'Done.' });
+    const PUSHED = line({ before: '', after: 'def5678', ahead: 1 });
+
+    /** A host whose run container prints what the test says, when it says it, until it's killed or finishes. */
+    const live = () => {
+      const env = new FakeEnv({ prepare: ['ok'], publish: [PUSHED] });
+      const stream = { emit: null as ((text: string) => void) | null, end: () => {}, killed: false };
+      env.follow = async (id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+        if (!id.startsWith('run')) return onLine({ stream: 'stdout', text: id.startsWith('publish') ? PUSHED : 'ok' });
+        await new Promise<void>((resolve) => {
+          stream.emit = (text) => onLine({ stream: 'stdout', text });
+          stream.end = resolve;
+        });
+      };
+      env.kill = async () => {
+        stream.killed = true;
+        stream.end();
+      };
+      env.wait = async (id: string) => ({ running: false, exitCode: id.startsWith('run') && stream.killed ? 137 : 0, oomKilled: false });
+      fake.env = env;
+      const say = async (...texts: string[]) => {
+        await vi.waitFor(() => expect(stream.emit).not.toBeNull());
+        for (const t of texts) stream.emit!(t);
+      };
+      return { env, stream, say };
+    };
+    const low = () => recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+    /** Pauses a fresh run by hand: asked mid-tool call, stopped at the boundary. */
+    const pausedRun = async () => {
+      const { say } = live();
+      const id = go();
+      await say(toolUse('a'));
+      requestPause(id);
+      await say(toolResult('a'));
+      await settle(id);
+      return id;
+    };
+
+    beforeEach(() => {
+      setConnectionStatus(ids.env, 'ok');
+      run('DELETE FROM allowance_samples');
+      low();
+    });
+    afterEach(() => {
+      saveSettings({ mode: 'paused' });
+      low();
+    });
+
+    it("waits for the agent's tool call, then parks the run until you resume it and frees the host", async () => {
+      const { stream, say } = live();
+      const id = go();
+      await say(toolUse('a'));
+      requestPause(id);
+      expect(getRun(id)!.pause_requested_at).toBeTypeOf('number');
+      expect(stream.killed).toBe(false);
+      await say(toolResult('a'));
+      expect(stream.killed).toBe(true);
+      const r = await settle(id);
+      expect(r).toMatchObject({ status: 'paused', step: 'run', pause_reason: 'manual', resets_at: null, pause_requested_at: null, container_id: null });
+      expect(fake.env.spec('publish')).toBeUndefined();
+      expect(JSON.parse(getTicket(1)!.labels)).not.toContain(label.running);
+      expect(hostLoads().find((h) => h.id === ids.env)!.busy).toBe(0);
+      expect(readLog(id).map((e) => e.text)).toContain('Pause requested from Workshop. The agent stops after its current step.');
+    });
+
+    it('pauses at once when the agent is already between turns', async () => {
+      const { stream, say } = live();
+      const id = go();
+      await say(toolUse('a'), toolResult('a'));
+      requestPause(id);
+      expect(stream.killed).toBe(true);
+      expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'manual' });
+    });
+
+    it('stops anyway after the grace period when a tool call stays open', async () => {
+      const { stream, say } = live();
+      const id = go();
+      await say(toolUse('task'));
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        requestPause(id);
+        await vi.advanceTimersByTimeAsync(PAUSE_GRACE_MS - 1000);
+        expect(stream.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(stream.killed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'manual' });
+    });
+
+    it('publishes as normal when the result arrives first', async () => {
+      const { stream, say } = live();
+      const id = go();
+      await say(toolUse('a'));
+      requestPause(id);
+      await say(DONE);
+      stream.end();
+      expect(await settle(id)).toMatchObject({ status: 'succeeded', pause_requested_at: null });
+      expect(stream.killed).toBe(false);
+    });
+
+    it('honours a request made while the run is starting at the first boundary of the run step', async () => {
+      const { stream, say } = live();
+      const id = go();
+      expect(getRun(id)!.status).toBe('starting');
+      requestPause(id);
+      await say(toolUse('a'));
+      expect(stream.killed).toBe(false);
+      await say(toolResult('a'));
+      expect(stream.killed).toBe(true);
+      expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'manual' });
+    });
+
+    it('never resumes by itself', async () => {
+      const id = await pausedRun();
+      saveSettings({ mode: 'always' });
+      resumePaused(getSettings(), Date.now() + 86400_000);
+      expect(getRun(id)!.status).toBe('paused');
+    });
+
+    it('keeps a run paused for usage paused after the limit resets', async () => {
+      fake.env = new FakeEnv({
+        prepare: ['ok'],
+        run: [line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 60 } }), line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Usage limit reached'] })],
+      });
+      const id = go();
+      const before = await settle(id);
+      expect(before.pause_reason).toBe('limit');
+      requestPause(id);
+      expect(getRun(id)).toMatchObject({ status: 'paused', pause_reason: 'manual', resets_at: before.resets_at });
+      run("DELETE FROM allowance_samples WHERE source = 'limit'");
+      low();
+      saveSettings({ mode: 'always' });
+      resumePaused(getSettings(), before.resets_at! + 1000);
+      expect(getRun(id)!.status).toBe('paused');
+    });
+
+    it('refuses to pause a run that is publishing or has ended', async () => {
+      fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [PUSHED] });
+      const id = go();
+      await settle(id);
+      expect(() => requestPause(id)).toThrow('This run has already ended.');
+      run("UPDATE runs SET status = 'publishing', ended_at = NULL WHERE id = ?", id);
+      expect(() => requestPause(id)).toThrow("can't be paused");
+      expect(() => requestPause('nope')).toThrow('Run not found.');
+    });
+
+    describe('resumeNow', () => {
+      it('resumes the same session, even while Workshop is paused', async () => {
+        const id = await pausedRun();
+        fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [PUSHED] });
+        resumeNow(id);
+        expect(getRun(id)).toMatchObject({ status: 'running', resumes: 1, pause_reason: null });
+        await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+        expect(fake.env.spec('run')!.env!.RESUME).toBe('1');
+        expect(readLog(id).map((e) => e.text)).toContain('Resumed from Workshop.');
+      });
+
+      it('refuses while the host has no free slot', async () => {
+        const id = await pausedRun();
+        run(
+          `INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at)
+           VALUES (1, 98, 'Other', '', 'https://github.com/me/app/issues/98', 'me', 'open', '[]', '2026-10-13T00:00:00Z')`,
+        );
+        const other = one<{ id: number }>('SELECT id FROM tickets WHERE number = 98')!.id;
+        try {
+          run("INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model, billing, status, started_at) VALUES ('busy', ?, 'implement', 'normal', 1, ?, 'm', 'subscription', 'running', 0)", other, ids.env);
+          expect(() => resumeNow(id)).toThrow('box has no free agent slot. Pause or stop another agent there, or resume this one when a slot frees up.');
+          expect(getRun(id)!.status).toBe('paused');
+        } finally {
+          run("DELETE FROM runs WHERE id = 'busy'");
+          run('DELETE FROM tickets WHERE id = ?', other);
+        }
+      });
+
+      it('refuses while usage is over the thresholds', async () => {
+        const id = await pausedRun();
+        recordProbe(ids.model, { pct: 95, resetsAt: Date.now() + 3600_000 }, null);
+        expect(() => resumeNow(id)).toThrow(/^Can't resume yet: /);
+        expect(getRun(id)!.status).toBe('paused');
+      });
+
+      it('refuses a run you did not pause', async () => {
+        fake.env = new FakeEnv({
+          prepare: ['ok'],
+          run: [line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 600 } }), line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Usage limit reached'] })],
+        });
+        const id = go();
+        await settle(id);
+        expect(() => resumeNow(id)).toThrow('Only a run you paused can be resumed.');
+      });
+
+      it('cancels a pause that has not happened yet', async () => {
+        const { stream, say } = live();
+        const id = go();
+        await say(toolUse('a'));
+        requestPause(id);
+        resumeNow(id);
+        expect(getRun(id)!.pause_requested_at).toBeNull();
+        await say(toolResult('a'));
+        expect(stream.killed).toBe(false);
+        await say(DONE);
+        stream.end();
+        expect((await settle(id)).status).toBe('succeeded');
+      });
     });
   });
 

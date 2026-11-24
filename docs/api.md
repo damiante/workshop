@@ -48,6 +48,12 @@ curl -X PUT $WORKSHOP/api/tickets/12/prioritised -H "Authorization: Bearer $TOKE
 curl -X PUT $WORKSHOP/api/hosts/3 -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"available":false}'
 
+# Pause a run at its next step, freeing its host slot until you resume it
+curl -X POST $WORKSHOP/api/runs/<run id>/pause -H "Authorization: Bearer $TOKEN"
+
+# Resume a run you paused (or cancel a pause that hasn't happened yet)
+curl -X POST $WORKSHOP/api/runs/<run id>/resume -H "Authorization: Bearer $TOKEN"
+
 # Stop a run
 curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 ```
@@ -55,6 +61,12 @@ curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 ## Launching
 
 `POST /api/tickets/:id/launch` starts whatever agent the ticket is due next and answers 202 with the run. It ignores the operation mode and operating hours, so it works while Workshop is paused. Every other check still applies: dependencies, a chosen model, the Claude allowance, the API cap and a free agent host. If one blocks the launch you get 409 with the reason.
+
+## Pausing a run
+
+`POST /api/runs/:id/pause` asks a starting or running agent to stop at its next turn boundary, once every tool call it started has returned (or after 10 minutes, if one stays open). It then waits as `paused` with `pauseReason: "manual"`, and its host slot goes to the next ticket in the queue. Until it stops, the run shows `pauseRequested: true`. A manual pause never resumes by itself. On a run already paused for usage it makes the pause manual, so the run stays paused after the limit resets. It answers with the run; 409 for a run that is publishing or has ended.
+
+`POST /api/runs/:id/resume` continues a run you paused, in the same Claude session and workspace. Like launching, it ignores the operation mode and hours, but it needs a free slot on the run's own host and, for subscription runs, enough Claude allowance; otherwise you get 409 with the reason, and can try again later. On a run that hasn't stopped yet, it cancels the pause. The first step after resuming re-reads the whole conversation (the prompt cache has expired by then), which costs roughly the size of the conversation once. Comments added to the ticket while it was paused aren't seen.
 
 ## Pushing a ticket
 

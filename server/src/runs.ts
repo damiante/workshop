@@ -28,8 +28,10 @@ export interface RunRow {
   output_tokens: number | null;
   cost_usd: number | null;
   resets_at: number | null;
-  /** Why a paused run waits: a usage limit Claude reported, or the thresholds in Settings. Null on older rows means 'limit'. */
+  /** Why a paused run waits: a usage limit Claude reported, the thresholds in Settings, or you ('manual'). Null on older rows means 'limit'. */
   pause_reason: PauseReason | null;
+  /** While starting or running: when you asked it to pause at the next turn boundary. */
+  pause_requested_at: number | null;
   started_at: number;
   ended_at: number | null;
   image: string | null;
@@ -77,6 +79,7 @@ function toView(r: ViewRow): RunView {
     endedAt: r.ended_at,
     resetsAt: r.resets_at,
     pauseReason: r.pause_reason,
+    pauseRequested: (r.status === 'starting' || r.status === 'running') && r.pause_requested_at != null,
     mediaCount: r.media_count,
   };
 }

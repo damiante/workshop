@@ -207,6 +207,7 @@ export const MIGRATIONS = [
   ALTER TABLE repos ADD COLUMN merge_warning TEXT; -- what the branch check warned about when merge without review was turned on
   `,
   `ALTER TABLE runs ADD COLUMN pause_reason TEXT; -- while paused: 'limit' (Claude refused) or 'threshold' (your Settings limit)`,
+  `ALTER TABLE runs ADD COLUMN pause_requested_at INTEGER; -- while starting/running: when you asked to pause at the next turn boundary`,
 ];
 
 export let db: DatabaseSync;

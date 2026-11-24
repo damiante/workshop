@@ -120,6 +120,7 @@ Scripts can do the same, launch agents and read usage over HTTP with an API toke
 - **A ticket that failed twice** gets `workshop/failed` and a comment with the error. Fix what's needed and remove the label to retry.
 - **Watch an agent:** click a running agent to see its live transcript (its messages, every command and file it touched, and its to-do list). **Stop** kills it and labels the ticket `workshop/failed` so it won't restart until you remove the label.
 - **Usage limits:** if an agent hits your limit mid-run, it's paused rather than failed, and resumes in the same session after the window resets.
+- **Pausing by hand:** **Pause** on a run's page stops the agent after its current step and frees its host slot for something more important. It stays paused until you click **Resume**, which continues the same conversation; that first step re-reads the conversation so far, so it uses some extra usage.
 - **Backfill spend:** `docker exec workshop node src/backfill-spend.ts` fills the project for older spend. Add `--from <copy of an old workshop.db>` (placed in the data volume) to recover runs that cleanup has since deleted.
 - **Alerts** report hosts going offline, killed or out-of-memory containers, rejected Claude credentials, failed syncs and merges, and failed allowance checks.
 

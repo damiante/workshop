@@ -896,3 +896,44 @@ describe('merge without review', () => {
     expect(res.body.error).toBe('Say whether to merge without review.');
   });
 });
+
+describe('pausing and resuming a run', () => {
+  const post = (id: string, action: 'pause' | 'resume') => request(app).post(`/api/runs/${id}/${action}`).set('cookie', cookie);
+  let ticket = 0;
+
+  beforeAll(() => {
+    run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('tickets', 'github', 'Pause issues', '{}', '', 'ok', 0, 0)");
+    const conn = one<{ id: number }>("SELECT id FROM connections WHERE name = 'Pause issues'")!.id;
+    run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled) VALUES (?, ?, 'me/pause', 'main', 'u', 1)", conn, conn);
+    const repo = one<{ id: number }>("SELECT id FROM repos WHERE full_name = 'me/pause'")!.id;
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 60, 'P', '', 'u', 'me', 'open', '[]', 'x')", repo);
+    ticket = one<{ id: number }>('SELECT id FROM tickets WHERE repo_id = ? AND number = 60', repo)!.id;
+  });
+
+  const add = (id: string, status: string) =>
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, 'implement', 1, 'm', 'subscription', ?, 0)", id, ticket, status);
+
+  it('answers 404 for an unknown run', async () => {
+    expect((await post('nope', 'pause')).status).toBe(404);
+    expect((await post('nope', 'resume')).status).toBe(404);
+  });
+
+  it('refuses to pause a run that has ended', async () => {
+    add('p-ended', 'succeeded');
+    const res = await post('p-ended', 'pause');
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('This run has already ended.');
+  });
+
+  it('asks a running agent to pause, and takes it back on resume', async () => {
+    add('p-running', 'running');
+    const paused = await post('p-running', 'pause');
+    expect(paused.status).toBe(200);
+    expect(paused.body).toMatchObject({ status: 'running', pauseRequested: true });
+    const kept = await post('p-running', 'resume');
+    expect(kept.status).toBe(200);
+    expect(kept.body).toMatchObject({ status: 'running', pauseRequested: false });
+    expect((await post('p-running', 'resume')).status).toBe(409);
+    run("UPDATE runs SET status = 'cancelled' WHERE id = 'p-running'");
+  });
+});

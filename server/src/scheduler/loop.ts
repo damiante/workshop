@@ -8,7 +8,7 @@ import { sweepMedia } from '../media.ts';
 import { publish } from '../events.ts';
 import { readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts';
 import { environmentOf, getConnection, listConnections, modelsOf, setConnectionStatus } from '../providers/index.ts';
-import { deleteLog, RUNNING_SQL, type RunRow } from '../runs.ts';
+import { appendLog, deleteLog, getRun, RUNNING_SQL, type RunRow } from '../runs.ts';
 import { check } from '../http/util.ts';
 import { getSettings } from '../settings.ts';
 import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
@@ -16,7 +16,7 @@ import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
-import { drive, isDriving, launch, onRunSettled, resume } from './runner.ts';
+import { cancelPause, drive, isDriving, launch, onRunSettled, resume } from './runner.ts';
 import { syncRepo } from './sync.ts';
 
 const TICK_MS = 60_000;
@@ -182,6 +182,7 @@ export function resumePaused(s: Settings, now: number) {
   const modeReason = modeBlock(s, new Date(now));
   const hosts = hostLoads();
   for (const r of all<RunRow>("SELECT * FROM runs WHERE status = 'paused'")) {
+    if (r.pause_reason === 'manual') continue; // waits for you to resume it
     if (modeReason && !getTicket(r.ticket_id)?.push) continue;
     // A threshold pause also ends early when you raise the thresholds: allowanceBlock below decides.
     if (r.pause_reason !== 'threshold' && r.resets_at && r.resets_at > now) continue;
@@ -239,6 +240,31 @@ export function launchNow(ticketId: number): string {
   const id = startCandidate(c);
   check(id, busy, 409);
   return id;
+}
+
+/**
+ * Resumes a run you paused, now. Like launchNow, the operation mode and hours are skipped; the run's
+ * own host needs a free slot, and a subscription run enough allowance. On a run that hasn't stopped
+ * yet, cancels the pause instead.
+ */
+export function resumeNow(runId: string) {
+  const r = getRun(runId);
+  check(r, 'Run not found.', 404);
+  if (cancelPause(runId)) return;
+  check(r.status === 'paused' && r.pause_reason === 'manual', 'Only a run you paused can be resumed.', 409);
+  const host = hostLoads().find((h) => h.id === r.environment_id);
+  const name = host?.name ?? getConnection(r.environment_id)?.name ?? 'The agent host';
+  check(host, 'The agent host for this run was removed, so it can only be stopped.', 409);
+  check(host.healthy, `${name} is offline. Resume this run when it's back.`, 409);
+  check(host.busy < host.slots, `${name} has no free agent slot. Pause or stop another agent there, or resume this one when a slot frees up.`, 409);
+  if (r.billing === 'subscription' && r.model_connection_id) {
+    const block = allowanceBlock(allowanceOf(r.model_connection_id), getSettings(), Date.now());
+    if (block === 'Checking allowance') void probeAllowance(r.model_connection_id).catch(() => {});
+    check(!block, `Can't resume yet: ${block}.`, 409);
+  }
+  appendLog(runId, { step: 'workshop', stream: 'stdout', text: 'Resumed from Workshop.' });
+  resume(runId);
+  kick();
 }
 
 export function startOfDay(now: number, timeZone: string) {

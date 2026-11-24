@@ -2,7 +2,7 @@ import { Link } from 'react-router';
 import type { RunView } from '../../../server/src/api-types.ts';
 import { useApi, useNow } from '../api.ts';
 import { ErrorNote, Status } from '../components/ui.tsx';
-import { AGENT_LABEL, clock, duration, money, RUN_STATUS, tokens } from '../format.ts';
+import { AGENT_LABEL, clock, duration, money, runStatus, tokens } from '../format.ts';
 
 export function Runs() {
   const { data, error } = useApi<RunView[]>('/runs', ['runs']);
@@ -44,7 +44,7 @@ export function Runs() {
                   <td className="small">{r.model}</td>
                   <td className="small">{r.environment ?? '–'}</td>
                   <td>
-                    <Status tone={RUN_STATUS[r.status].tone}>{RUN_STATUS[r.status].label}</Status>
+                    <Status tone={runStatus(r).tone}>{runStatus(r).label}</Status>
                   </td>
                   <td className="small">{duration(r.startedAt, r.endedAt ?? now)}</td>
                   <td className="small muted">

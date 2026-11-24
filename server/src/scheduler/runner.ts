@@ -39,6 +39,7 @@ import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/medi
 import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type Rescue, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
+import { check } from '../http/util.ts';
 import { ALLOWANCE_MAX_AGE_MS, joinRefs, thresholdBlock } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 
@@ -55,6 +56,8 @@ const USAGE_RECORD_MS = 30_000;
 export const PAUSE_GRACE_MS = 10 * 60_000;
 const driving = new Set<string>();
 export const isDriving = (id: string) => driving.has(id);
+/** Running agents' "a pause was just requested" callbacks, so a request acts at once when the agent is between turns. */
+const pauseSignals = new Map<string, () => void>();
 
 let settled = () => {};
 /** Called whenever a run stops being driven (the scheduler uses it to look for the next job). */
@@ -354,17 +357,39 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     const stored = allowanceOf(r.model_connection_id);
     return stored.sampledAt && now - stored.sampledAt <= ALLOWANCE_MAX_AGE_MS ? thresholdBlock(stored, s, now) : null;
   };
-  // Set once Workshop stops the agent for the thresholds; the run then pauses instead of failing.
-  let pausedFor = null as { reason: string; resetsAt: number | null } | null;
+  // Why the agent should stop at the next turn boundary, if it should. A pause you asked for wins.
+  type PauseFor = { kind: 'manual' | 'threshold'; reason: string; resetsAt: number | null };
+  const wantPause = (): PauseFor | null => {
+    if (claude.result) return null;
+    if (getRun(r.id)?.pause_requested_at) return { kind: 'manual', reason: 'you paused it', resetsAt: null };
+    const over = overThreshold();
+    return over && { kind: 'threshold', ...over };
+  };
+  // Set once Workshop stops the agent; the run then pauses instead of failing.
+  let pausedFor = null as PauseFor | null;
   let grace: NodeJS.Timeout | undefined;
-  const pause = (over: { reason: string; resetsAt: number | null }) => {
+  const pause = (why: PauseFor) => {
     clearTimeout(grace);
-    pausedFor = over;
-    activity.set(r.id, `Pausing: ${over.reason}.`);
+    pausedFor = why;
+    activity.set(r.id, `Pausing: ${why.reason}.`);
     publish('runs');
     const id = getRun(r.id)?.container_id;
     if (id) void ctx.env.kill(id).catch(() => {});
   };
+  const startGrace = () => {
+    grace = setTimeout(() => {
+      grace = undefined;
+      const still = wantPause(); // null once the result is in, usage is back under, or you said keep working
+      if (still) pause(still);
+    }, PAUSE_GRACE_MS);
+  };
+  pauseSignals.set(r.id, () => {
+    if (pausedFor) return;
+    const want = wantPause();
+    if (want && claude.boundary) pause(want);
+    else if (want && claude.openTools?.length && !grace) startGrace();
+    // Otherwise the agent is mid-reply, and its next line decides.
+  });
   let trailing: NodeJS.Timeout | undefined;
   const running = runContainer(
     ctx,
@@ -379,16 +404,10 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
       if (!replayed && Date.now() - recordedAt >= USAGE_RECORD_MS) recordUsage();
       // Stop only where a turn ends, so no tool is cut off half-way. Lines replayed after a re-attach are history.
       if (!replayed && !pausedFor && (claude.boundary || !grace)) {
-        const over = overThreshold();
-        if (over && claude.boundary) pause(over);
-        else if (over && claude.openTools?.length) {
-          grace = setTimeout(() => {
-            grace = undefined;
-            const still = overThreshold(); // null once the result is in, or usage is back under
-            if (still) pause(still);
-          }, PAUSE_GRACE_MS);
-        }
-        else if (!over && claude.boundary) {
+        const want = wantPause();
+        if (want && claude.boundary) pause(want);
+        else if (want && claude.openTools?.length) startGrace();
+        else if (!want && claude.boundary) {
           clearTimeout(grace);
           grace = undefined;
         }
@@ -421,6 +440,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   // Record what the run reported even if the container failed.
   const state = await running.finally(() => {
     clearTimeout(grace);
+    pauseSignals.delete(r.id);
     recordUsage();
   });
   clearTimeout(trailing);
@@ -434,8 +454,9 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   if (claude.limit && r.model_connection_id) recordLimit(r.model_connection_id, claude.limit.resetsAt ?? Date.now() + 3600_000);
   if (pausedFor && res?.structured === undefined) {
     // Killed between turns, so the session resumes cleanly. A killed segment prints no result, so its
-    // tokens and notional cost don't reach the spend ledger; acceptable for subscription runs.
-    setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: pausedFor.resetsAt, pause_reason: 'threshold' });
+    // tokens and cost don't reach the spend ledger: acceptable for subscription runs, an undercount for
+    // API runs you pause by hand (see docs/workshop/80-feature-manual-pause.md).
+    setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: pausedFor.resetsAt, pause_reason: pausedFor.kind, pause_requested_at: null });
     await markRunning(ctx.ticket, false);
     return false;
   }
@@ -462,7 +483,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   const parsed = parseResult(r.agent, res.structured);
   if (typeof parsed === 'string') throw new Error(`The agent's result was invalid: ${parsed}`);
   await copyBackMedia(ctx, parsed);
-  setRun(r.id, { status: 'publishing', step: null, container_id: null, result: JSON.stringify(parsed), summary: summarize(parsed) });
+  setRun(r.id, { status: 'publishing', step: null, container_id: null, result: JSON.stringify(parsed), summary: summarize(parsed), pause_requested_at: null });
   return true;
 }
 
@@ -676,12 +697,42 @@ export function launch(p: {
   return id;
 }
 
-/** Continues a run paused by a usage limit or the thresholds, in the same Claude session on the same host. */
+/** Continues a paused run (usage limit, thresholds or by hand) in the same Claude session on the same host. */
 export function resume(runId: string) {
   const r = getRun(runId);
   if (r?.status !== 'paused') return;
-  setRun(runId, { status: 'running', step: 'run', container_id: null, resets_at: null, pause_reason: null, resumes: r.resumes + 1 });
+  setRun(runId, { status: 'running', step: 'run', container_id: null, resets_at: null, pause_reason: null, pause_requested_at: null, resumes: r.resumes + 1 });
   void drive(runId);
+}
+
+/**
+ * Asks a run to pause by hand. A starting or running agent stops at its next turn boundary; a run
+ * already paused for usage stays paused after the limit resets. Either way it waits for you to resume it.
+ */
+export function requestPause(runId: string) {
+  const r = getRun(runId);
+  check(r, 'Run not found.', 404);
+  check(r.status !== 'publishing', "The agent has finished and is publishing its work, so it can't be paused.", 409);
+  check(ACTIVE_STATUSES.includes(r.status), 'This run has already ended.', 409);
+  if (r.status === 'paused') {
+    if (r.pause_reason === 'manual') return;
+    setRun(runId, { pause_reason: 'manual' });
+    appendLog(runId, { step: 'workshop', stream: 'stdout', text: 'Kept paused from Workshop. It waits for you to resume it, even after the usage limit resets.' });
+    return;
+  }
+  if (r.pause_requested_at) return;
+  setRun(runId, { pause_requested_at: Date.now() });
+  appendLog(runId, { step: 'workshop', stream: 'stdout', text: 'Pause requested from Workshop. The agent stops after its current step.' });
+  pauseSignals.get(runId)?.();
+}
+
+/** Takes back a pause you asked for that hasn't happened yet. Returns false if there was none. */
+export function cancelPause(runId: string): boolean {
+  const r = getRun(runId);
+  if (!r || (r.status !== 'starting' && r.status !== 'running') || !r.pause_requested_at) return false;
+  setRun(runId, { pause_requested_at: null });
+  appendLog(runId, { step: 'workshop', stream: 'stdout', text: 'Pause cancelled from Workshop. The agent keeps working.' });
+  return true;
 }
 
 export async function fail(runId: string, message: string) {
