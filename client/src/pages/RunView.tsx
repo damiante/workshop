@@ -173,6 +173,7 @@ export function RunView() {
         {run.billing === 'api' && money(run.costUsd) && <span>{money(run.costUsd)}</span>}
         {run.status === 'paused' && run.pauseReason === 'threshold' && <span>Resumes when usage is under your limit{run.resetsAt ? `, by ${clock(run.resetsAt)}` : ''}</span>}
         {run.status === 'paused' && (run.pauseReason ?? 'limit') === 'limit' && run.resetsAt && <span>Resumes after {clock(run.resetsAt)}</span>}
+        {run.status === 'paused' && run.pauseReason === 'connection' && <span>Moving to another Claude subscription</span>}
         {working && run.pauseRequested && <span>Pauses after the current step</span>}
       </div>
       {pausedByYou && (

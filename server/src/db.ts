@@ -223,6 +223,10 @@ export const MIGRATIONS = [
   ALTER TABLE connections ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
   UPDATE connections SET position = id;
   `,
+  // A paused AI model connection keeps its settings, but no new agent uses it.
+  `ALTER TABLE connections ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;`,
+  // The Claude connection a run just moved off; cleared at its first turn boundary on the new one.
+  `ALTER TABLE runs ADD COLUMN switched_from INTEGER;`,
   `
   -- Usage limits per Claude connection (were global settings).
   ALTER TABLE connections ADD COLUMN five_hour_max REAL NOT NULL DEFAULT 70;

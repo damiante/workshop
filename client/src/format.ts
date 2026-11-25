@@ -31,9 +31,11 @@ export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone }> = {
 
 export type Tone = 'ok' | 'attention' | 'error' | 'idle' | 'running';
 
-/** A run's status label, telling a pause you made apart from one for usage. */
+/** A run's status label, telling a pause you made, or a move off a paused subscription, apart from one for usage. */
 export function runStatus(run: Pick<RunView, 'status' | 'pauseReason'>): { label: string; tone: Tone } {
-  return run.status === 'paused' && run.pauseReason === 'manual' ? { label: 'Paused by you', tone: 'attention' } : RUN_STATUS[run.status];
+  if (run.status === 'paused' && run.pauseReason === 'manual') return { label: 'Paused by you', tone: 'attention' };
+  if (run.status === 'paused' && run.pauseReason === 'connection') return { label: 'Paused: subscription paused', tone: 'attention' };
+  return RUN_STATUS[run.status];
 }
 
 export function duration(from: number, to = Date.now()) {

@@ -24,6 +24,7 @@ function RunLine({ run, now }: { run: RunView; now: number }) {
         {run.status === 'paused' && run.pauseReason === 'threshold' && <span>resumes when usage is under your limit{run.resetsAt ? `, by ${clock(run.resetsAt)}` : ''}</span>}
         {run.status === 'paused' && (run.pauseReason ?? 'limit') === 'limit' && run.resetsAt && <span>resumes after {clock(run.resetsAt)}</span>}
         {run.status === 'paused' && run.pauseReason === 'manual' && <span>waits for you to resume it</span>}
+        {run.status === 'paused' && run.pauseReason === 'connection' && <span>moving to another Claude subscription</span>}
         {run.pauseRequested && <span>pauses after the current step</span>}
       </div>
     </div>
