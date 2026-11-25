@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addNeeds, applyEdits, branchFor, describeStep, labelDiff, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
-import { parseResult, type Finding, type Rescue } from '../src/workflow/schemas.ts';
+import { parseResult, schemaFor, type Finding, type Rescue } from '../src/workflow/schemas.ts';
 import { MAX_FINDINGS_SHOWN, planTransition, reviewSection, stageForRework, type PlanContext } from '../src/workflow/transitions.ts';
 import { capabilitiesOf, DEFAULT_PROMPTS, environmentText, protocolText, taskPrompt } from '../src/workflow/prompts.ts';
 import { stepPriority } from '../src/scheduler/gates.ts';
@@ -557,6 +557,20 @@ describe('code review', () => {
     expect(notes).toContain(`${'d'.repeat(1000)}…`);
     expect(notes).not.toContain('d'.repeat(1001));
     expect(notes.length).toBeLessThan(65_536);
+  });
+
+  it('stays well under GitHub\'s body limit however long the fields are', () => {
+    const long = 'x'.repeat(20_000);
+    const many = Array.from({ length: 40 }, () => finding({ title: long, detail: long, evidence: long, fix: long, file: `a\`b${long}` }));
+    const notes = reviewSection(done(many, { summary: long }), true);
+    expect(notes.length).toBeLessThan(50_000);
+    expect(notes).toMatch(/\d+ more findings left out/);
+    expect(notes).not.toContain('a`b');
+  });
+
+  it('requires findings in the schema given to Claude', () => {
+    expect(schemaFor('code-review')).toMatchObject({ required: ['outcome', 'summary', 'findings'] });
+    expect(schemaFor('implement')).toMatchObject({ required: ['outcome', 'summary'] });
   });
 
   describe('parseResult', () => {

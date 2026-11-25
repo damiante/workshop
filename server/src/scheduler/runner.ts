@@ -655,14 +655,15 @@ async function publishRun(ctx: Ctx) {
     // Without a handoff (the ticket was moved to code review by hand), the reviewer's summary describes the work.
     await openOrUpdatePr(ctx, t, handoffOf(t) ?? { runId: r.id, result: result as WorkResult }, plan.reviewNotes, plan.flagged);
   }
-  // After the pull request opens: if opening it fails, the retried review must still know about this round's rework.
-  if ('rework' in plan) run('UPDATE tickets SET rework = ? WHERE id = ?', plan.rework ? JSON.stringify(plan.rework) : null, t.id);
+  // A rework is stored before the label edit, and cleared only once everything else is done: either way, a
+  // retry after a partial failure opens the pull request rather than sending the ticket back again.
+  if (plan.rework) run('UPDATE tickets SET rework = ? WHERE id = ?', JSON.stringify(plan.rework), t.id);
   if (plan.deleteBranch) await vcs.deleteBranch(repo, plan.deleteBranch).catch((err) => warn(r.id, `Workshop couldn't delete ${plan.deleteBranch}: ${(err as Error).message}`));
   if (plan.clearRescue) run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
   await editLabels(t, plan.add, [...plan.remove, label.running]);
   if (plan.comment) await sourceFor(ctx.repo).comment(repo, t.number, plan.comment);
-  // The handoff goes last, so a retry after a partial failure still has the Implementation summary.
-  run(`UPDATE tickets SET failures = 0${plan.openPr ? ', handoff = NULL' : ''} WHERE id = ?`, t.id);
+  // The handoff goes last too, so a retry after a partial failure still has the Implementation summary.
+  run(`UPDATE tickets SET failures = 0${plan.rework === null ? ', rework = NULL' : ''}${plan.openPr ? ', handoff = NULL' : ''} WHERE id = ?`, t.id);
   setRun(r.id, { status: 'succeeded', step: null, container_id: null, ended_at: Date.now() });
   if (r.volume) await ctx.env.removeVolume(r.volume).then(() => setRun(r.id, { volume: null }), () => {});
   if (plan.merge) {

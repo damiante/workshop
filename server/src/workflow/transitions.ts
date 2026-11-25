@@ -60,7 +60,11 @@ const NEXT_TEXT = { implement: 'implementation', design: 'design', 'design-revie
 export const MAX_REWORKS = 1;
 /** At most this many findings go into a comment or pull request: GitHub rejects bodies over 65,536 characters. */
 export const MAX_FINDINGS_SHOWN = 30;
+/** Findings stop once the list reaches this many characters, well under GitHub's limit with the rest of the body. */
+const MAX_FINDINGS_CHARS = 40_000;
 const MAX_FINDING_TEXT = 1000;
+const MAX_TITLE = 200;
+const MAX_SUMMARY = 4000;
 
 /** Where severe findings send a ticket: design when the design is at fault and the ticket has one, else implementation. */
 export function stageForRework(size: Size | null, findings: Finding[]): 'design' | 'implement' | null {
@@ -73,21 +77,26 @@ export function stageForRework(size: Size | null, findings: Finding[]): 'design'
 const SEVERITY_ORDER: Finding['severity'][] = ['severe', 'moderate', 'minor'];
 const SEVERITY_TEXT = { severe: 'Severe', moderate: 'Moderate', minor: 'Minor' } as const;
 
-const clip = (text: string) => {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  return flat.length > MAX_FINDING_TEXT ? `${flat.slice(0, MAX_FINDING_TEXT)}…` : flat;
-};
+const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
+const clip = (text: string, max = MAX_FINDING_TEXT) => cut(text.replace(/\s+/g, ' ').trim(), max);
 
 export function formatFinding(f: Finding): string {
-  const where = f.file ? ` (\`${f.file}${f.line ? `:${f.line}` : ''}\`)` : '';
-  return `- **${SEVERITY_TEXT[f.severity]}**${where} ${clip(f.title)}: ${clip(f.detail)}\n  Checked: ${clip(f.evidence)}\n  Fix: ${clip(f.fix)}`;
+  const where = f.file ? ` (\`${clip(f.file.replace(/`/g, ''), MAX_TITLE)}${f.line ? `:${f.line}` : ''}\`)` : '';
+  return `- **${SEVERITY_TEXT[f.severity]}**${where} ${clip(f.title, MAX_TITLE)}: ${clip(f.detail)}\n  Checked: ${clip(f.evidence)}\n  Fix: ${clip(f.fix)}`;
 }
 
-/** The findings as a Markdown list, most severe first, capped at MAX_FINDINGS_SHOWN. */
+/** The findings as a Markdown list, most severe first, capped at MAX_FINDINGS_SHOWN and MAX_FINDINGS_CHARS. */
 export function formatFindings(findings: Finding[]): string {
   const sorted = [...findings].sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity));
-  const lines = sorted.slice(0, MAX_FINDINGS_SHOWN).map(formatFinding);
-  const left = sorted.length - MAX_FINDINGS_SHOWN;
+  const lines: string[] = [];
+  let size = 0;
+  for (const f of sorted.slice(0, MAX_FINDINGS_SHOWN)) {
+    const text = formatFinding(f);
+    if (size + text.length > MAX_FINDINGS_CHARS) break;
+    lines.push(text);
+    size += text.length + 1;
+  }
+  const left = sorted.length - lines.length;
   if (left > 0) lines.push(`\n_${left} more finding${left === 1 ? '' : 's'} left out; see the Code reviewer's run._`);
   return lines.join('\n');
 }
@@ -100,7 +109,7 @@ export function reviewSection(r: ReviewResult, exhausted: boolean): string {
   return [
     '### Code review',
     exhausted ? EXHAUSTED_TEXT : '',
-    r.summary.trim(),
+    cut(r.summary.trim(), MAX_SUMMARY),
     findings.length ? formatFindings(findings) : 'No problems found.',
     r.tests ? `**Reviewer ran:** ${r.tests}` : '',
   ].filter(Boolean).join('\n\n');
@@ -156,7 +165,7 @@ function planReview(ctx: PlanContext, r: ReviewResult): Plan {
       comment: [
         `Code review found ${problems(severe.length)}, so Workshop sends this ticket back to ${where} (rework ${count + 1} of ${MAX_REWORKS}):`,
         formatFindings(severe),
-        r.summary.trim(),
+        cut(r.summary.trim(), MAX_SUMMARY),
         `Next: ${where}.`,
       ].filter(Boolean).join('\n\n'),
     };

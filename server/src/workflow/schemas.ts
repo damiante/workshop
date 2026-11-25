@@ -108,7 +108,7 @@ const REVIEW_SCHEMA = {
     ...WORK_SCHEMA.properties,
     findings: {
       type: 'array',
-      description: 'Every problem you found, each reported once. Empty when there are none (outcome done).',
+      description: 'Every problem you found, each reported once. An empty list when there are none, or with needs_info or failed.',
       items: {
         type: 'object',
         properties: {
@@ -131,6 +131,7 @@ const REVIEW_SCHEMA = {
       },
     },
   },
+  required: [...WORK_SCHEMA.required, 'findings'],
 };
 
 const SCHEMAS: Partial<Record<AgentName, object>> = { classifier: CLASSIFIER_SCHEMA, 'code-review': REVIEW_SCHEMA };

@@ -1199,6 +1199,26 @@ describe('code review', () => {
     expect(ticketLabels()).toContain(label.stage('pr-review'));
   });
 
+  it('retries an exhausted review whose label edit failed by opening the pull request again, never sending it back', async () => {
+    await implement('Added a dark theme.');
+    await review([severe()]);
+    await implement('Tried again.', { before: 'bbb', after: 'ccc', ahead: 2 });
+    fake.tickets.setLabels.mockImplementation(async (_repo: unknown, _n: number, add: string[]) => {
+      if (add.includes(label.stage('pr-review'))) throw new Error('GitHub is down');
+    });
+    expect((await review([severe()])).r.status).toBe('failed');
+    expect(getTicket(1)!.pr_number).toBe(7);
+    expect(JSON.parse(getTicket(1)!.rework!)).toMatchObject({ count: 1 });
+    expect(getTicket(1)!.handoff).not.toBeNull();
+    fake.tickets.setLabels.mockImplementation(async () => {});
+
+    await review([severe()]);
+    expect(ticketLabels()).toContain(label.stage('pr-review'));
+    expect(fake.vcs.commentOnPullRequest.mock.calls[0][2]).toMatch(/^Updated after review\.\n\n### Code review\n\n\*\*The code review still found[\s\S]*Tried again\./);
+    expect(getTicket(1)!.rework).toBeNull();
+    expect(getTicket(1)!.handoff).toBeNull();
+  });
+
   it('holds a flagged pull request with needs-info when the repository merges without review', async () => {
     run('UPDATE repos SET merge_without_review = 1 WHERE id = 1');
     try {
