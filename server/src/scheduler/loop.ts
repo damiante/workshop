@@ -16,7 +16,7 @@ import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, pickSubscription, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
-import { cancelPause, drive, isDriving, launch, onRunSettled, resume } from './runner.ts';
+import { abortRun, cancelPause, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
 import { syncRepo } from './sync.ts';
 
 const TICK_MS = 60_000;
@@ -195,12 +195,48 @@ export async function mergeApproved(pushedOnly: boolean) {
   }
 }
 
+/** Every Claude subscription in your order that isn't paused, with the models it offers and what holds it back. */
+function subscriptions(s: Settings, now: number) {
+  return listConnections('model')
+    .filter((c) => !c.paused && modelsOf(c).billing().includes('subscription'))
+    .map((c) => ({ id: c.id, provider: c.provider, models: modelsOf(c).models().map((m) => m.id), block: allowanceBlock(allowanceOf(c.id), s, now), failing: probeFailing(c.id, now) }));
+}
+
+/** The subscriptions that can run `model` for `provider`. The agent's own connection (`own`) counts as offering its model. */
+const offering = (pool: ReturnType<typeof subscriptions>, provider: string, model: string, own?: number) =>
+  pool.filter((c) => c.provider === provider && (c.id === own || c.models.includes(model)));
+
+/**
+ * Where a subscription run on a paused connection can carry on: the subscription the queue would pick for
+ * its model, even one held back by your limits (the run then waits there). Null when none offers the model.
+ */
+function moveTarget(r: RunRow, s: Settings, now: number) {
+  const conn = getConnection(r.model_connection_id);
+  return conn ? pickSubscription(offering(subscriptions(s, now), conn.provider, r.model)) : null;
+}
+
+/** Subscription runs only: the connection the run is on is paused. */
+const onPausedSubscription = (r: RunRow) => r.billing === 'subscription' && Boolean(getConnection(r.model_connection_id)?.paused);
+
 export function resumePaused(s: Settings, now: number) {
   const modeReason = modeBlock(s, new Date(now));
   const hosts = hostLoads();
-  for (const r of all<RunRow>("SELECT * FROM runs WHERE status = 'paused'")) {
-    if (r.pause_reason === 'manual') continue; // waits for you to resume it
-    if (modeReason && !getTicket(r.ticket_id)?.push) continue;
+  for (let r of all<RunRow>("SELECT * FROM runs WHERE status = 'paused'")) {
+    if (onPausedSubscription(r)) {
+      const to = moveTarget(r, s, now);
+      if (to) {
+        switchConnection(r.id, to.id);
+        r = getRun(r.id)!;
+      } else if (r.pause_reason !== 'manual') {
+        // Nothing can take it over: start the stage again once a subscription can.
+        const name = getConnection(r.model_connection_id)!.name;
+        void abortRun(r.id, `${name} was paused and no other Claude subscription offers ${r.model}, so Workshop stopped this agent. A new one starts this stage again when a subscription is free.`);
+        continue;
+      }
+    }
+    if (r.pause_reason === 'manual') continue; // waits for you to resume it (Resume explains a paused subscription)
+    // A run moving off a paused subscription was already working, so the operation mode and hours don't hold it.
+    if (modeReason && r.pause_reason !== 'connection' && !getTicket(r.ticket_id)?.push) continue;
     // A threshold pause also ends early when you raise the thresholds: allowanceBlock below decides.
     if (r.pause_reason !== 'threshold' && r.resets_at && r.resets_at > now) continue;
     if (r.billing === 'subscription' && r.model_connection_id) {
@@ -274,9 +310,17 @@ export function resumeNow(runId: string) {
   check(host, 'The agent host for this run was removed, so it can only be stopped.', 409);
   check(host.healthy, `${name} is offline. Resume this run when it's back.`, 409);
   check(host.busy < host.slots, `${name} has no free agent slot. Pause or stop another agent there, or resume this one when a slot frees up.`, 409);
-  if (r.billing === 'subscription' && r.model_connection_id) {
-    const block = allowanceBlock(allowanceOf(r.model_connection_id), getSettings(), Date.now());
-    if (block === 'Checking allowance') void probeAllowance(r.model_connection_id).catch(() => {});
+  const s = getSettings();
+  const now = Date.now();
+  if (onPausedSubscription(r)) {
+    const to = moveTarget(r, s, now);
+    check(to, `${getConnection(r.model_connection_id)!.name} is paused and no other Claude subscription offers ${r.model}. Resume a subscription on the Connections page first.`, 409);
+    switchConnection(runId, to.id);
+  }
+  const connectionId = getRun(runId)!.model_connection_id;
+  if (r.billing === 'subscription' && connectionId) {
+    const block = allowanceBlock(allowanceOf(connectionId), s, now);
+    if (block === 'Checking allowance') void probeAllowance(connectionId).catch(() => {});
     check(!block, `Can't resume yet: ${block}.`, 409);
   }
   appendLog(runId, { step: 'workshop', stream: 'stdout', text: 'Resumed from Workshop.' });
@@ -309,10 +353,7 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
   const waiting = rows
     .filter((t) => isAllowedAuthor(t.author) && ticketInScope(t, repos.get(t.repo_id)!) && isUnclassified(labelsOf(t), true, blockersOf(t)))
     .map((t) => ({ repo: repos.get(t.repo_id)!.full_name, priority: repos.get(t.repo_id)!.priority }));
-  // Every Claude subscription in your order that isn't paused, with what holds it back.
-  const subscriptions = listConnections('model')
-    .filter((c) => !c.paused && modelsOf(c).billing().includes('subscription'))
-    .map((c) => ({ id: c.id, provider: c.provider, block: allowanceBlock(allowanceOf(c.id), s, now), failing: probeFailing(c.id, now) }));
+  const pool = subscriptions(s, now);
   const out: (Candidate & { priority: number; repoPriority: number })[] = [];
   for (const t of rows) {
     const repo = repos.get(t.repo_id)!;
@@ -332,13 +373,15 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
       blockedBy = `${conn!.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`;
     }
     let useConnection = conn;
-    if (!blockedBy && cls.billing === 'api') blockedBy = conn!.paused ? `${conn!.name} is paused. Resume it on the Connections page, or choose another connection for ${name} on the Agents page` : apiCapBlock(spentToday, s);
+    // API-billed agents use their connection's key, paused or not: pausing only manages subscriptions.
+    if (!blockedBy && cls.billing === 'api') blockedBy = apiCapBlock(spentToday, s);
     else if (!blockedBy) {
-      const pick = pickSubscription(subscriptions.filter((c) => c.provider === conn!.provider));
+      const pick = pickSubscription(offering(pool, conn!.provider, cls.model!, conn!.id));
       if (pick) {
         useConnection = getConnection(pick.id);
         blockedBy = pick.block;
-      } else blockedBy = 'Every Claude subscription is paused. Resume one on the Connections page';
+      } else if (pool.some((c) => c.provider === conn!.provider)) blockedBy = `No Claude subscription that isn't paused offers ${cls.model}. Resume one on the Connections page`;
+      else blockedBy = 'Every Claude subscription is paused. Resume one on the Connections page';
     }
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
     out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), priority: stepPriority(step), repoPriority: repo.priority });

@@ -35,7 +35,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 
 ## Run lifecycle
 
-`runs.status`: `starting` (prepare container) → `running` (claude) → `publishing` (push and ticket updates) → `succeeded`. It can also end `failed`, `cancelled` or `lost`, or wait in `paused` for a usage limit to reset, for usage to drop under the thresholds, or for you to resume it (`pause_reason`: `limit`, `threshold`, `manual`). `pause_requested_at` is a pending pause you asked for: `runAgent` stops at the next turn boundary, and a manual pause never resumes by itself (`resumeNow` does that).
+`runs.status`: `starting` (prepare container) → `running` (claude) → `publishing` (push and ticket updates) → `succeeded`. It can also end `failed`, `cancelled` or `lost`, or wait in `paused` for a usage limit to reset, for usage to drop under the thresholds, for you to resume it, or for a move off a paused subscription (`pause_reason`: `limit`, `threshold`, `manual`, `connection`; `loop.resumePaused` does the move, or cancels the run so the stage starts again when nothing can take it). `pause_requested_at` is a pending pause you asked for: `runAgent` stops at the next turn boundary, and a manual pause never resumes by itself (`resumeNow` does that).
 
 - `status`, `step` and `container_id` are written before each container starts. `drive(runId)` can therefore pick up any active run after a restart or a lost host, and `loop.reattachRuns` does exactly that. Keep every step re-entrant:
   - `prepare` and `publish` may simply run again;

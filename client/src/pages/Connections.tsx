@@ -196,7 +196,8 @@ function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEd
       .catch((e: Error) => setTest({ ok: false, message: e.message }))
       .finally(() => setToggling(false));
   };
-  const isModel = c.kind === 'model';
+  // Pausing manages subscriptions, so only connections with a subscription token (or already paused) offer it.
+  const canPause = c.kind === 'model' && ('oauthToken' in c.secrets || c.paused);
   const pause = () => {
     setToggling(true);
     api(`/connections/${c.id}/paused`, { method: 'PUT', body: { paused: !c.paused } })
@@ -217,7 +218,9 @@ function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEd
         <Status tone={c.status === 'ok' ? 'ok' : c.status === 'error' ? 'error' : 'idle'}>{c.status === 'ok' ? 'Working' : c.status === 'error' ? 'Not working' : 'Not checked yet'}</Status>
       </div>
       {isHost && !available && <span className="small muted">Switched off: no new agents start here. Running agents carry on.</span>}
-      {isModel && c.paused && <span className="small muted">Paused: new agents use your other connections. Its settings are kept, and running agents carry on.</span>}
+      {c.kind === 'model' && c.paused && (
+        <span className="small muted">Paused: subscription agents use your other subscriptions, and running ones move over after their current step. API-billed agents still use its API key. Its settings are kept.</span>
+      )}
       {specs && <span className="small muted">{specs}</span>}
       {credentials && <span className="small muted">{credentials}</span>}
       {c.status === 'error' && c.error && <span className="small error-text">{c.error}</span>}
@@ -232,7 +235,7 @@ function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEd
             {available ? 'Switch off' : 'Switch on'}
           </button>
         )}
-        {isModel && (
+        {canPause && (
           <button onClick={pause} disabled={toggling}>
             {c.paused ? 'Resume' : 'Pause'}
           </button>

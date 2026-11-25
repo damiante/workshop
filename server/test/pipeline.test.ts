@@ -5,13 +5,14 @@ import { tar } from '../src/providers/docker/tar.ts';
 import type { StepSpec } from '../src/providers/types.ts';
 
 // The providers are replaced with fakes; everything else (DB, runner, transitions) is real.
-const fake = vi.hoisted(() => ({ env: null as any, vcs: null as any, tickets: null as any, models: null as any }));
+// `modelsFor`, when set, gives each connection its own models provider (its token and model list).
+const fake = vi.hoisted(() => ({ env: null as any, vcs: null as any, tickets: null as any, models: null as any, modelsFor: null as ((c: any) => any) | null }));
 vi.mock('../src/providers/index.ts', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   environmentOf: () => fake.env,
   vcsOf: () => fake.vcs,
   ticketsOf: () => fake.tickets,
-  modelsOf: () => fake.models,
+  modelsOf: (c: unknown) => fake.modelsFor?.(c) ?? fake.models,
 }));
 
 const { seedAgents, updateAgent } = await import('../src/agents.ts');
@@ -23,7 +24,7 @@ const { createConnection, reorderConnections, setConnectionPaused, setConnection
 const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
-const { launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
+const { connectionPaused, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
 const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
@@ -107,6 +108,7 @@ beforeEach(() => {
   run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, prioritised = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
+  fake.modelsFor = null;
   fake.tickets = {
     selfLogin: () => 'bot[bot]',
     comments: async () => [
@@ -1109,6 +1111,7 @@ describe('subscription order', () => {
     fake.env = new FakeEnv({});
     updateAgent('implement', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model, billing: 'subscription' });
     second = createConnection('model', 'anthropic', 'Claude 2', {}, { oauthToken: 'sk-ant-oat01-two' });
+    fake.models.models = () => [{ id: 'claude-sonnet-5-5', label: 'Sonnet' }];
   });
   afterEach(() => {
     run('DELETE FROM connections WHERE id = ?', second);
@@ -1136,22 +1139,25 @@ describe('subscription order', () => {
     expect(pick().blockedBy).toMatch(/^5-hour allowance at 99%/);
   });
 
-  it('skips a paused subscription, and holds API agents on a paused connection', () => {
+  it('skips a paused subscription, or one without the model, and lets API agents use a paused connection', () => {
     reading(ids.model, 10);
     reading(second, 10);
     setConnectionPaused(ids.model, true);
     expect(pick()).toMatchObject({ modelConnectionId: second, blockedBy: null });
+    fake.models.models = () => [];
+    expect(pick().blockedBy).toBe("No Claude subscription that isn't paused offers claude-sonnet-5-5. Resume one on the Connections page");
     setConnectionPaused(second, true);
     expect(pick().blockedBy).toBe('Every Claude subscription is paused. Resume one on the Connections page');
     setConnectionPaused(ids.model, false);
+    // The agent's own connection counts as offering its model.
     expect(pick()).toMatchObject({ modelConnectionId: ids.model, blockedBy: null });
 
     fake.models.billing = () => ['subscription', 'api'];
     updateAgent('implement', { billing: 'api' });
-    expect(pick()).toMatchObject({ modelConnectionId: ids.model, blockedBy: null });
     setConnectionPaused(ids.model, true);
-    expect(pick().blockedBy).toBe('Claude is paused. Resume it on the Connections page, or choose another connection for Implementation on the Agents page');
+    expect(pick()).toMatchObject({ modelConnectionId: ids.model, blockedBy: null });
     setConnectionPaused(ids.model, false);
+    setConnectionPaused(second, false);
     updateAgent('implement', { billing: 'subscription' });
     fake.models.billing = () => ['subscription'];
   });
@@ -1160,6 +1166,249 @@ describe('subscription order', () => {
     reading(ids.model, 99);
     recordProbe(second, null, null);
     expect(pick()).toMatchObject({ modelConnectionId: second, blockedBy: null });
+  });
+});
+
+describe('moving off a paused subscription', () => {
+  const toolUse = (id: string) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: 'npm test' } }] } });
+  const toolResult = (id: string) => line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+  const DONE = result({ outcome: 'done', summary: 'Done.' });
+  const PUSHED = line({ before: '', after: 'def5678', ahead: 1 });
+  const LIMITED = [
+    line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 3600 } }),
+    line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Usage limit reached'] }),
+  ];
+  const reading = (conn: number, pct: number) => recordProbe(conn, { pct, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+  const labels = () => JSON.parse(getTicket(1)!.labels) as string[];
+  let second: number;
+  /** The models each connection offers; every connection runs Sonnet unless a test says otherwise. */
+  let offers: Record<number, string[]>;
+
+  /** A host whose run container prints what the test says, when it says it, until it's killed or finishes. */
+  const live = () => {
+    const env = new FakeEnv({ prepare: ['ok'], publish: [PUSHED] });
+    const stream = { emit: null as ((text: string) => void) | null, end: () => {}, killed: false };
+    env.follow = async (id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+      if (!id.startsWith('run')) return onLine({ stream: 'stdout', text: id.startsWith('publish') ? PUSHED : 'ok' });
+      await new Promise<void>((resolve) => {
+        stream.emit = (text) => onLine({ stream: 'stdout', text });
+        stream.end = resolve;
+      });
+    };
+    env.kill = async () => {
+      stream.killed = true;
+      stream.end();
+    };
+    env.wait = async (id: string) => ({ running: false, exitCode: id.startsWith('run') && stream.killed ? 137 : 0, oomKilled: false });
+    fake.env = env;
+    const say = async (...texts: string[]) => {
+      await vi.waitFor(() => expect(stream.emit).not.toBeNull());
+      for (const t of texts) stream.emit!(t);
+    };
+    return { env, stream, say };
+  };
+  const pauseFirst = () => {
+    setConnectionPaused(ids.model, true);
+    connectionPaused(ids.model);
+  };
+  /** A run on the first subscription, stopped at a turn boundary because that subscription was paused. */
+  const movedOff = async () => {
+    const { say } = live();
+    const id = go();
+    await say(toolUse('a'));
+    pauseFirst();
+    await say(toolResult('a'));
+    return settle(id);
+  };
+  const finishes = () => (fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [PUSHED] }));
+
+  beforeEach(() => {
+    saveSettings({ mode: 'paused' }); // a move isn't a new start, so the operation mode doesn't hold it
+    setConnectionStatus(ids.env, 'ok');
+    run('DELETE FROM allowance_samples');
+    run('DELETE FROM alerts');
+    second = createConnection('model', 'anthropic', 'Claude 2', {}, { oauthToken: 'sk-ant-oat01-two' });
+    offers = {};
+    fake.modelsFor = (c: { id: number; secret: { oauthToken?: string; apiKey?: string } }) => ({
+      launchEnv: (billing: string) => (billing === 'api' ? { ANTHROPIC_API_KEY: c.secret.apiKey } : { CLAUDE_CODE_OAUTH_TOKEN: c.secret.oauthToken }),
+      billing: () => [...(c.secret.oauthToken ? ['subscription'] : []), ...(c.secret.apiKey ? ['api'] : [])],
+      models: () => (offers[c.id] ?? ['claude-sonnet-5-5']).map((id) => ({ id, label: id })),
+    });
+    updateAgent('implement', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model, billing: 'subscription' });
+    reading(ids.model, 10);
+    reading(second, 10);
+  });
+  afterEach(() => {
+    run('DELETE FROM connections WHERE id = ?', second);
+    run('DELETE FROM allowance_samples');
+    setConnectionPaused(ids.model, false);
+    reading(ids.model, 10);
+  });
+
+  it("stops a running agent at its next turn boundary and resumes its session on the next subscription with that one's token", async () => {
+    const { stream, say } = live();
+    const id = go();
+    await say(toolUse('a'));
+    pauseFirst();
+    expect(stream.killed).toBe(false);
+    expect(readLog(id).map((e) => e.text)).toContain('Claude was paused. The agent moves to another Claude subscription after its current step.');
+    await say(toolResult('a'));
+    expect(stream.killed).toBe(true);
+    expect(await settle(id)).toMatchObject({ status: 'paused', step: 'run', pause_reason: 'connection', resets_at: null, model_connection_id: ids.model });
+    expect(labels()).not.toContain(label.running);
+
+    finishes();
+    resumePaused(getSettings(), Date.now());
+    expect(getRun(id)).toMatchObject({ status: 'running', resumes: 1, model_connection_id: second, switched_from: ids.model });
+    await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+    const env = fake.env.spec('run')!.env!;
+    expect(env.RESUME).toBe('1');
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat01-two');
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(readLog(id).map((e) => e.text)).toContain('Moved from Claude to Claude 2 because Claude is paused.');
+  });
+
+  it('stops at once when the agent is already between turns', async () => {
+    const { stream, say } = live();
+    const id = go();
+    await say(toolUse('a'), toolResult('a'));
+    pauseFirst();
+    expect(stream.killed).toBe(true);
+    expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'connection' });
+  });
+
+  it('carries on where it is when the subscription is resumed before the boundary', async () => {
+    const { stream, say } = live();
+    const id = go();
+    await say(toolUse('a'));
+    pauseFirst();
+    setConnectionPaused(ids.model, false);
+    await say(toolResult('a'));
+    expect(stream.killed).toBe(false);
+    await say(DONE);
+    stream.end();
+    expect(await settle(id)).toMatchObject({ status: 'succeeded', model_connection_id: ids.model });
+  });
+
+  it('resumes on the first subscription again when it is resumed before the tick', async () => {
+    const id = (await movedOff()).id;
+    setConnectionPaused(ids.model, false);
+    finishes();
+    resumePaused(getSettings(), Date.now());
+    expect(getRun(id)).toMatchObject({ status: 'running', model_connection_id: ids.model, switched_from: null });
+    await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+  });
+
+  it('moves to a subscription over your limits and waits there instead of stopping', async () => {
+    reading(second, 99);
+    const id = (await movedOff()).id;
+    resumePaused(getSettings(), Date.now());
+    expect(getRun(id)).toMatchObject({ status: 'paused', pause_reason: 'connection', model_connection_id: second });
+    reading(second, 10);
+    finishes();
+    resumePaused(getSettings(), Date.now());
+    await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+  });
+
+  it.each([
+    ['every other subscription is paused', () => setConnectionPaused(second, true)],
+    ['no other subscription offers the model', () => (offers[second] = ['claude-opus-5-5'])],
+  ])('stops the agent when %s, without a failure, and starts the stage again once a subscription is free', async (_, setup) => {
+    setup();
+    const before = labels();
+    const id = (await movedOff()).id;
+    resumePaused(getSettings(), Date.now());
+    await vi.waitFor(() => expect(getRun(id)?.status).toBe('cancelled'));
+    expect(getRun(id)!.error).toBe('Claude was paused and no other Claude subscription offers claude-sonnet-5-5, so Workshop stopped this agent. A new one starts this stage again when a subscription is free.');
+    expect(getTicket(1)!.failures).toBe(0);
+    expect(labels()).toEqual(before);
+    expect(fake.tickets.comment).not.toHaveBeenCalled();
+    saveSettings({ mode: 'always' });
+    expect(buildQueue().find((c) => c.ticket.id === 1)!.blockedBy).toMatch(/Resume one on the Connections page$/);
+
+    setConnectionPaused(ids.model, false);
+    setConnectionPaused(second, false);
+    expect(buildQueue().find((c) => c.ticket.id === 1)).toMatchObject({ agent: 'implement', mode: 'normal', blockedBy: null, modelConnectionId: ids.model });
+  });
+
+  it('moves a run paused for a usage limit, which then resumes when the new subscription allows', async () => {
+    fake.env = new FakeEnv({ prepare: ['ok'], run: LIMITED });
+    const id = go();
+    expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'limit', resets_at: expect.any(Number) });
+    setConnectionPaused(ids.model, true);
+    finishes();
+    resumePaused(getSettings(), Date.now());
+    expect(getRun(id)).toMatchObject({ status: 'running', model_connection_id: second });
+    await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+  });
+
+  describe('a run you paused', () => {
+    const pausedByYou = async () => {
+      const { say } = live();
+      const id = go();
+      await say(toolUse('a'));
+      requestPause(id);
+      await say(toolResult('a'));
+      expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'manual' });
+      setConnectionPaused(ids.model, true);
+      return id;
+    };
+
+    it('moves when you resume it', async () => {
+      const id = await pausedByYou();
+      resumePaused(getSettings(), Date.now());
+      expect(getRun(id)).toMatchObject({ status: 'paused', pause_reason: 'manual' });
+      finishes();
+      resumeNow(id);
+      expect(getRun(id)).toMatchObject({ status: 'running', model_connection_id: second });
+      await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+      expect(fake.env.spec('run')!.env!.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat01-two');
+    });
+
+    it('stays paused, and Resume says why, when nothing can take it', async () => {
+      const id = await pausedByYou();
+      setConnectionPaused(second, true);
+      resumePaused(getSettings(), Date.now());
+      expect(getRun(id)!.status).toBe('paused');
+      expect(() => resumeNow(id)).toThrow('Claude is paused and no other Claude subscription offers claude-sonnet-5-5. Resume a subscription on the Connections page first.');
+      expect(getRun(id)).toMatchObject({ status: 'paused', model_connection_id: ids.model });
+    });
+  });
+
+  describe('when the session does not continue on the new subscription', () => {
+    const resumedWith = async (lines: string[], exitCode: number) => {
+      const id = (await movedOff()).id;
+      fake.env = new FakeEnv({ prepare: ['ok'], run: lines, publish: [PUSHED] });
+      fake.env.exitCodes.run = exitCode;
+      resumePaused(getSettings(), Date.now());
+      return settle(id);
+    };
+
+    it('starts the stage again instead of failing when it stops before its first turn boundary', async () => {
+      const r = await resumedWith([line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Invalid signature in thinking block'] })], 1);
+      expect(r).toMatchObject({ status: 'cancelled', error: "Couldn't continue the session on Claude 2, so Workshop starts this stage again." });
+      expect(getTicket(1)!.failures).toBe(0);
+      expect(labels()).not.toContain(label.running);
+    });
+
+    it('fails as usual once it has reached a turn boundary', async () => {
+      const r = await resumedWith([toolUse('b'), toolResult('b')], 1);
+      expect(r).toMatchObject({ status: 'failed', switched_from: null });
+      expect(getTicket(1)!.failures).toBe(1);
+    });
+  });
+
+  describe('API billing', () => {
+    it("doesn't move or stop a running API-billed agent", async () => {
+      const { stream, say } = live();
+      const id = launch({ ticketId: 1, agent: 'implement', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'api' })!;
+      await say(toolUse('a'), toolResult('a'));
+      pauseFirst();
+      expect(stream.killed).toBe(false);
+      await say(DONE);
+      stream.end();
+      expect(await settle(id)).toMatchObject({ status: 'succeeded', model_connection_id: ids.model });
+    });
   });
 });
 

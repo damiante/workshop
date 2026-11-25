@@ -126,6 +126,7 @@ Priority only changes the order. It doesn't lift the operation mode or hours, or
 - **A failed attempt** (error result, invalid result, timeout, out of memory, a lost container, a failed push) counts against the stage. After the second one: `workshop/failed`, a comment with the error, and an alert.
 - **A conflicting push** isn't a failed attempt. `publish` saves the work on a rescue branch, the run succeeds, and the ticket moves to `stage:reconcile` so the Merge agent can merge it. If the branch moves again during the reconcile run, that run fails and counts.
 - **A usage limit** pauses the run instead. It resumes in the same Claude session on the same host after the window resets.
+- **A paused subscription** moves its agents to the next subscription that offers the same model, at a turn boundary, in the same Claude session. If none offers the model, the run is cancelled without counting as a failure, and the stage starts again once a subscription is free.
 - **Stop** in the run view kills the container and labels the ticket `workshop/failed`, so it doesn't restart immediately.
 - **Closing the issue** cancels any running agent.
 - **Container killed by the host** (exit 137/143 or OOM) and **host unreachable** both raise alerts. Runs on an unreachable host are re-attached when it's back.

@@ -28,13 +28,15 @@ export interface RunRow {
   output_tokens: number | null;
   cost_usd: number | null;
   resets_at: number | null;
-  /** Why a paused run waits: a usage limit Claude reported, the thresholds in Settings, or you ('manual'). Null on older rows means 'limit'. */
+  /** Why a paused run waits: a usage limit Claude reported, the thresholds in Settings, you ('manual'), or a move off a paused subscription ('connection'). Null on older rows means 'limit'. */
   pause_reason: PauseReason | null;
   /** While starting or running: when you asked it to pause at the next turn boundary. */
   pause_requested_at: number | null;
   started_at: number;
   ended_at: number | null;
   image: string | null;
+  /** The Claude connection this run just moved off, until the moved session reaches its first turn boundary. */
+  switched_from: number | null;
 }
 
 export const ACTIVE_STATUSES: RunStatus[] = ['starting', 'running', 'publishing', 'paused'];

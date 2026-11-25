@@ -66,7 +66,7 @@ export interface ConnectionView {
   status: ConnectionStatus;
   checkedAt: number | null;
   error: string | null;
-  /** AI model connections only: no new agent uses it, and its settings are kept. */
+  /** AI model connections only: subscription agents don't use it and move off it, but API-billed agents still use its key. Its settings are kept. */
   paused: boolean;
 }
 
@@ -201,7 +201,7 @@ export interface RunView {
   startedAt: number;
   endedAt: number | null;
   resetsAt: number | null;
-  /** Why a paused run waits: 'limit' (Claude reported a usage limit), 'threshold' (usage is over your Settings limit) or 'manual' (you paused it; it waits for you to resume it). */
+  /** Why a paused run waits: 'limit' (Claude reported a usage limit), 'threshold' (usage is over your Settings limit) or 'manual' (you paused it; it waits for you to resume it) or 'connection' (its Claude subscription was paused, and it moves to another one). */
   pauseReason: PauseReason | null;
   /** You asked a starting or running agent to pause; it stops after its current step. */
   pauseRequested: boolean;
@@ -209,7 +209,7 @@ export interface RunView {
   mediaCount: number;
 }
 
-export type PauseReason = 'limit' | 'threshold' | 'manual';
+export type PauseReason = 'limit' | 'threshold' | 'manual' | 'connection';
 
 export interface MediaItem {
   name: string;

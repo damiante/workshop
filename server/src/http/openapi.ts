@@ -91,7 +91,7 @@ const schemas: Record<string, Schema> = {
     startedAt: int,
     endedAt: nullable(int),
     resetsAt: nullable(int),
-    pauseReason: nullable(enumOf('limit', 'threshold', 'manual')),
+    pauseReason: nullable(enumOf('limit', 'threshold', 'manual', 'connection')),
     pauseRequested: bool,
     mediaCount: int,
   }),

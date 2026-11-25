@@ -357,11 +357,14 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     const stored = allowanceOf(r.model_connection_id);
     return stored.sampledAt && now - stored.sampledAt <= ALLOWANCE_MAX_AGE_MS ? thresholdBlock(stored, s, now) : null;
   };
-  // Why the agent should stop at the next turn boundary, if it should. A pause you asked for wins.
-  type PauseFor = { kind: 'manual' | 'threshold'; reason: string; resetsAt: number | null };
+  // Why the agent should stop at the next turn boundary, if it should. A pause you asked for wins, then a
+  // paused subscription (the tick moves the run to another one).
+  type PauseFor = { kind: 'manual' | 'connection' | 'threshold'; reason: string; resetsAt: number | null };
   const wantPause = (): PauseFor | null => {
     if (claude.result) return null;
     if (getRun(r.id)?.pause_requested_at) return { kind: 'manual', reason: 'you paused it', resetsAt: null };
+    const conn = r.billing === 'subscription' ? getConnection(r.model_connection_id) : undefined;
+    if (conn?.paused) return { kind: 'connection', reason: `${conn.name} was paused`, resetsAt: null };
     const over = overThreshold();
     return over && { kind: 'threshold', ...over };
   };
@@ -390,6 +393,8 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     else if (want && claude.openTools?.length && !grace) startGrace();
     // Otherwise the agent is mid-reply, and its next line decides.
   });
+  // Set while this segment continues a session another subscription started, until its first turn boundary.
+  let switched = r.switched_from !== null;
   let trailing: NodeJS.Timeout | undefined;
   const running = runContainer(
     ctx,
@@ -399,6 +404,10 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
       const before = claude.activity;
       const hadResult = !!claude.result;
       readClaudeLine(claude, text);
+      if (switched && claude.boundary) {
+        switched = false;
+        setRun(r.id, { switched_from: null });
+      }
       // Every run reports current subscription usage: a free, fresh reading for the allowance gate and
       // the usage bars. Recorded whenever it changes, at most every 30 seconds.
       if (!replayed && Date.now() - recordedAt >= USAGE_RECORD_MS) recordUsage();
@@ -467,6 +476,11 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   if (hitUsageLimit(claude)) {
     setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: claude.limit?.resetsAt ?? Date.now() + 3600_000, pause_reason: 'limit' });
     await markRunning(ctx.ticket, false);
+    return false;
+  }
+  if (switched && (!res || res.isError)) {
+    // The session didn't get going on the subscription it moved to: start the stage again instead of failing.
+    await abortRun(r.id, `Couldn't continue the session on ${getConnection(r.model_connection_id)?.name ?? 'the new subscription'}, so Workshop starts this stage again.`);
     return false;
   }
   if (claude.apiError === 'authentication_failed') {
@@ -697,7 +711,10 @@ export function launch(p: {
   return id;
 }
 
-/** Continues a paused run (usage limit, thresholds or by hand) in the same Claude session on the same host. */
+/**
+ * Continues a paused run (usage limit, thresholds, by hand or a paused subscription) in the same Claude session
+ * on the same host, with the credentials of the connection it's on now (another subscription, after a move).
+ */
 export function resume(runId: string) {
   const r = getRun(runId);
   if (r?.status !== 'paused') return;
@@ -724,6 +741,36 @@ export function requestPause(runId: string) {
   setRun(runId, { pause_requested_at: Date.now() });
   appendLog(runId, { step: 'workshop', stream: 'stdout', text: 'Pause requested from Workshop. The agent stops after its current step.' });
   pauseSignals.get(runId)?.();
+}
+
+/**
+ * A subscription was just paused: its running agents stop at their next turn boundary (at once if they're
+ * between turns), and the tick moves them to another subscription.
+ */
+export function connectionPaused(connectionId: number) {
+  const name = getConnection(connectionId)?.name ?? 'The Claude connection';
+  for (const r of all<RunRow>("SELECT * FROM runs WHERE status IN ('starting', 'running') AND billing = 'subscription' AND model_connection_id = ?", connectionId)) {
+    appendLog(r.id, { step: 'workshop', stream: 'stdout', text: `${name} was paused. The agent moves to another Claude subscription after its current step.` });
+    pauseSignals.get(r.id)?.();
+  }
+}
+
+/** Moves a paused run to another Claude subscription. It resumes there in the same session when that one allows. */
+export function switchConnection(runId: string, toId: number) {
+  const r = getRun(runId);
+  if (r?.status !== 'paused' || r.model_connection_id === toId) return;
+  const from = getConnection(r.model_connection_id)?.name ?? 'its subscription';
+  const to = getConnection(toId)?.name ?? 'another subscription';
+  // A usage limit or threshold on the old subscription says nothing about the new one; a pause you asked for stays yours.
+  const reason = r.pause_reason === 'manual' ? {} : { pause_reason: 'connection', resets_at: null };
+  setRun(runId, { model_connection_id: toId, switched_from: r.model_connection_id, ...reason });
+  appendLog(runId, { step: 'workshop', stream: 'stdout', text: `Moved from ${from} to ${to} because ${from} is paused.` });
+}
+
+/** Cancels a run without counting a failure or changing labels, so the queue starts the same stage again. */
+export async function abortRun(runId: string, reason: string) {
+  appendLog(runId, { step: 'workshop', stream: 'stdout', text: reason });
+  await stopRun(runId, reason, false);
 }
 
 /** Takes back a pause you asked for that hasn't happened yet. Returns false if there was none. */
