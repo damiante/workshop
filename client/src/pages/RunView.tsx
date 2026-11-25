@@ -92,9 +92,10 @@ export function RunView() {
   const now = useNow(10_000);
   const transcript = useRef(emptyTranscript());
   const [, setVersion] = useState(0);
-  // A link to a turn (#turn-12) holds the page there instead of following the live log.
+  // A link to a turn (#turn-12) scrolls the page there once it has streamed in.
   const [target, setTarget] = useState(() => turnOf(location.hash));
-  const [following, setFollowing] = useState(target === null);
+  // The page opens at the top, on the run's summary; it follows the live log once scrolled to the bottom.
+  const [following, setFollowing] = useState(false);
   const scrolledTo = useRef<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
