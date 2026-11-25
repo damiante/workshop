@@ -55,6 +55,23 @@ export function syncSoon() {
   kick();
 }
 
+/**
+ * Runs the checks the timer runs, now: syncs every repository, re-reads the usage of subscriptions
+ * that are over the thresholds or unchecked (even one whose last check just failed), then ticks. A usage limit Claude
+ * reported keeps its reset time. Resolves when those allowance checks have settled.
+ */
+export async function refreshNow() {
+  lastSync.clear();
+  probeFailedAt.clear();
+  const s = getSettings();
+  const now = Date.now();
+  const checks = allowanceViews()
+    .filter((a) => !a.blockedUntil && allowanceBlock(a, s, now))
+    .map((a) => probeAllowance(a.connectionId, true).catch(() => {}));
+  kick();
+  await Promise.all(checks);
+}
+
 export async function tick() {
   if (ticking) {
     again = true;

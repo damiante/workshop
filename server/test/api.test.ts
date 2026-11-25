@@ -233,6 +233,14 @@ describe('usage and launch', () => {
     expect(res.body).toMatchObject({ apiRunCapUsd: s.apiRunCapUsd, apiDailyCapUsd: s.apiDailyCapUsd });
   });
 
+  it('accepts a refresh, which a read token may not ask for', async () => {
+    const res = await request(app).post('/api/refresh').set('cookie', cookie);
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ ok: true });
+    const token = (await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'refresh', scope: 'read' })).body.token;
+    expect((await request(app).post('/api/refresh').set('authorization', `Bearer ${token}`)).status).toBe(403);
+  });
+
   it('refuses to launch what cannot run', async () => {
     const post = (id: number) => request(app).post(`/api/tickets/${id}/launch`).set('cookie', cookie);
     expect((await post(999)).status).toBe(404);

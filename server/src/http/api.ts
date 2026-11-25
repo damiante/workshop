@@ -10,7 +10,7 @@ import { listMedia, mediaDir, mediaView } from '../media.ts';
 import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
 import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews, ticketRunViews } from '../runs.ts';
 import { pushRefusal, withinHours } from '../scheduler/gates.ts';
-import { hostViews, kick, launchNow, queueView, resumeNow, startOfDay, syncSoon } from '../scheduler/loop.ts';
+import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, startOfDay, syncSoon } from '../scheduler/loop.ts';
 import { requestPause, stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend } from '../spend.ts';
@@ -294,6 +294,11 @@ apiRouter.put('/tickets/:id/state', async (req, res) => {
 
 apiRouter.post('/sync', (_req, res) => {
   syncSoon();
+  res.status(202).json({ ok: true });
+});
+
+apiRouter.post('/refresh', (_req, res) => {
+  void refreshNow();
   res.status(202).json({ ok: true });
 });
 
