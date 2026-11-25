@@ -324,6 +324,34 @@ thead th {
 .table-wrap {
   overflow-x: auto;
 }
+/* The lifetime usage tables share column widths so their columns line up. */
+.spend-table {
+  table-layout: fixed;
+}
+.spend-table :is(th, td):first-child {
+  width: 40%;
+  overflow-wrap: break-word;
+}
+.spend-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Too narrow for shared widths: let each table fit its own content. */
+@media (max-width: 760px) {
+  .spend-table {
+    table-layout: auto;
+  }
+  .spend-table :is(th, td) {
+    padding: 8px 4px;
+  }
+  .spend-table :is(th, td):first-child {
+    width: auto;
+    padding-left: 0;
+  }
+  .spend-table :is(th, td):last-child {
+    padding-right: 0;
+  }
+}
 
 /* Controls */
 

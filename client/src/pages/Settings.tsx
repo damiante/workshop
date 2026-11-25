@@ -26,24 +26,24 @@ function NumberField({ label, help, value, min, max, step = 1, onChange }: { lab
 function SpendTable({ title, label, rows }: { title: string; label: string; rows: { key: string; name: string; t: SpendTotals }[] }) {
   return (
     <div className="table-wrap">
-      <table>
+      <table className="spend-table">
         <thead>
           <tr>
             <th>{title}</th>
-            <th>Runs</th>
-            <th>Input</th>
-            <th>Output</th>
-            <th>Cost</th>
+            <th className="num">Runs</th>
+            <th className="num">Input</th>
+            <th className="num">Output</th>
+            <th className="num">Cost</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r) => (
             <tr key={`${label}-${r.key}`}>
               <td>{r.name}</td>
-              <td>{r.t.runs}</td>
-              <td>{tokens(r.t.inputTokens)}</td>
-              <td>{tokens(r.t.outputTokens)}</td>
-              <td>{money(r.t.costUsd)}</td>
+              <td className="num">{r.t.runs}</td>
+              <td className="num">{tokens(r.t.inputTokens)}</td>
+              <td className="num">{tokens(r.t.outputTokens)}</td>
+              <td className="num">{money(r.t.costUsd)}</td>
             </tr>
           ))}
         </tbody>
