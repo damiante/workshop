@@ -22,6 +22,7 @@ interface Row {
   checked_at: number | null;
   error: string | null;
   updated_at: number;
+  paused: number;
 }
 
 export interface Connection<C = Record<string, unknown>, S = Record<string, string>> {
@@ -35,6 +36,7 @@ export interface Connection<C = Record<string, unknown>, S = Record<string, stri
   checkedAt: number | null;
   error: string | null;
   updatedAt: number;
+  paused: boolean;
 }
 
 function fromRow(row: Row): Connection {
@@ -49,6 +51,7 @@ function fromRow(row: Row): Connection {
     checkedAt: row.checked_at,
     error: row.error,
     updatedAt: row.updated_at,
+    paused: Boolean(row.paused),
   };
 }
 
@@ -66,7 +69,7 @@ export function listConnections(kind?: ConnectionKind): Connection[] {
 export function toView(c: Connection): ConnectionView {
   const secrets: Record<string, string> = {};
   for (const [key, value] of Object.entries(c.secret)) if (value) secrets[key] = `…${String(value).trim().slice(-4)}`;
-  return { id: c.id, kind: c.kind, provider: c.provider, name: c.name, config: c.config, secrets, status: c.status, checkedAt: c.checkedAt, error: c.error };
+  return { id: c.id, kind: c.kind, provider: c.provider, name: c.name, config: c.config, secrets, status: c.status, checkedAt: c.checkedAt, error: c.error, paused: c.paused };
 }
 
 export function createConnection(kind: ConnectionKind, provider: string, name: string, config: object, secret: object): number {
@@ -89,6 +92,12 @@ export function createConnection(kind: ConnectionKind, provider: string, name: s
 /** Puts connections in the given order (first is preferred). The caller checks they're every connection of one kind. */
 export function reorderConnections(ids: number[]) {
   ids.forEach((id, i) => run('UPDATE connections SET position = ? WHERE id = ?', i + 1, id));
+  publish('connections');
+}
+
+/** Pauses or resumes a connection without touching its settings; updated_at stays, so its cached client does too. */
+export function setConnectionPaused(id: number, paused: boolean) {
+  run('UPDATE connections SET paused = ? WHERE id = ?', Number(paused), id);
   publish('connections');
 }
 

@@ -223,6 +223,8 @@ export const MIGRATIONS = [
   ALTER TABLE connections ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
   UPDATE connections SET position = id;
   `,
+  // A paused AI model connection keeps its settings, but no new agent uses it.
+  `ALTER TABLE connections ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export let db: DatabaseSync;

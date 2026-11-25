@@ -66,6 +66,8 @@ export interface ConnectionView {
   status: ConnectionStatus;
   checkedAt: number | null;
   error: string | null;
+  /** AI model connections only: no new agent uses it, and its settings are kept. */
+  paused: boolean;
 }
 
 export interface TestResult {

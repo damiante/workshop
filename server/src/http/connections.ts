@@ -15,6 +15,7 @@ import {
   PROVIDERS,
   providerInfo,
   reorderConnections,
+  setConnectionPaused,
   setConnectionStatus,
   toView,
   updateConnection,
@@ -156,6 +157,17 @@ connectionsRouter.put('/connections/order', (req, res) => {
   reorderConnections(ids);
   kick();
   res.json(listConnections().map(toView));
+});
+
+/** Pauses an AI model connection: agents use your other connections, and its settings are kept. */
+connectionsRouter.put('/connections/:id/paused', (req, res) => {
+  const conn = getConnection(Number(req.params.id));
+  check(conn?.kind === 'model', 'AI model connection not found.', 404);
+  const { paused } = req.body ?? {};
+  check(typeof paused === 'boolean', 'paused must be true or false.');
+  setConnectionPaused(conn.id, paused);
+  kick();
+  res.json(toView(getConnection(conn.id)!));
 });
 
 connectionsRouter.put('/connections/:id', async (req, res) => {

@@ -523,6 +523,25 @@ describe('AI model order', () => {
   });
 });
 
+describe('pausing an AI model connection', () => {
+  it('pauses and resumes a Claude connection, keeping its settings', async () => {
+    const { run, one } = await import('../src/db.ts');
+    const id = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('model', 'anthropic', 'Spare', '{\"x\":1}', '', 'ok', 0, 0)").lastInsertRowid);
+    const put = (target: number, body: object) => request(app).put(`/api/connections/${target}/paused`).set('cookie', cookie).send(body);
+
+    const paused = await put(id, { paused: true });
+    expect(paused.status).toBe(200);
+    expect(paused.body).toMatchObject({ id, paused: true, config: { x: 1 } });
+    expect(one<{ paused: number }>('SELECT paused FROM connections WHERE id = ?', id)!.paused).toBe(1);
+    expect((await put(id, { paused: false })).body.paused).toBe(false);
+    expect((await put(id, { paused: 'yes' })).body.error).toBe('paused must be true or false.');
+    const host = one<{ id: number }>("SELECT id FROM connections WHERE kind = 'environment'");
+    if (host) expect((await put(host.id, { paused: true })).status).toBe(404);
+    expect((await put(999999, { paused: true })).status).toBe(404);
+    run('DELETE FROM connections WHERE id = ?', id);
+  });
+});
+
 describe("changing a ticket's status", () => {
   const put = (id: number | string, body: object) => request(app).put(`/api/tickets/${id}/state`).set('cookie', cookie).send(body);
   const labelsIn = (id: number) => JSON.parse(one<{ labels: string }>('SELECT labels FROM tickets WHERE id = ?', id)!.labels) as string[];

@@ -9,7 +9,7 @@ const SECTIONS: { kind: ConnectionKind; title: string; blurb: string }[] = [
   { kind: 'vcs', title: 'Code host', blurb: 'Where your code lives. Workshop acts through its own GitHub App.' },
   { kind: 'tickets', title: 'Tickets', blurb: 'Where Workshop finds work to do.' },
   { kind: 'environment', title: 'Agent hosts', blurb: 'Machines with Docker where agent containers run.' },
-  { kind: 'model', title: 'AI models', blurb: 'Claude, through your subscription, an API key, or both. Subscription agents use the first subscription in this list that isn\'t over your limits, moving down the list when it is.' },
+  { kind: 'model', title: 'AI models', blurb: 'Claude, through your subscription, an API key, or both. Subscription agents use the first subscription in this list that isn\'t paused or over your limits, moving down the list when it is.' },
 ];
 
 const BANNERS: Record<string, { tone: string; text: string }> = {
@@ -196,6 +196,13 @@ function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEd
       .catch((e: Error) => setTest({ ok: false, message: e.message }))
       .finally(() => setToggling(false));
   };
+  const isModel = c.kind === 'model';
+  const pause = () => {
+    setToggling(true);
+    api(`/connections/${c.id}/paused`, { method: 'PUT', body: { paused: !c.paused } })
+      .catch((e: Error) => setTest({ ok: false, message: e.message }))
+      .finally(() => setToggling(false));
+  };
   const specs = typeof c.config.specs === 'string' ? c.config.specs : null;
   const labelOf = (key: string) => provider.fields.find((f) => f.key === key)?.label ?? key;
   const saved = Object.entries(c.secrets).map(([key, hint]) => `${labelOf(key)} ${hint}`);
@@ -210,6 +217,7 @@ function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEd
         <Status tone={c.status === 'ok' ? 'ok' : c.status === 'error' ? 'error' : 'idle'}>{c.status === 'ok' ? 'Working' : c.status === 'error' ? 'Not working' : 'Not checked yet'}</Status>
       </div>
       {isHost && !available && <span className="small muted">Switched off: no new agents start here. Running agents carry on.</span>}
+      {isModel && c.paused && <span className="small muted">Paused: new agents use your other connections. Its settings are kept, and running agents carry on.</span>}
       {specs && <span className="small muted">{specs}</span>}
       {credentials && <span className="small muted">{credentials}</span>}
       {c.status === 'error' && c.error && <span className="small error-text">{c.error}</span>}
@@ -222,6 +230,11 @@ function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEd
         {isHost && (
           <button onClick={toggle} disabled={toggling}>
             {available ? 'Switch off' : 'Switch on'}
+          </button>
+        )}
+        {isModel && (
+          <button onClick={pause} disabled={toggling}>
+            {c.paused ? 'Resume' : 'Pause'}
           </button>
         )}
         {onMove && (

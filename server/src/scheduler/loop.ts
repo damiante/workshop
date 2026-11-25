@@ -292,9 +292,9 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
   const waiting = rows
     .filter((t) => isAllowedAuthor(t.author) && ticketInScope(t, repos.get(t.repo_id)!) && isUnclassified(labelsOf(t), true, blockersOf(t)))
     .map((t) => ({ repo: repos.get(t.repo_id)!.full_name, priority: repos.get(t.repo_id)!.priority }));
-  // Every Claude subscription in your order, with what holds it back.
+  // Every Claude subscription in your order that isn't paused, with what holds it back.
   const subscriptions = listConnections('model')
-    .filter((c) => modelsOf(c).billing().includes('subscription'))
+    .filter((c) => !c.paused && modelsOf(c).billing().includes('subscription'))
     .map((c) => ({ id: c.id, provider: c.provider, block: allowanceBlock(allowanceOf(c.id), s, now), failing: probeFailing(c.id, now) }));
   const out: (Candidate & { priority: number; repoPriority: number })[] = [];
   for (const t of rows) {
@@ -315,11 +315,13 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
       blockedBy = `${conn!.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`;
     }
     let useConnection = conn;
-    if (!blockedBy && cls.billing === 'api') blockedBy = apiCapBlock(spentToday, s);
+    if (!blockedBy && cls.billing === 'api') blockedBy = conn!.paused ? `${conn!.name} is paused. Resume it on the Connections page, or choose another connection for ${name} on the Agents page` : apiCapBlock(spentToday, s);
     else if (!blockedBy) {
-      const pick = pickSubscription(subscriptions.filter((c) => c.provider === conn!.provider))!; // the agent's own connection is in the pool
-      useConnection = getConnection(pick.id);
-      blockedBy = pick.block;
+      const pick = pickSubscription(subscriptions.filter((c) => c.provider === conn!.provider));
+      if (pick) {
+        useConnection = getConnection(pick.id);
+        blockedBy = pick.block;
+      } else blockedBy = 'Every Claude subscription is paused. Resume one on the Connections page';
     }
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
     out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), priority: stepPriority(step), repoPriority: repo.priority });

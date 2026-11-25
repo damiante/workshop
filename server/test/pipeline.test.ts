@@ -19,7 +19,7 @@ const { allowanceOf, recordProbe } = await import('../src/allowance.ts');
 const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
-const { createConnection, reorderConnections, setConnectionStatus } = await import('../src/providers/index.ts');
+const { createConnection, reorderConnections, setConnectionPaused, setConnectionStatus } = await import('../src/providers/index.ts');
 const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
@@ -1085,6 +1085,7 @@ describe('subscription order', () => {
   afterEach(() => {
     run('DELETE FROM connections WHERE id = ?', second);
     run('DELETE FROM allowance_samples');
+    setConnectionPaused(ids.model, false);
   });
 
   it('uses the first subscription in your order, and the next when it is over your limits', () => {
@@ -1105,6 +1106,26 @@ describe('subscription order', () => {
     reading(second, 99);
     expect(pick()).toMatchObject({ modelConnectionId: ids.model });
     expect(pick().blockedBy).toMatch(/^5-hour allowance at 99%/);
+  });
+
+  it('skips a paused subscription, and holds API agents on a paused connection', () => {
+    reading(ids.model, 10);
+    reading(second, 10);
+    setConnectionPaused(ids.model, true);
+    expect(pick()).toMatchObject({ modelConnectionId: second, blockedBy: null });
+    setConnectionPaused(second, true);
+    expect(pick().blockedBy).toBe('Every Claude subscription is paused. Resume one on the Connections page');
+    setConnectionPaused(ids.model, false);
+    expect(pick()).toMatchObject({ modelConnectionId: ids.model, blockedBy: null });
+
+    fake.models.billing = () => ['subscription', 'api'];
+    updateAgent('implement', { billing: 'api' });
+    expect(pick()).toMatchObject({ modelConnectionId: ids.model, blockedBy: null });
+    setConnectionPaused(ids.model, true);
+    expect(pick().blockedBy).toBe('Claude is paused. Resume it on the Connections page, or choose another connection for Implementation on the Agents page');
+    setConnectionPaused(ids.model, false);
+    updateAgent('implement', { billing: 'subscription' });
+    fake.models.billing = () => ['subscription'];
   });
 
   it('uses a subscription with unknown usage in its place', () => {
