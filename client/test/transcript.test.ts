@@ -25,3 +25,19 @@ it('turns a run log into steps, prose, tool calls with results, a to-do list and
   expect(t.items[7]).toMatchObject({ kind: 'result', ok: true });
   expect(t.items[9]).toEqual({ kind: 'log', text: 'Pushed def.', error: false });
 });
+
+it('collapses tool results with images, including lines Workshop cut short', () => {
+  const t = emptyTranscript();
+  const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBOR' } };
+  addEntry(t, run({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: '/a.png' } }] } }));
+  addEntry(t, run({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'r1', content: [image] }] } }));
+  addEntry(t, run({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'r2', name: 'Read', input: { file_path: '/b.png' } }] } }));
+  const cut = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ tool_use_id: 'r2', type: 'tool_result', content: [{ ...image, source: { ...image.source, data: 'A'.repeat(70_000) } }] }] } });
+  addEntry(t, { step: 'run', stream: 'stdout', text: cut.slice(0, 64_000) + ' …[truncated by Workshop]' });
+  addEntry(t, { step: 'run', stream: 'stdout', text: '{"type":"assistant","message":{"content":[{"type":"text","text":"cut' });
+
+  expect(t.items.map((i) => i.kind)).toEqual(['step', 'tool', 'tool', 'tool']);
+  expect(t.items[1]).toMatchObject({ kind: 'tool', output: '(image/png)' });
+  expect(t.items[2]).toMatchObject({ kind: 'tool', summary: '/b.png', output: expect.stringMatching(/^\(Too long to show/) });
+  expect(t.items[3]).toMatchObject({ kind: 'tool', name: 'Log line' });
+});

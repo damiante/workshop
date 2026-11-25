@@ -11,7 +11,7 @@ import { initDb, MIGRATIONS, one, run } from '../src/db.ts';
 import { mediaDir } from '../src/media.ts';
 import { createConnection } from '../src/providers/index.ts';
 import { publish } from '../src/events.ts';
-import { appendLog } from '../src/runs.ts';
+import { appendLog, readLog } from '../src/runs.ts';
 import { saveSettings } from '../src/settings.ts';
 import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
@@ -939,6 +939,17 @@ describe('live streams', () => {
     const lines = res.body.toString().trim().split('\n').map((l: string) => JSON.parse(l));
     expect(lines.map((l: { text: string }) => l.text)).toEqual(['line 0', 'line 1']);
     expect((await request(app).get('/api/runs/nope/export').set('cookie', cookie)).status).toBe(404);
+  });
+
+  it('drops image data from over-long log lines so they stay readable', async () => {
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('live-image', ?, 'design', 1, 'm', 'subscription', 'done', 0)", ticket);
+    const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(100_000) } };
+    const event = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: [image] }] }, tool_use_result: { file: { base64: 'B'.repeat(100_000) } } };
+    appendLog('live-image', { step: 'run', stream: 'stdout', text: JSON.stringify(event) });
+    appendLog('live-image', { step: 'run', stream: 'stdout', text: 'x'.repeat(70_000) });
+    const [kept, cut] = readLog('live-image');
+    expect(JSON.parse(kept.text)).toMatchObject({ message: { content: [{ content: [{ source: { media_type: 'image/png', data: '' } }] }] }, tool_use_result: { file: { base64: '' } } });
+    expect(cut.text).toMatch(/…\[truncated by Workshop\]$/);
   });
 
   it('resumes from ?after= and Last-Event-ID', async () => {

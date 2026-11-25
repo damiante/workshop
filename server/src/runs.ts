@@ -117,7 +117,26 @@ export function readLog(runId: string): LogEntry[] {
   }
 }
 
+/** Drops base64 payloads (images Claude Code read) from an over-long stream-json line, so it stays parseable. */
+function withoutBase64(text: string): string {
+  let event: unknown;
+  try {
+    event = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  const strip = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(strip);
+    if (!v || typeof v !== 'object') return v;
+    const o = v as Record<string, unknown>;
+    if (o.type === 'base64' && typeof o.data === 'string') return { ...o, data: '' };
+    return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, k === 'base64' && typeof x === 'string' ? '' : strip(x)]));
+  };
+  return JSON.stringify(strip(event));
+}
+
 export function appendLog(runId: string, entry: LogEntry) {
+  if (entry.text.length > MAX_LINE) entry = { ...entry, text: withoutBase64(entry.text) };
   if (entry.text.length > MAX_LINE) entry = { ...entry, text: entry.text.slice(0, MAX_LINE) + ' …[truncated by Workshop]' };
   if (!counts.has(runId)) counts.set(runId, readLog(runId).length);
   const index = counts.get(runId)!;
