@@ -127,8 +127,8 @@ export function Layout({ version }: { version: string }) {
                 </span>
               ) : a.sampledAt ? (
                 <>
-                  <Meter label="5-hour" window={a.fiveHour} threshold={data.thresholds.fiveHour} />
-                  <Meter label="Weekly" window={a.sevenDay} threshold={data.thresholds.weekly} />
+                  <Meter label="5-hour" window={a.fiveHour} threshold={a.limits.fiveHour} />
+                  <Meter label="Weekly" window={a.sevenDay} threshold={a.limits.weekly} />
                 </>
               ) : (
                 <span className="small muted">Allowance not checked yet</span>

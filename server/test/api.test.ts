@@ -6,7 +6,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { seedAgents } from '../src/agents.ts';
 import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
-import { initDb, one, run } from '../src/db.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { initDb, MIGRATIONS, one, run } from '../src/db.ts';
 import { mediaDir } from '../src/media.ts';
 import { createConnection } from '../src/providers/index.ts';
 import { publish } from '../src/events.ts';
@@ -225,10 +226,88 @@ describe('lifetime usage', () => {
   });
 });
 
+describe('usage limits per subscription', () => {
+  let sub: number;
+  beforeAll(() => {
+    sub = createConnection('model', 'anthropic', 'Claude', {}, { oauthToken: 'sk-ant-oat01-x' });
+  });
+  afterAll(() => {
+    run('DELETE FROM connections WHERE id = ?', sub);
+  });
+
+  it('lists each subscription with its limits', async () => {
+    const res = await request(app).get('/api/usage').set('cookie', cookie);
+    expect(res.body.allowance).toEqual([expect.objectContaining({ connectionId: sub, limits: { fiveHour: 70, weekly: 80 } })]);
+    expect((await request(app).get('/api/overview').set('cookie', cookie)).body.allowance[0].limits).toEqual({ fiveHour: 70, weekly: 80 });
+  });
+
+  it('saves the limits you send and keeps the rest', async () => {
+    const res = await request(app).put(`/api/usage/limits/${sub}`).set('cookie', cookie).send({ fiveHour: 50 });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ connectionId: sub, connectionName: 'Claude', limits: { fiveHour: 50, weekly: 80 } });
+    await request(app).put(`/api/usage/limits/${sub}`).set('cookie', cookie).send({ weekly: 90.5 });
+    expect((await request(app).get('/api/usage').set('cookie', cookie)).body.allowance[0].limits).toEqual({ fiveHour: 50, weekly: 90.5 });
+  });
+
+  it('validates the limits', async () => {
+    for (const body of [{ fiveHour: 101 }, { weekly: -1 }, { fiveHour: 'lots' }]) {
+      const res = await request(app).put(`/api/usage/limits/${sub}`).set('cookie', cookie).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/limit must be between 0 and 100/);
+    }
+  });
+
+  it('only sets limits on Claude subscriptions', async () => {
+    const host = createConnection('environment', 'docker', 'box', { mode: 'socket', slots: 1 }, {});
+    const apiKey = createConnection('model', 'anthropic', 'API', {}, { apiKey: 'sk-ant-api-x' });
+    try {
+      for (const id of [host, apiKey, 9999]) {
+        const res = await request(app).put(`/api/usage/limits/${id}`).set('cookie', cookie).send({ fiveHour: 50 });
+        expect(res.status).toBe(404);
+        expect(res.body.error).toBe("That isn't a Claude subscription connection.");
+      }
+    } finally {
+      run('DELETE FROM connections WHERE id IN (?, ?)', host, apiKey);
+    }
+  });
+
+  it('refuses a read-only token', async () => {
+    const token = (await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'limits', scope: 'read' })).body.token;
+    expect((await request(app).put(`/api/usage/limits/${sub}`).set('authorization', `Bearer ${token}`).send({ fiveHour: 10 })).status).toBe(403);
+  });
+
+  it('points old scripts that set global limits to the new route', async () => {
+    for (const body of [{ fiveHourMax: 50 }, { weeklyMax: 60 }]) {
+      const res = await request(app).put('/api/settings').set('cookie', cookie).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Usage limits are set per subscription now: PUT /api/usage/limits/:connectionId.');
+    }
+    expect((await request(app).get('/api/settings').set('cookie', cookie)).body).not.toHaveProperty('fiveHourMax');
+  });
+
+  it('migrates the global limits onto every connection', () => {
+    const migrate = (settings: object | null) => {
+      const db = new DatabaseSync(':memory:');
+      for (const m of MIGRATIONS.slice(0, -1)) db.exec(m);
+      db.exec("INSERT INTO connections (kind, provider, name, config, created_at, updated_at) VALUES ('model', 'anthropic', 'c', '{}', 0, 0)");
+      if (settings) db.prepare("INSERT INTO settings (key, value) VALUES ('settings', ?)").run(JSON.stringify(settings));
+      db.exec(MIGRATIONS.at(-1)!);
+      const conn = db.prepare('SELECT five_hour_max, weekly_max FROM connections').get();
+      const stored = db.prepare("SELECT value FROM settings WHERE key = 'settings'").get() as { value: string } | undefined;
+      db.close();
+      return { conn: { ...conn }, settings: stored ? JSON.parse(stored.value) : null };
+    };
+    expect(migrate({ mode: 'always', fiveHourMax: 55, weeklyMax: 65 })).toEqual({ conn: { five_hour_max: 55, weekly_max: 65 }, settings: { mode: 'always' } });
+    expect(migrate(null)).toEqual({ conn: { five_hour_max: 70, weekly_max: 80 }, settings: null });
+    expect(migrate({ mode: 'paused' })).toEqual({ conn: { five_hour_max: 70, weekly_max: 80 }, settings: { mode: 'paused' } });
+  });
+});
+
 describe('usage and launch', () => {
   it('reports usage with the caps', async () => {
     const res = await request(app).get('/api/usage').set('cookie', cookie);
-    expect(res.body).toMatchObject({ allowance: [], apiSpendTodayUsd: 0, thresholds: { fiveHour: expect.any(Number), weekly: expect.any(Number) } });
+    expect(res.body).toMatchObject({ allowance: [], apiSpendTodayUsd: 0 });
+    expect(res.body).not.toHaveProperty('thresholds');
     const s = (await request(app).get('/api/settings').set('cookie', cookie)).body;
     expect(res.body).toMatchObject({ apiRunCapUsd: s.apiRunCapUsd, apiDailyCapUsd: s.apiDailyCapUsd });
   });

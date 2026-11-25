@@ -2,12 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
-import { allowanceViews, apiSpendSince } from '../allowance.ts';
+import { allowanceOf, allowanceViews, apiSpendSince } from '../allowance.ts';
 import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, TicketStatePatch, Usage } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { listMedia, mediaDir, mediaView } from '../media.ts';
-import { getConnection, listConnections, modelsOf } from '../providers/index.ts';
+import { getConnection, listConnections, modelsOf, setLimits } from '../providers/index.ts';
 import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews, ticketRunViews } from '../runs.ts';
 import { pushRefusal, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, startOfDay, syncSoon } from '../scheduler/loop.ts';
@@ -57,7 +57,6 @@ apiRouter.get('/overview', (_req, res) => {
     mode: s.mode,
     withinHours: withinHours(s, new Date()),
     allowance: allowanceViews(),
-    thresholds: { fiveHour: s.fiveHourMax, weekly: s.weeklyMax },
     running: runViews("runs.status IN ('starting', 'running', 'publishing', 'paused')"),
     needsYou: waiting.filter((t) => !t.dismissed),
     dismissed: waiting.filter((t) => t.dismissed),
@@ -76,12 +75,25 @@ apiRouter.get('/usage', (_req, res) => {
   const s = getSettings();
   const usage: Usage = {
     allowance: allowanceViews(),
-    thresholds: { fiveHour: s.fiveHourMax, weekly: s.weeklyMax },
     apiSpendTodayUsd: apiSpendSince(startOfDay(Date.now(), s.timezone)),
     apiRunCapUsd: s.apiRunCapUsd,
     apiDailyCapUsd: s.apiDailyCapUsd,
   };
   res.json(usage);
+});
+
+/** A Claude subscription's own usage limits. */
+apiRouter.put('/usage/limits/:connectionId', (req, res) => {
+  const c = getConnection(Number(req.params.connectionId));
+  check(c && c.kind === 'model' && c.secret.oauthToken, "That isn't a Claude subscription connection.", 404);
+  const b = req.body ?? {};
+  const limits = { ...c.limits };
+  if (b.fiveHour !== undefined) limits.fiveHour = num(b.fiveHour, '5-hour limit', 0, 100);
+  if (b.weekly !== undefined) limits.weekly = num(b.weekly, 'Weekly limit', 0, 100);
+  setLimits(c.id, limits);
+  // Launches and threshold-paused runs are reconsidered at once.
+  kick();
+  res.json(allowanceOf(c.id, c.name, limits));
 });
 
 apiRouter.get('/openapi.json', (_req, res) => {
@@ -112,8 +124,7 @@ apiRouter.put('/settings', (req, res) => {
     check(/^([01]\d|2[0-3]):[0-5]\d$/.test(b[key]), 'Times must be HH:MM, e.g. 22:00.');
     patch[key] = b[key];
   }
-  if (b.fiveHourMax !== undefined) patch.fiveHourMax = num(b.fiveHourMax, '5-hour limit', 0, 100);
-  if (b.weeklyMax !== undefined) patch.weeklyMax = num(b.weeklyMax, 'Weekly limit', 0, 100);
+  check(b.fiveHourMax === undefined && b.weeklyMax === undefined, 'Usage limits are set per subscription now: PUT /api/usage/limits/:connectionId.');
   if (b.apiRunCapUsd !== undefined) patch.apiRunCapUsd = num(b.apiRunCapUsd, 'API cap per run', 0, 1000);
   if (b.apiDailyCapUsd !== undefined) patch.apiDailyCapUsd = num(b.apiDailyCapUsd, 'API cap per day', 0, 10000);
   if (b.pollMinutes !== undefined) patch.pollMinutes = int(b.pollMinutes, 'Polling interval', 1, 60);

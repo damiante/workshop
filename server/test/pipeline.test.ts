@@ -19,7 +19,7 @@ const { allowanceOf, recordLimit, recordProbe } = await import('../src/allowance
 const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
-const { createConnection, reorderConnections, setConnectionStatus } = await import('../src/providers/index.ts');
+const { createConnection, reorderConnections, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
 const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
@@ -564,7 +564,8 @@ describe('runner', () => {
       low();
     });
     afterEach(() => {
-      saveSettings({ fiveHourMax: 70, mode: 'paused' });
+      setLimits(ids.model, { fiveHour: 70, weekly: 80 });
+      saveSettings({ mode: 'paused' });
       low();
     });
 
@@ -647,7 +648,7 @@ describe('runner', () => {
       resumePaused(getSettings(), Date.now());
       expect(getRun(id)!.status).toBe('paused');
 
-      saveSettings({ fiveHourMax: 80 });
+      setLimits(ids.model, { fiveHour: 80, weekly: 80 });
       resumePaused(getSettings(), Date.now());
       expect(getRun(id)).toMatchObject({ pause_reason: null, resets_at: null });
       await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
@@ -663,6 +664,36 @@ describe('runner', () => {
       low();
       resumePaused(getSettings(), Date.now());
       expect(getRun(limited)!.status).toBe('paused');
+    });
+
+    it("resumes only when its own subscription's limit is raised", async () => {
+      const other = createConnection('model', 'anthropic', 'Claude 2', {}, { oauthToken: 'sk-ant-oat01-two' });
+      try {
+        const { env } = killable([rate(0.75), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        const id = go();
+        expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'threshold' });
+        fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+        recordProbe(ids.model, { pct: 75, resetsAt: Date.now() + 3600_000 }, null);
+
+        setLimits(other, { fiveHour: 90, weekly: 90 });
+        resumePaused(getSettings(), Date.now());
+        expect(getRun(id)!.status).toBe('paused');
+
+        setLimits(ids.model, { fiveHour: 80, weekly: 80 });
+        resumePaused(getSettings(), Date.now());
+        await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+      } finally {
+        run('DELETE FROM connections WHERE id = ?', other);
+      }
+    });
+
+    it('pauses at its own subscription\'s limit', async () => {
+      setLimits(ids.model, { fiveHour: 40, weekly: 80 });
+      const { env, state } = killable([rate(0.5), toolUse('a'), toolResult('a'), DONE]);
+      fake.env = env;
+      expect(await settle(go())).toMatchObject({ status: 'paused', pause_reason: 'threshold' });
+      expect(state.killedAt).toBe(3);
     });
 
     it('resumes a threshold pause once a fresh reading is under the threshold', async () => {
@@ -1113,6 +1144,21 @@ describe('subscription order', () => {
   afterEach(() => {
     run('DELETE FROM connections WHERE id = ?', second);
     run('DELETE FROM allowance_samples');
+    setLimits(ids.model, { fiveHour: 70, weekly: 80 });
+  });
+
+  it("judges each subscription by its own limits", () => {
+    reading(ids.model, 60);
+    reading(second, 60);
+    expect(pick()).toMatchObject({ modelConnectionId: ids.model, blockedBy: null });
+    setLimits(ids.model, { fiveHour: 50, weekly: 80 });
+    expect(pick()).toMatchObject({ modelConnectionId: second, blockedBy: null });
+    setLimits(second, { fiveHour: 55, weekly: 80 });
+    expect(pick().blockedBy).toMatch(/^5-hour allowance at 60%/);
+  });
+
+  it('starts a new subscription at the default limits', () => {
+    expect(allowanceOf(second).limits).toEqual({ fiveHour: 70, weekly: 80 });
   });
 
   it('uses the first subscription in your order, and the next when it is over your limits', () => {

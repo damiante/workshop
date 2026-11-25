@@ -31,14 +31,13 @@ const schemas: Record<string, Schema> = {
     days: array(int),
     start: str,
     end: str,
-    fiveHourMax: num,
-    weeklyMax: num,
     apiRunCapUsd: num,
     apiDailyCapUsd: num,
     pollMinutes: int,
     authors: array(str),
     retentionDays: int,
   }),
+  Limits: object({ fiveHour: num, weekly: num }),
   UsageWindow: object({ pct: num, resetsAt: nullable(int) }),
   AllowanceView: object({
     connectionId: int,
@@ -49,10 +48,10 @@ const schemas: Record<string, Schema> = {
     blockedUntil: nullable(int),
     unknown: bool,
     tokens: object({ fiveHour: int, sevenDay: int }),
+    limits: ref('Limits'),
   }),
   Usage: object({
     allowance: array(ref('AllowanceView')),
-    thresholds: object({ fiveHour: num, weekly: num }),
     apiSpendTodayUsd: num,
     apiRunCapUsd: num,
     apiDailyCapUsd: num,
@@ -152,7 +151,6 @@ const schemas: Record<string, Schema> = {
     mode: ref('Mode'),
     withinHours: bool,
     allowance: array(ref('AllowanceView')),
-    thresholds: object({ fiveHour: num, weekly: num }),
     running: array(ref('RunView')),
     needsYou: array(ref('TicketView')),
     dismissed: array(ref('TicketView')),
@@ -225,7 +223,16 @@ function operation(method: string, op: Op) {
 
 const paths: Record<string, Record<string, Op>> = {
   '/overview': { get: { summary: 'Status: mode, running agents, queue, hosts, allowance and open alerts.', ok: ref('Overview') } },
-  '/usage': { get: { summary: 'Claude allowance per connection, the thresholds, and today\'s API spend against the caps.', ok: ref('Usage') } },
+  '/usage': { get: { summary: 'Claude allowance and limits per subscription, and today\'s API spend against the caps.', ok: ref('Usage') } },
+  '/usage/limits/{connectionId}': {
+    put: {
+      summary: "Changes a Claude subscription's 5-hour and weekly limits (percentages, 0 to 100). Send only the ones to change.",
+      params: ['connectionId'],
+      body: { type: 'object', properties: (schemas.Limits as { properties: Record<string, Schema> }).properties },
+      ok: ref('AllowanceView'),
+      errors: [400, 403, 404],
+    },
+  },
   '/usage/lifetime': { get: { summary: "Lifetime token use and token-equivalent cost of Workshop's agent runs, by billing, model, project and month.", ok: ref('LifetimeSpend') } },
   '/openapi.json': { get: { summary: 'This document.', ok: { type: 'object' } } },
   '/settings': {

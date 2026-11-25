@@ -223,6 +223,15 @@ export const MIGRATIONS = [
   ALTER TABLE connections ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
   UPDATE connections SET position = id;
   `,
+  `
+  -- Usage limits per Claude connection (were global settings).
+  ALTER TABLE connections ADD COLUMN five_hour_max REAL NOT NULL DEFAULT 70;
+  ALTER TABLE connections ADD COLUMN weekly_max REAL NOT NULL DEFAULT 80;
+  UPDATE connections SET
+    five_hour_max = COALESCE((SELECT json_extract(value, '$.fiveHourMax') FROM settings WHERE key = 'settings'), 70),
+    weekly_max = COALESCE((SELECT json_extract(value, '$.weeklyMax') FROM settings WHERE key = 'settings'), 80);
+  UPDATE settings SET value = json_remove(value, '$.fiveHourMax', '$.weeklyMax') WHERE key = 'settings';
+  `,
 ];
 
 export let db: DatabaseSync;

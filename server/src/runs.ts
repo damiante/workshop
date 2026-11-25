@@ -28,7 +28,7 @@ export interface RunRow {
   output_tokens: number | null;
   cost_usd: number | null;
   resets_at: number | null;
-  /** Why a paused run waits: a usage limit Claude reported, the thresholds in Settings, or you ('manual'). Null on older rows means 'limit'. */
+  /** Why a paused run waits: a usage limit Claude reported, its subscription's limits, or you ('manual'). Null on older rows means 'limit'. */
   pause_reason: PauseReason | null;
   /** While starting or running: when you asked it to pause at the next turn boundary. */
   pause_requested_at: number | null;

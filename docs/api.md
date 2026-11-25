@@ -27,8 +27,12 @@ curl -X PUT $WORKSHOP/api/settings -H "Authorization: Bearer $TOKEN" \
 curl -X PUT $WORKSHOP/api/settings -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"ticketOrder":"updated-desc"}'
 
-# Read usage: Claude allowance, thresholds and today's API spend against the caps
+# Read usage: Claude allowance and limits per subscription, and today's API spend against the caps
 curl $WORKSHOP/api/usage -H "Authorization: Bearer $TOKEN"
+
+# Change one subscription's usage limits (connection id from GET /api/usage; send either or both)
+curl -X PUT $WORKSHOP/api/usage/limits/3 -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"fiveHour":50}'
 
 # Lifetime token use and token-equivalent cost, by billing, model, project and month
 curl $WORKSHOP/api/usage/lifetime -H "Authorization: Bearer $TOKEN"
@@ -57,6 +61,8 @@ curl -X POST $WORKSHOP/api/runs/<run id>/resume -H "Authorization: Bearer $TOKEN
 # Stop a run
 curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 ```
+
+Usage limits are set per subscription. `PUT /api/settings` with the old global `fiveHourMax` or `weeklyMax` returns 400, and `/api/overview` and `/api/usage` no longer have a `thresholds` field: each `allowance` entry carries its own `limits`.
 
 ## Launching
 

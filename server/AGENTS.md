@@ -35,7 +35,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 
 ## Run lifecycle
 
-`runs.status`: `starting` (prepare container) → `running` (claude) → `publishing` (push and ticket updates) → `succeeded`. It can also end `failed`, `cancelled` or `lost`, or wait in `paused` for a usage limit to reset, for usage to drop under the thresholds, or for you to resume it (`pause_reason`: `limit`, `threshold`, `manual`). `pause_requested_at` is a pending pause you asked for: `runAgent` stops at the next turn boundary, and a manual pause never resumes by itself (`resumeNow` does that).
+`runs.status`: `starting` (prepare container) → `running` (claude) → `publishing` (push and ticket updates) → `succeeded`. It can also end `failed`, `cancelled` or `lost`, or wait in `paused` for a usage limit to reset, for usage to drop under its subscription's limits, or for you to resume it (`pause_reason`: `limit`, `threshold`, `manual`). `pause_requested_at` is a pending pause you asked for: `runAgent` stops at the next turn boundary, and a manual pause never resumes by itself (`resumeNow` does that).
 
 - `status`, `step` and `container_id` are written before each container starts. `drive(runId)` can therefore pick up any active run after a restart or a lost host, and `loop.reattachRuns` does exactly that. Keep every step re-entrant:
   - `prepare` and `publish` may simply run again;
@@ -66,7 +66,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - `readClaudeLine` (in `providers/anthropic/index.ts`) reads:
   - `system/init`;
   - `assistant` (activity text, `error` such as `authentication_failed`, and `tool_use` ids);
-  - `user` (`tool_result.tool_use_id`): with the `tool_use` ids, this finds turn boundaries, where a run over the thresholds is stopped. Lines with a `parent_tool_use_id` are a subagent's and don't count;
+  - `user` (`tool_result.tool_use_id`): with the `tool_use` ids, this finds turn boundaries, where a run over its subscription's limits is stopped. Lines with a `parent_tool_use_id` are a subagent's and don't count;
   - `system/api_retry`;
   - `rate_limit_event`: `rate_limit_info.unifiedWindows.{five_hour,seven_day}.utilization` (a fraction) and `resetsAt` (epoch seconds), plus `status` and `isUsingOverage`;
   - `result`: `structured_output`, `is_error`, `subtype`, `usage`, `total_cost_usd`.

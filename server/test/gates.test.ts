@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AllowanceView, Settings } from '../src/api-types.ts';
+import type { AllowanceView, Limits, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
 import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isUnclassified, modeBlock, priorityBlock, pickHost, pickSubscription, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
 
@@ -53,6 +53,7 @@ describe('allowance gate', () => {
     blockedUntil: null,
     unknown: false,
     tokens: { fiveHour: 0, sevenDay: 0 },
+    limits: { fiveHour: 70, weekly: 80 },
     ...over,
   });
 
@@ -64,6 +65,13 @@ describe('allowance gate', () => {
     expect(allowanceBlock(a({ fiveHour: { pct: 70, resetsAt: null } }), s(), now)).toBeNull();
     expect(allowanceBlock(a({ fiveHour: { pct: 74, resetsAt: now + 600_000 } }), s(), now)).toMatch(/^5-hour allowance at 74%, resets \d\d:\d\d$/);
     expect(allowanceBlock(a({ sevenDay: { pct: 81, resetsAt: null } }), s(), now)).toMatch(/Weekly allowance at 81%/);
+  });
+
+  it("uses the subscription's own limits", () => {
+    const high = { pct: 74, resetsAt: null };
+    expect(allowanceBlock(a({ fiveHour: high, limits: { fiveHour: 80, weekly: 80 } }), s(), now)).toBeNull();
+    expect(allowanceBlock(a({ fiveHour: high, limits: { fiveHour: 70, weekly: 80 } }), s(), now)).toMatch(/5-hour allowance at 74%/);
+    expect(allowanceBlock(a({ limits: { fiveHour: 70, weekly: 40 } }), s(), now)).toMatch(/Weekly allowance at 50%/);
   });
 
   it('ignores a window whose reset has passed', () => {
@@ -82,11 +90,12 @@ describe('allowance gate', () => {
   it('says which window is over the thresholds and when it resets, for pausing running agents', () => {
     const five = { pct: 74, resetsAt: now + 600_000 };
     const week = { pct: 81, resetsAt: now + 86400_000 };
-    expect(thresholdBlock({ fiveHour: five, sevenDay: null }, s(), now)).toEqual({ reason: expect.stringMatching(/^5-hour allowance at 74%, resets \d\d:\d\d$/), resetsAt: five.resetsAt });
-    expect(thresholdBlock({ fiveHour: null, sevenDay: week }, s(), now)).toEqual({ reason: expect.stringMatching(/^Weekly allowance at 81%, resets /), resetsAt: week.resetsAt });
-    expect(thresholdBlock({ fiveHour: { pct: 70, resetsAt: null }, sevenDay: { pct: 80, resetsAt: null } }, s(), now)).toBeNull();
-    expect(thresholdBlock({ fiveHour: { pct: 95, resetsAt: now - 1 }, sevenDay: null }, s(), now)).toBeNull();
-    expect(thresholdBlock({ fiveHour: five, sevenDay: null }, s({ fiveHourMax: 80 }), now)).toBeNull();
+    const L: Limits = { fiveHour: 70, weekly: 80 };
+    expect(thresholdBlock({ fiveHour: five, sevenDay: null }, L, s(), now)).toEqual({ reason: expect.stringMatching(/^5-hour allowance at 74%, resets \d\d:\d\d$/), resetsAt: five.resetsAt });
+    expect(thresholdBlock({ fiveHour: null, sevenDay: week }, L, s(), now)).toEqual({ reason: expect.stringMatching(/^Weekly allowance at 81%, resets /), resetsAt: week.resetsAt });
+    expect(thresholdBlock({ fiveHour: { pct: 70, resetsAt: null }, sevenDay: { pct: 80, resetsAt: null } }, L, s(), now)).toBeNull();
+    expect(thresholdBlock({ fiveHour: { pct: 95, resetsAt: now - 1 }, sevenDay: null }, L, s(), now)).toBeNull();
+    expect(thresholdBlock({ fiveHour: five, sevenDay: null }, { fiveHour: 80, weekly: 80 }, s(), now)).toBeNull();
   });
 });
 

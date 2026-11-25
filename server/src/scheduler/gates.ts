@@ -1,4 +1,4 @@
-import type { AllowanceView, Topic, Push, RepoSelection, Settings, UsageWindow } from '../api-types.ts';
+import type { AllowanceView, Limits, Topic, Push, RepoSelection, Settings, UsageWindow } from '../api-types.ts';
 import { label, nextStep, parseLabels, type Step } from '../workflow/labels.ts';
 
 /** Whether Workshop may work on a ticket: always for a whole-backlog repository, otherwise only when nominated. */
@@ -54,20 +54,21 @@ export const ALLOWANCE_MAX_AGE_MS = 10 * 60_000;
 export function allowanceBlock(a: AllowanceView | undefined, s: Settings, now: number): string | null {
   if (a?.blockedUntil && a.blockedUntil > now) return `Claude reported you're at or near a usage limit; resumes ${formatTime(a.blockedUntil, s.timezone, now)}`;
   if (!a?.sampledAt || now - a.sampledAt > ALLOWANCE_MAX_AGE_MS) return 'Checking allowance';
-  return thresholdBlock(a, s, now)?.reason ?? null;
+  return thresholdBlock(a, a.limits, s, now)?.reason ?? null;
 }
 
-/** Which usage window is over the thresholds in Settings, or null. Launches and running agents both stop on it. */
+/** Which usage window is over this subscription's limits, or null. Launches and running agents both stop on it. */
 export function thresholdBlock(
   w: { fiveHour: UsageWindow | null; sevenDay: UsageWindow | null },
-  s: Settings,
+  limits: Limits,
+  s: Pick<Settings, 'timezone'>,
   now: number,
 ): { reason: string; resetsAt: number | null } | null {
   const resets = (u: UsageWindow | null) => (u?.resetsAt ? `, resets ${formatTime(u.resetsAt, s.timezone, now)}` : '');
   const five = used(w.fiveHour, now);
-  if (five > s.fiveHourMax) return { reason: `5-hour allowance at ${Math.round(five)}%${resets(w.fiveHour)}`, resetsAt: w.fiveHour?.resetsAt ?? null };
+  if (five > limits.fiveHour) return { reason: `5-hour allowance at ${Math.round(five)}%${resets(w.fiveHour)}`, resetsAt: w.fiveHour?.resetsAt ?? null };
   const week = used(w.sevenDay, now);
-  if (week > s.weeklyMax) return { reason: `Weekly allowance at ${Math.round(week)}%${resets(w.sevenDay)}`, resetsAt: w.sevenDay?.resetsAt ?? null };
+  if (week > limits.weekly) return { reason: `Weekly allowance at ${Math.round(week)}%${resets(w.sevenDay)}`, resetsAt: w.sevenDay?.resetsAt ?? null };
   return null;
 }
 

@@ -1,7 +1,10 @@
-import type { AllowanceView, UsageWindow } from './api-types.ts';
+import type { AllowanceView, Limits, UsageWindow } from './api-types.ts';
 import { one, run } from './db.ts';
 import { publish } from './events.ts';
-import { listConnections } from './providers/index.ts';
+import { getConnection, listConnections } from './providers/index.ts';
+
+/** What a new connection starts with, and what a run judges by when its connection is gone. */
+export const DEFAULT_LIMITS: Limits = { fiveHour: 70, weekly: 80 };
 
 interface SampleRow {
   ts: number;
@@ -14,7 +17,7 @@ interface SampleRow {
 
 const window = (pct: number | null, resetsAt: number | null): UsageWindow | null => (pct === null ? null : { pct, resetsAt });
 
-export function allowanceOf(connectionId: number, name = ''): AllowanceView {
+export function allowanceOf(connectionId: number, name = '', limits?: Limits): AllowanceView {
   const probe = one<SampleRow>("SELECT * FROM allowance_samples WHERE connection_id = ? AND source = 'probe' ORDER BY ts DESC, rowid DESC LIMIT 1", connectionId);
   const block = one<{ blocked_until: number }>(
     "SELECT blocked_until FROM allowance_samples WHERE connection_id = ? AND source = 'limit' ORDER BY ts DESC LIMIT 1",
@@ -31,6 +34,7 @@ export function allowanceOf(connectionId: number, name = ''): AllowanceView {
     blockedUntil: block && block.blocked_until > Date.now() ? block.blocked_until : null,
     unknown: Boolean(probe) && probe!.five_hour === null && probe!.seven_day === null,
     tokens: { fiveHour: tokensSince(5 * 3600_000), sevenDay: tokensSince(7 * 86400_000) },
+    limits: limits ?? getConnection(connectionId)?.limits ?? DEFAULT_LIMITS,
   };
 }
 
@@ -38,7 +42,7 @@ export function allowanceOf(connectionId: number, name = ''): AllowanceView {
 export function allowanceViews(): AllowanceView[] {
   return listConnections('model')
     .filter((c) => c.secret.oauthToken)
-    .map((c) => allowanceOf(c.id, c.name));
+    .map((c) => allowanceOf(c.id, c.name, c.limits));
 }
 
 export function recordProbe(connectionId: number, fiveHour: UsageWindow | null, sevenDay: UsageWindow | null) {

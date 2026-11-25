@@ -1,4 +1,4 @@
-import type { ConnectionKind, ConnectionStatus, ConnectionView, ProviderInfo } from '../api-types.ts';
+import type { ConnectionKind, ConnectionStatus, ConnectionView, Limits, ProviderInfo } from '../api-types.ts';
 import { seal, unseal } from '../crypto.ts';
 import { all, one, run } from '../db.ts';
 import { publish } from '../events.ts';
@@ -22,6 +22,8 @@ interface Row {
   checked_at: number | null;
   error: string | null;
   updated_at: number;
+  five_hour_max: number;
+  weekly_max: number;
 }
 
 export interface Connection<C = Record<string, unknown>, S = Record<string, string>> {
@@ -35,6 +37,8 @@ export interface Connection<C = Record<string, unknown>, S = Record<string, stri
   checkedAt: number | null;
   error: string | null;
   updatedAt: number;
+  /** Usage limits (percentages); only Claude subscriptions use them. */
+  limits: Limits;
 }
 
 function fromRow(row: Row): Connection {
@@ -49,6 +53,7 @@ function fromRow(row: Row): Connection {
     checkedAt: row.checked_at,
     error: row.error,
     updatedAt: row.updated_at,
+    limits: { fiveHour: row.five_hour_max, weekly: row.weekly_max },
   };
 }
 
@@ -106,6 +111,11 @@ export function updateConnection(id: number, patch: { name?: string; config?: ob
     id,
   );
   publish('connections');
+}
+
+export function setLimits(id: number, limits: Limits) {
+  run('UPDATE connections SET five_hour_max = ?, weekly_max = ? WHERE id = ?', limits.fiveHour, limits.weekly, id);
+  publish('allowance');
 }
 
 export function setConnectionStatus(id: number, status: ConnectionStatus, error: string | null = null) {

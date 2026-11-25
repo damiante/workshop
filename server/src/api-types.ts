@@ -14,8 +14,6 @@ export interface Settings {
   /** 'HH:MM'. start === end means all day; start > end spans midnight. */
   start: string;
   end: string;
-  fiveHourMax: number;
-  weeklyMax: number;
   apiRunCapUsd: number;
   apiDailyCapUsd: number;
   pollMinutes: number;
@@ -241,6 +239,12 @@ export interface UsageWindow {
   resetsAt: number | null;
 }
 
+/** Usage limits as percentages of a subscription's 5-hour and weekly windows. */
+export interface Limits {
+  fiveHour: number;
+  weekly: number;
+}
+
 export interface AllowanceView {
   connectionId: number;
   connectionName: string;
@@ -249,10 +253,12 @@ export interface AllowanceView {
   sampledAt: number | null;
   /** Set when Claude itself reported a rate limit during a run. */
   blockedUntil: number | null;
-  /** The account works but Claude doesn't report its 5-hour and weekly usage, so Workshop can't hold launches on your thresholds. */
+  /** The account works but Claude doesn't report its 5-hour and weekly usage, so Workshop can't hold launches on its limits. */
   unknown: boolean;
   /** Tokens (input including cache, plus output) that runs on this connection used in the last 5 hours and 7 days. */
   tokens: { fiveHour: number; sevenDay: number };
+  /** No new agents start on this subscription above these, and its running agents pause. */
+  limits: Limits;
 }
 
 export interface HostView {
@@ -292,7 +298,6 @@ export interface Overview {
   mode: Mode;
   withinHours: boolean;
   allowance: AllowanceView[];
-  thresholds: { fiveHour: number; weekly: number };
   running: RunView[];
   needsYou: TicketView[];
   /** Needs-you items you dismissed. */
@@ -304,7 +309,6 @@ export interface Overview {
 
 export interface Usage {
   allowance: AllowanceView[];
-  thresholds: { fiveHour: number; weekly: number };
   apiSpendTodayUsd: number;
   apiRunCapUsd: number;
   apiDailyCapUsd: number;

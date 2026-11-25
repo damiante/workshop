@@ -66,7 +66,7 @@ Claude Code reports both windows in every `rate_limit_event` of a headless run, 
 - Every agent run refreshes the reading for free.
 - When no reading is newer than 10 minutes and a launch is waiting, Workshop runs `usage-probe`. That's a one-turn `claude -p` with a replaced system prompt and no tools: about 700 input tokens on Haiku.
 - If Claude reports `allowed_warning`, `rejected`, or paid overage during a run, launches on that connection stop until the reset time.
-- A subscription run that goes over a threshold in Settings is stopped at its next turn boundary, once every tool call it started has returned (or after 10 minutes, if a subagent keeps one open). It waits as `paused` and resumes in the same session when usage is back under the thresholds: after the window resets, or as soon as you raise them.
+- A subscription run that goes over its subscription's limit is stopped at its next turn boundary, once every tool call it started has returned (or after 10 minutes, if a subagent keeps one open). It waits as `paused` and resumes in the same session when usage is back under that subscription's limits: after the window resets, or as soon as you raise them.
 - **Pause** on the run page does the same on demand: the agent stops at its next turn boundary and waits as `paused` (`pause_reason = 'manual'`), freeing its host slot for the queue. The request is stored (`runs.pause_requested_at`), so it survives a restart. A manual pause never resumes by itself; **Resume** continues the session on the same host if it has a free slot and the allowance allows. The first step after resuming re-reads the whole conversation, because the prompt cache has expired by then. A paused segment's cost isn't recorded (it prints no result), which undercounts API-billed runs you pause.
 - If no reading is available, Workshop fails closed: nothing starts on the subscription and an alert explains why.
 - Some accounts answer the probe without any `unifiedWindows`. Workshop then records the reading as unknown (both windows null), so launches go ahead and only a `rejected` limit stops them. The top bar shows "Usage unknown" with the tokens that connection's runs used in the last 5 hours and 7 days, taken from the spend ledger.
@@ -93,7 +93,7 @@ Each stage gets two attempts. After that, the ticket gets `workshop/failed`, a c
 
 ### API billing has dollar caps
 
-The allowance thresholds only apply to subscription billing. Runs on an API key get `--max-budget-usd` (default $5), and Workshop stops starting API runs once the day's runs reach a daily cap (default $20).
+The allowance limits (set per subscription) only apply to subscription billing. Runs on an API key get `--max-budget-usd` (default $5), and Workshop stops starting API runs once the day's runs reach a daily cap (default $20).
 
 ### Sign-in is password plus TOTP
 

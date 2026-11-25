@@ -10,8 +10,6 @@ export const DEFAULT_SETTINGS: Settings = {
   days: [0, 1, 2, 3, 4, 5, 6],
   start: '00:00',
   end: '00:00',
-  fiveHourMax: 70,
-  weeklyMax: 80,
   apiRunCapUsd: 5,
   apiDailyCapUsd: 20,
   pollMinutes: 3,

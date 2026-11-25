@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import type { ApiTokenView, LifetimeSpend, NewApiToken, Settings, SpendTotals, TicketOrder } from '../../../server/src/api-types.ts';
+import type { ApiTokenView, LifetimeSpend, Limits, NewApiToken, Settings, SpendTotals, TicketOrder, Usage } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Panel } from '../components/ui.tsx';
 import { ago, money, tokens } from '../format.ts';
@@ -197,7 +197,10 @@ function ApiTokens() {
 
 export function SettingsPage() {
   const { data, error } = useApi<Settings>('/settings', ['settings']);
+  const usage = useApi<Usage>('/usage', ['allowance', 'connections']);
   const [draft, setDraft] = useState<Settings | null>(null);
+  // Limits you've edited, by connection; the rest show what's saved.
+  const [limits, setLimits] = useState<Record<number, Limits>>({});
   const [authors, setAuthors] = useState('');
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -213,6 +216,10 @@ export function SettingsPage() {
     setDraft({ ...draft, ...patch });
     setSaved(false);
   };
+  const setLimit = (connectionId: number, current: Limits, patch: Partial<Limits>) => {
+    setLimits({ ...limits, [connectionId]: { ...current, ...patch } });
+    setSaved(false);
+  };
   const toggleDay = (d: number) => set({ days: draft.days.includes(d) ? draft.days.filter((x) => x !== d) : [...draft.days, d].sort() });
 
   const save = async (e: FormEvent) => {
@@ -221,6 +228,13 @@ export function SettingsPage() {
     try {
       const { mode: _mode, ...rest } = draft; // the mode switch lives in the top bar
       await api('/settings', { method: 'PUT', body: { ...rest, authors: authors.split(/[\s,]+/).filter(Boolean) } });
+      for (const a of usage.data?.allowance ?? []) {
+        const edit = limits[a.connectionId];
+        if (edit && (edit.fiveHour !== a.limits.fiveHour || edit.weekly !== a.limits.weekly)) {
+          await api(`/usage/limits/${a.connectionId}`, { method: 'PUT', body: edit });
+        }
+      }
+      setLimits({});
       setSaved(true);
     } catch (err) {
       setSaveError((err as Error).message);
@@ -267,9 +281,38 @@ export function SettingsPage() {
         </div>
       </Panel>
       <Panel title="Claude subscription allowance">
-        <div className="panel-body fields">
-          <NumberField label="5-hour limit (%)" help="No new agents start above this, and running agents pause after their current step until usage drops back under it. Claude's own warning at 90% also holds them, so higher values have no effect." value={draft.fiveHourMax} min={0} max={100} onChange={(n) => set({ fiveHourMax: n })} />
-          <NumberField label="Weekly limit (%)" help="No new agents start above this, and running agents pause after their current step until usage drops back under it." value={draft.weeklyMax} min={0} max={100} onChange={(n) => set({ weeklyMax: n })} />
+        <div className="panel-body stack">
+          <ErrorNote error={usage.error} />
+          {usage.data && usage.data.allowance.length === 0 && <p className="small muted">No Claude subscription connected yet. Add one on the Connections page.</p>}
+          {usage.data && usage.data.allowance.length > 0 && (
+            <p className="small muted">Each subscription has its own limits. Subscription agents use the first one in your order (Connections) that's under them.</p>
+          )}
+          {usage.data?.allowance.map((a) => {
+            const current = limits[a.connectionId] ?? a.limits;
+            return (
+              <div key={a.connectionId} className="stack">
+                <strong>{a.connectionName}</strong>
+                <div className="fields">
+                  <NumberField
+                    label="5-hour limit (%)"
+                    help="No new agents start on this subscription above this, and its running agents pause after their current step until usage drops back under it. Claude's own warning at 90% also holds them, so higher values have no effect."
+                    value={current.fiveHour}
+                    min={0}
+                    max={100}
+                    onChange={(n) => setLimit(a.connectionId, current, { fiveHour: n })}
+                  />
+                  <NumberField
+                    label="Weekly limit (%)"
+                    help="No new agents start on this subscription above this, and its running agents pause after their current step until usage drops back under it."
+                    value={current.weekly}
+                    min={0}
+                    max={100}
+                    onChange={(n) => setLimit(a.connectionId, current, { weekly: n })}
+                  />
+                </div>
+              </div>
+            );
+          })}
         </div>
       </Panel>
       <Panel title="API billing">

@@ -57,7 +57,7 @@ export function syncSoon() {
 
 /**
  * Runs the checks the timer runs, now: syncs every repository, re-reads the usage of subscriptions
- * that are over the thresholds or unchecked (even one whose last check just failed), then ticks. A usage limit Claude
+ * that are over their limits or unchecked (even one whose last check just failed), then ticks. A usage limit Claude
  * reported keeps its reset time. Resolves when those allowance checks have settled.
  */
 export async function refreshNow() {
@@ -201,7 +201,7 @@ export function resumePaused(s: Settings, now: number) {
   for (const r of all<RunRow>("SELECT * FROM runs WHERE status = 'paused'")) {
     if (r.pause_reason === 'manual') continue; // waits for you to resume it
     if (modeReason && !getTicket(r.ticket_id)?.push) continue;
-    // A threshold pause also ends early when you raise the thresholds: allowanceBlock below decides.
+    // A threshold pause also ends early when you raise that subscription's limits: allowanceBlock below decides.
     if (r.pause_reason !== 'threshold' && r.resets_at && r.resets_at > now) continue;
     if (r.billing === 'subscription' && r.model_connection_id) {
       const block = allowanceBlock(allowanceOf(r.model_connection_id), s, now);
