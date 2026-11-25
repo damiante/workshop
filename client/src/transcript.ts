@@ -69,7 +69,10 @@ export function summarizeTool(name: string, input: Record<string, unknown> = {})
 
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content;
-  if (Array.isArray(content)) return content.map((c) => (typeof c === 'string' ? c : (c as { text?: string }).text ?? '')).join('\n');
+  if (Array.isArray(content))
+    return content
+      .map((c) => (typeof c === 'string' ? c : c?.type === 'image' ? `(${c.source?.media_type ?? 'image'})` : ((c as { text?: string }).text ?? '')))
+      .join('\n');
   return JSON.stringify(content, null, 2);
 }
 
@@ -99,7 +102,16 @@ export function addEntry(t: Transcript, entry: LogEntry): void {
   try {
     event = JSON.parse(entry.text);
   } catch {
-    t.items.push({ kind: 'log', text: entry.text, error: false });
+    if (!entry.text.startsWith('{')) {
+      t.items.push({ kind: 'log', text: entry.text, error: false });
+      return;
+    }
+    // A stream-json event Workshop cut short (usually a tool result holding an image): don't show it inline.
+    const tooLong = `(Too long to show: ${entry.text.length.toLocaleString('en')} characters.)`;
+    const id = /^\{"type":"user".*?"tool_use_id":"([^"]+)"/.exec(entry.text)?.[1];
+    const item = t.items[t.tools.get(id ?? '') ?? -1];
+    if (item?.kind === 'tool') item.output = tooLong;
+    else t.items.push({ kind: 'tool', name: 'Log line', summary: 'cut short by Workshop', input: `${entry.text.slice(0, 2000)} …`, output: tooLong });
     return;
   }
   switch (event.type) {
