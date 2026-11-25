@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router';
-import type { LogEntry, RunView as Run } from '../../../server/src/api-types.ts';
+import type { LogEntry, NewApiToken, RunView as Run } from '../../../server/src/api-types.ts';
+import { claudeBrief } from '../access.ts';
 import { api, useApi, useNow } from '../api.ts';
 import { Markdown } from '../components/Markdown.tsx';
 import { ErrorNote, Panel, Progress, Status } from '../components/ui.tsx';
@@ -97,6 +98,7 @@ export function RunView() {
   const scrolledTo = useRef<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [brief, setBrief] = useState<string | null>(null);
 
   useEffect(() => {
     transcript.current = emptyTranscript();
@@ -180,6 +182,18 @@ export function RunView() {
       .then(() => setActionError(null), (e: Error) => setActionError(e.message))
       .finally(() => setBusy(false));
   };
+  const giveClaudeAccess = () => {
+    setBusy(true);
+    api<NewApiToken>('/tokens', { method: 'POST', body: { name: `Claude: run ${run.id.slice(0, 8)}`, scope: 'read', expiresInMinutes: 480 } })
+      .then(
+        (made) => {
+          setActionError(null);
+          setBrief(claudeBrief({ origin: location.origin, token: made.token, expiresAt: made.view.expiresAt!, run }));
+        },
+        (e: Error) => setActionError(e.message),
+      )
+      .finally(() => setBusy(false));
+  };
   const stop = () => {
     if (!confirm('Stop this run? The ticket gets the workshop/failed label, so it won’t start again until you remove it.')) return;
     act('stop');
@@ -210,6 +224,9 @@ export function RunView() {
           <a className="button" href={`/api/runs/${run.id}/export`} download>
             Export log
           </a>
+          <button disabled={busy} onClick={giveClaudeAccess} title="Create a read-only API token and a brief to paste into Claude Code">
+            Give Claude access
+          </button>
           {working && !run.pauseRequested && (
             <button disabled={busy} onClick={() => act('pause')} title="Stop after the current step and free the host until you resume it">
               Pause
@@ -255,6 +272,22 @@ export function RunView() {
       </div>
       {pausedByYou && (
         <p className="small muted">Resuming continues the same conversation; its first step re-reads the conversation so far, which uses some extra usage.</p>
+      )}
+      {brief && (
+        <Panel title="Brief for Claude Code">
+          <div className="panel-body stack">
+            <textarea readOnly rows={14} className="mono" value={brief} aria-label="Brief for Claude Code" onFocus={(e) => e.target.select()} />
+            <div className="row">
+              <button type="button" className="primary" onClick={() => void navigator.clipboard?.writeText(brief)}>
+                Copy
+              </button>
+              <button type="button" onClick={() => setBrief(null)}>
+                Close
+              </button>
+              <span className="small muted">Read-only, expires in 8 hours. Revoke it in Settings → API tokens. Workshop won't show this token again.</span>
+            </div>
+          </div>
+        </Panel>
       )}
       <ErrorNote error={actionError} />
       {run.error && <p className="notice error">{run.error}</p>}

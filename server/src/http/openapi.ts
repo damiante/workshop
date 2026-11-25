@@ -382,7 +382,7 @@ export const OPENAPI = {
     version: config.version,
     description:
       'Workshop\'s HTTP API. Authenticate with `Authorization: Bearer wks_…` (create a token in Settings) or the web session cookie. ' +
-      'Read-only tokens may only use GET. Connections and API tokens can only be managed from a signed-in browser session, so they are not described here.',
+      'Read-only tokens may only use GET. Tokens may expire; an expired token gets 401. Connections and API tokens can only be managed from a signed-in browser session, so they are not described here.',
   },
   servers: [{ url: '/api' }],
   security: [{ bearer: [] }, { session: [] }],

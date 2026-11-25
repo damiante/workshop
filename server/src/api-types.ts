@@ -354,6 +354,8 @@ export interface ApiTokenView {
   scope: TokenScope;
   createdAt: number;
   lastUsedAt: number | null;
+  /** When the token stops working; null if it never expires. */
+  expiresAt: number | null;
 }
 
 /** Returned once, when a token is created. */

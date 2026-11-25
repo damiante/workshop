@@ -251,6 +251,10 @@ export const MIGRATIONS = [
   ALTER TABLE runs ADD COLUMN timeout_min INTEGER;
   ALTER TABLE runs ADD COLUMN step_started_at INTEGER;
   `,
+  `
+  -- When an API token stops working; null: never expires (#96).
+  ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER;
+  `,
 ];
 
 export let db: DatabaseSync;

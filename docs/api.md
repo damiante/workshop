@@ -14,7 +14,11 @@ export TOKEN=wks_…
 - **Full** tokens can use every endpoint described in the schema.
 - **Read only** tokens can only make `GET` requests. Other methods get 403.
 - Connections and API tokens can't be reached with a token. Managing them needs the web sign-in.
-- Tokens don't expire. Revoke one in Settings and it stops working immediately.
+- A token can expire: pick its lifetime when you create it. An expired token gets 401. Revoke one in Settings and it stops working immediately.
+
+### Debugging with Claude
+
+To have Claude Code look into a run, open the run and click **Give Claude access**. Workshop creates a read-only token that lasts 8 hours and shows a brief to paste into Claude Code: the instance URL, the token, how to send it, where the schema is, and the `curl` calls to start with for that run, its ticket and the alerts. Copy it, or select it from the text box when the clipboard isn't available. If Claude should act (resume a run, change settings), create a Full token in Settings instead.
 
 ## Examples
 

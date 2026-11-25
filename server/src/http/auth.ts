@@ -48,9 +48,13 @@ function readBearer(req: Request): string | null {
 }
 
 /** Known API token → its id and scope. Refreshes `last_used_at` at most once a minute. */
-function checkToken(token: string): { id: number; scope: TokenScope } | null {
-  const row = one<{ id: number; scope: TokenScope; last_used_at: number | null }>('SELECT id, scope, last_used_at FROM api_tokens WHERE token_hash = ?', sha256(token));
+function checkToken(token: string): { id: number; scope: TokenScope } | 'expired' | null {
+  const row = one<{ id: number; scope: TokenScope; last_used_at: number | null; expires_at: number | null }>(
+    'SELECT id, scope, last_used_at, expires_at FROM api_tokens WHERE token_hash = ?',
+    sha256(token),
+  );
   if (!row) return null;
+  if (row.expires_at !== null && row.expires_at <= Date.now()) return 'expired';
   if (!row.last_used_at || Date.now() - row.last_used_at > 60_000) run('UPDATE api_tokens SET last_used_at = ? WHERE id = ?', Date.now(), row.id);
   return { id: row.id, scope: row.scope };
 }
@@ -60,6 +64,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (bearer) {
     const token = checkToken(bearer);
     if (!token) return res.status(401).json({ error: 'That API token is wrong or was revoked.' });
+    if (token === 'expired') return res.status(401).json({ error: 'That API token has expired. Create a new one in Settings.' });
     if (token.scope === 'read' && req.method !== 'GET' && req.method !== 'HEAD') return res.status(403).json({ error: 'This API token is read-only.' });
     res.locals.token = token;
     return next();

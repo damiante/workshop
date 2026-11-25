@@ -15,6 +15,7 @@ import { appendLog, readLog } from '../src/runs.ts';
 import { saveSettings } from '../src/settings.ts';
 import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
+import { sweepExpiredTokens } from '../src/http/tokens.ts';
 
 // The ticket source is faked, so label edits can be recorded or made to fail, and the code host's branch rules.
 const fakeTickets = vi.hoisted(() => ({ setLabels: null as any, createTicket: null as any }));
@@ -171,6 +172,46 @@ describe('API tokens', () => {
     expect((await request(app).delete(`/api/tokens/${writeId}`).set('cookie', cookie)).status).toBe(200);
     expect((await request(app).get('/api/overview').set('authorization', `Bearer ${write}`)).status).toBe(401);
     expect((await request(app).delete(`/api/tokens/${writeId}`).set('cookie', cookie)).status).toBe(404);
+  });
+
+  it('stores a lifetime, and never expires without one', async () => {
+    const timed = (await create({ name: 'Timed', scope: 'read', expiresInMinutes: 60 })).body;
+    expect(timed.view.expiresAt - timed.view.createdAt).toBe(3_600_000);
+    const forever = (await create({ name: 'Forever', scope: 'read', expiresInMinutes: null })).body;
+    expect(forever.view.expiresAt).toBeNull();
+    expect((await request(app).get('/api/overview').set('authorization', `Bearer ${timed.token}`)).status).toBe(200);
+    const list = (await request(app).get('/api/tokens').set('cookie', cookie)).body as { name: string; expiresAt: number | null }[];
+    expect(list.find((t) => t.name === 'Timed')?.expiresAt).toBe(timed.view.expiresAt);
+    expect(list.find((t) => t.name === 'Forever')?.expiresAt).toBeNull();
+  });
+
+  it('refuses an expired token without recording its use', async () => {
+    const made = (await create({ name: 'Brief', scope: 'read', expiresInMinutes: 5 })).body;
+    run('UPDATE api_tokens SET expires_at = ? WHERE id = ?', Date.now() - 1, made.view.id);
+    const res = await request(app).get('/api/overview').set('authorization', `Bearer ${made.token}`);
+    expect(res.status).toBe(401);
+    expect(res.body.error).toBe('That API token has expired. Create a new one in Settings.');
+    expect(one<{ last_used_at: number | null }>('SELECT last_used_at FROM api_tokens WHERE id = ?', made.view.id)?.last_used_at).toBeNull();
+  });
+
+  it('validates the lifetime', async () => {
+    for (const expiresInMinutes of [1, 'abc', 525_601, 60.5]) {
+      const res = await create({ name: 'x', scope: 'read', expiresInMinutes });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Lifetime in minutes must be a whole number from 5 to 525600.');
+    }
+  });
+
+  it('sweeps tokens a week after they expire', async () => {
+    const ids = [];
+    for (const [name, ago] of [['Old', 8], ['Recent', 1], ['Endless', null]] as const) {
+      const id = (await create({ name, scope: 'read', expiresInMinutes: ago === null ? null : 60 })).body.view.id as number;
+      if (ago !== null) run('UPDATE api_tokens SET expires_at = ? WHERE id = ?', Date.now() - ago * 86400_000, id);
+      ids.push(id);
+    }
+    sweepExpiredTokens();
+    const left = (id: number) => Boolean(one('SELECT id FROM api_tokens WHERE id = ?', id));
+    expect(ids.map(left)).toEqual([false, true, true]);
   });
 });
 

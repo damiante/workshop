@@ -30,7 +30,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/scheduler/merge.ts` | API-first merging, closed and merged pull requests |
 | `src/providers/` | `types.ts` (interfaces), `index.ts` (connections, encrypted secrets, cached instances), and `github/`, `docker/`, `anthropic/` |
 | `src/http/` | `auth.ts` (password + TOTP, sessions, API-token check, lockout, Origin check), `api.ts`, `connections.ts`, `util.ts` |
-| `src/http/tokens.ts` | Create, list and revoke API tokens (session only) |
+| `src/http/tokens.ts` | Create, list and revoke API tokens (session only; optional expiry; expired rows are swept after 7 days) |
 | `src/http/openapi.ts` | Hand-written OpenAPI document served at `/api/openapi.json` |
 
 ## Run lifecycle
