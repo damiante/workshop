@@ -245,6 +245,12 @@ export const MIGRATIONS = [
   INSERT OR IGNORE INTO agent_classes (name, model, model_connection_id, effort, billing, max_turns, timeout_min)
     SELECT 'code-review', model, model_connection_id, effort, billing, 150, 60 FROM agent_classes WHERE name = 'design-review';
   `,
+  `
+  -- The limits a run's agent session started with, and when its current container started (#93).
+  ALTER TABLE runs ADD COLUMN max_turns INTEGER;
+  ALTER TABLE runs ADD COLUMN timeout_min INTEGER;
+  ALTER TABLE runs ADD COLUMN step_started_at INTEGER;
+  `,
 ];
 
 export let db: DatabaseSync;

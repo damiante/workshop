@@ -22,6 +22,20 @@ export function Meter({ label, window, threshold }: { label: string; window: Usa
   );
 }
 
+/** A bar for how much of a run's limit is used, e.g. turns of max turns. */
+export function Progress({ label, value, max, text }: { label: string; value: number; max: number; text: string }) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 100;
+  return (
+    <div className="meter">
+      <span>{label}</span>
+      <div className="meter-track" role="meter" aria-label={label} aria-valuenow={value} aria-valuemin={0} aria-valuemax={max}>
+        <div className={`meter-fill${value >= max ? ' over' : ''}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="muted">{text}</span>
+    </div>
+  );
+}
+
 export function Modal({ title, onClose, className, children }: { title: string; onClose: () => void; className?: string; children: ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

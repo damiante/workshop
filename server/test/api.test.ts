@@ -307,10 +307,11 @@ describe('usage limits per subscription', () => {
 describe('code reviewer migration', () => {
   it("gives existing installs a Code reviewer with the Design adversary's model and billing", () => {
     const db = new DatabaseSync(':memory:');
-    for (const m of MIGRATIONS.slice(0, -1)) db.exec(m);
+    const at = MIGRATIONS.findIndex((m) => m.includes("SELECT 'code-review'"));
+    for (const m of MIGRATIONS.slice(0, at)) db.exec(m);
     db.exec("INSERT INTO connections (kind, provider, name, config, created_at, updated_at) VALUES ('model', 'anthropic', 'c', '{}', 0, 0)");
     db.exec("INSERT INTO agent_classes (name, model, model_connection_id, effort, billing, max_turns, timeout_min) VALUES ('design-review', 'claude-opus-5-5', 1, 'high', 'api', 80, 45)");
-    db.exec(MIGRATIONS.at(-1)!);
+    db.exec(MIGRATIONS[at]);
     const row = { ...db.prepare("SELECT * FROM agent_classes WHERE name = 'code-review'").get() };
     const columns = db.prepare('SELECT name FROM pragma_table_info(?)').all('tickets').map((c) => c.name);
     db.close();

@@ -23,9 +23,9 @@ const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, reorderConnections, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
 const { bus } = await import('../src/events.ts');
-const { activity, getRun, readLog } = await import('../src/runs.ts');
+const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
-const { connectionPaused, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
+const { connectionPaused, drive, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
 const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
@@ -69,7 +69,7 @@ class FakeEnv {
   createVolume = async () => {};
   removeVolume = async () => {};
   remove = async () => {};
-  kill = async () => {};
+  kill = async (_id: string) => {};
   inspect = async () => ({ running: false, exitCode: 0, oomKilled: false });
   start = async (spec: StepSpec) => {
     this.started.push(spec);
@@ -1084,6 +1084,51 @@ describe('runner', () => {
     expect(getRun(id)).toMatchObject({ input_tokens: 14, output_tokens: 7 });
     expect(getRun(id)!.cost_usd).toBeCloseTo(0.35);
     expect(all('SELECT id FROM spend WHERE run_id = ?', id)).toHaveLength(2);
+  });
+
+  it('records the limits a session starts with, and when its container started', async () => {
+    const { max_turns, timeout_min } = one<{ max_turns: number; timeout_min: number }>("SELECT * FROM agent_classes WHERE name = 'implement'")!;
+    updateAgent('implement', { maxTurns: 120, timeoutMin: 45 });
+    try {
+      fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Done.' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+      const before = Date.now();
+      const id = go();
+      await settle(id);
+      expect(getRun(id)).toMatchObject({ max_turns: 120, timeout_min: 45 });
+      expect(getRun(id)!.step_started_at).toBeGreaterThanOrEqual(before);
+      expect(fake.env.spec('run')!.env.MAX_TURNS).toBe('120');
+      expect(runView(id)).toMatchObject({ maxTurns: 120, timeoutMin: 45, stepStartedAt: getRun(id)!.step_started_at });
+    } finally {
+      updateAgent('implement', { maxTurns: max_turns, timeoutMin: timeout_min });
+    }
+  });
+
+  it('gives a re-attached agent only the time it has left', async () => {
+    // A container that keeps running until it's killed.
+    const env = new FakeEnv({});
+    const killed: string[] = [];
+    let release = () => {};
+    env.inspect = async () => ({ running: true, exitCode: 0, oomKilled: false });
+    env.follow = () => new Promise<void>((done) => (release = done));
+    env.kill = async (cid: string) => {
+      killed.push(cid);
+      release();
+    };
+    env.wait = async () => ({ running: false, exitCode: 137, oomKilled: false });
+    fake.env = env;
+    const id = 'reattach-run';
+    run(
+      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, step, container_id, volume, image, max_turns, timeout_min, step_started_at, started_at)
+       VALUES (?, 1, 'implement', 'normal', 1, ?, ?, 'claude-sonnet-5-5', 'subscription', 'running', 'run', 'run-container-old', 'v', 'img', 300, 1, ?, ?)`,
+      id,
+      ids.env,
+      ids.model,
+      Date.now() - 5 * 60_000,
+      Date.now() - 6 * 60_000,
+    );
+    await drive(id);
+    expect(killed).toEqual(['run-container-old']);
+    expect(getRun(id)).toMatchObject({ status: 'failed', error: 'Stopped after the 1-minute time limit.' });
   });
 
   it('labels the ticket failed after the second failed attempt', async () => {

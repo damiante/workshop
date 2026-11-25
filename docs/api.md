@@ -97,6 +97,10 @@ Either push also ends where Workshop would wait for you anyway: your pull reques
 
 A push is refused with 409 and the reason when the ticket is closed, failed, skipped, waiting on a question or waiting for your review, or (for `stage`) already has an agent working on that stage. A ticket that doesn't exist, belongs to a disabled repository or was opened by someone outside the author allowlist is 404, and a missing or invalid scope is 400.
 
+## Run progress
+
+`GET /api/runs/{id}` includes the limits the agent's session started with: `maxTurns` and `timeoutMin` (minutes), plus `stepStartedAt`, when the current step's container started. The time limit counts from `stepStartedAt`, and both limits start again when a paused run resumes. They're null for runs from before Workshop recorded them.
+
 ## Media
 
 `GET /api/tickets/{id}` returns a ticket (open or closed), every agent run on it oldest first, and its media, which is what the ticket lifecycle page shows. Finished runs are removed after the retention period in Settings.

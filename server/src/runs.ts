@@ -37,6 +37,11 @@ export interface RunRow {
   image: string | null;
   /** The Claude connection this run just moved off, until the moved session reaches its first turn boundary. */
   switched_from: number | null;
+  /** The turn limit and time limit (minutes) the latest agent session started with; null on older rows. */
+  max_turns: number | null;
+  timeout_min: number | null;
+  /** When the current step's container started. */
+  step_started_at: number | null;
 }
 
 export const ACTIVE_STATUSES: RunStatus[] = ['starting', 'running', 'publishing', 'paused'];
@@ -83,6 +88,9 @@ function toView(r: ViewRow): RunView {
     pauseReason: r.pause_reason,
     pauseRequested: (r.status === 'starting' || r.status === 'running') && r.pause_requested_at != null,
     mediaCount: r.media_count,
+    maxTurns: r.max_turns,
+    timeoutMin: r.timeout_min,
+    stepStartedAt: r.step_started_at,
   };
 }
 

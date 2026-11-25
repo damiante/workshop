@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router';
 import type { LogEntry, RunView as Run } from '../../../server/src/api-types.ts';
 import { api, useApi, useNow } from '../api.ts';
 import { Markdown } from '../components/Markdown.tsx';
-import { ErrorNote, Panel, Status } from '../components/ui.tsx';
+import { ErrorNote, Panel, Progress, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, money, runStatus, tokens } from '../format.ts';
 import { LiveStream } from '../live.ts';
-import { addEntry, emptyTranscript, type Item } from '../transcript.ts';
+import { addEntry, emptyTranscript, type Item, type Transcript } from '../transcript.ts';
 
 const ACTIVE = ['starting', 'running', 'publishing', 'paused'];
 
@@ -35,13 +35,66 @@ function ItemView({ item }: { item: Item }) {
   }
 }
 
+const TURN_HASH = /^#turn-(\d+)$/;
+const turnOf = (hash: string) => Number(TURN_HASH.exec(hash)?.[1] ?? 0) || null;
+
+/** Turns, time, to-dos and tool calls against the limits the session started with. */
+function RunProgress({ run, t, now }: { run: Run; t: Transcript; now: number }) {
+  const timing = run.status === 'running' && run.step === 'run' && run.stepStartedAt !== null && run.timeoutMin !== null;
+  const done = t.todos.filter((todo) => todo.status === 'completed').length;
+  const all = t.turns > t.segmentTurns ? `, ${t.turns} in all` : '';
+  const minutes = timing ? Math.min(run.timeoutMin!, Math.max(0, Math.floor((now - run.stepStartedAt!) / 60_000))) : 0;
+  return (
+    <Panel title="Progress">
+      <div className="progress panel-body small">
+        {run.maxTurns !== null ? (
+          <Progress label="Turns" value={t.segmentTurns} max={run.maxTurns} text={`${t.segmentTurns} of ${run.maxTurns}${all}`} />
+        ) : (
+          <Row label="Turns">
+            {t.segmentTurns} turns{all}
+          </Row>
+        )}
+        {timing && (
+          <Progress label="Time limit" value={minutes} max={run.timeoutMin!} text={`${minutes} of ${run.timeoutMin} min`} />
+        )}
+        {t.todos.length > 0 && (
+          <Row label="To-dos">
+            {done} of {t.todos.length} done
+          </Row>
+        )}
+        <Row label="Tool calls">
+          {t.toolCalls}
+          {t.toolErrors > 0 && `, ${t.toolErrors} failed`}
+        </Row>
+        {run.activity && (
+          <Row label="Now">
+            <span className="mono">{run.activity}</span>
+          </Row>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <>
+      <span>{label}</span>
+      <span className="progress-text muted">{children}</span>
+    </>
+  );
+}
+
 export function RunView() {
   const { id } = useParams();
   const { data: run, error } = useApi<Run>(`/runs/${id}`, ['runs']);
   const now = useNow(10_000);
   const transcript = useRef(emptyTranscript());
   const [, setVersion] = useState(0);
-  const [following, setFollowing] = useState(true);
+  // A link to a turn (#turn-12) holds the page there instead of following the live log.
+  const [target, setTarget] = useState(() => turnOf(location.hash));
+  const [following, setFollowing] = useState(target === null);
+  const scrolledTo = useRef<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -89,6 +142,29 @@ export function RunView() {
   }, []);
 
   useEffect(() => {
+    const onHash = () => {
+      const turn = turnOf(location.hash);
+      setTarget(turn);
+      if (turn !== null) {
+        scrolledTo.current = turn; // the browser scrolls to it
+        setFollowing(false);
+      }
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  useEffect(() => {
+    // Scroll to a linked turn once it has streamed in.
+    if (target !== null && scrolledTo.current !== target) {
+      const el = document.getElementById(`turn-${target}`);
+      if (el) {
+        scrolledTo.current = target;
+        setFollowing(false);
+        el.scrollIntoView({ block: 'start' });
+        return;
+      }
+    }
     if (following) window.scrollTo({ top: document.body.scrollHeight });
   });
 
@@ -96,6 +172,7 @@ export function RunView() {
   const active = ACTIVE.includes(run.status);
   const status = runStatus(run);
   const { items, todos } = transcript.current;
+  const showProgress = transcript.current.turns > 0 || run.step === 'run';
 
   const act = (action: 'stop' | 'pause' | 'resume') => {
     setBusy(true);
@@ -182,6 +259,7 @@ export function RunView() {
       <ErrorNote error={actionError} />
       {run.error && <p className="notice error">{run.error}</p>}
       {run.summary && <Markdown className="notice ok" text={run.summary} />}
+      {showProgress && <RunProgress run={run} t={transcript.current} now={now} />}
       {todos.length > 0 && (
         <Panel title="The agent's to-do list">
           <ul className="todos panel-body">
@@ -194,7 +272,17 @@ export function RunView() {
         </Panel>
       )}
       <div className="transcript">
-        {items.length ? items.map((item, i) => <ItemView key={i} item={item} />) : <p className="muted">{active ? 'Waiting for output…' : 'No log for this run.'}</p>}
+        {items.length ? (
+          items.map((item, i) => (
+            <div key={i} className={`line${item.turn && item.turn === target ? ' target' : ''}`} id={item.turn ? `turn-${item.turn}` : undefined}>
+              {/* The number is drawn by CSS from data-turn, so it never ends up in copied text. */}
+              {item.turn ? <a className="turn-no" href={`#turn-${item.turn}`} data-turn={item.turn} aria-label={`Turn ${item.turn}`} /> : <span className="turn-no" />}
+              <ItemView item={item} />
+            </div>
+          ))
+        ) : (
+          <p className="muted">{active ? 'Waiting for output…' : 'No log for this run.'}</p>
+        )}
       </div>
       {active && !following && (
         <button className="primary" style={{ position: 'fixed', right: 24, bottom: 24 }} onClick={() => window.scrollTo({ top: document.body.scrollHeight })}>

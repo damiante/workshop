@@ -25,3 +25,58 @@ it('turns a run log into steps, prose, tool calls with results, a to-do list and
   expect(t.items[7]).toMatchObject({ kind: 'result', ok: true });
   expect(t.items[9]).toEqual({ kind: 'log', text: 'Pushed def.', error: false });
 });
+
+const say = (id: string | undefined, text: string, extra: object = {}) => ({ type: 'assistant', ...extra, message: { ...(id ? { id } : {}), content: [{ type: 'text', text }] } });
+const tool = (id: string, toolId: string, name = 'Bash', extra: object = {}) => ({
+  type: 'assistant',
+  ...extra,
+  message: { id, content: [{ type: 'tool_use', id: toolId, name, input: name === 'TodoWrite' ? { todos: [] } : { command: 'ls' } }] },
+});
+
+it('counts turns by message id and numbers the first item of each', () => {
+  const t = emptyTranscript();
+  for (const e of [say('m1', 'Looking.'), tool('m1', 't1'), tool('m2', 't2'), say('m2', 'Done.')]) addEntry(t, run(e));
+  const agentItems = t.items.filter((i) => i.kind === 'say' || i.kind === 'tool');
+  expect(agentItems.map((i) => i.turn)).toEqual([1, undefined, 2, undefined]);
+  expect(t).toMatchObject({ turns: 2, segmentTurns: 2 });
+});
+
+it("doesn't count a subagent's lines, and counts each line without an id as a turn", () => {
+  const t = emptyTranscript();
+  addEntry(t, run(say(undefined, 'One.')));
+  addEntry(t, run(say(undefined, 'Two.')));
+  addEntry(t, run(tool('s1', 'st1', 'Bash', { parent_tool_use_id: 'task1' })));
+  addEntry(t, run(say('s2', 'Sub.', { parent_tool_use_id: 'task1' })));
+  expect(t.turns).toBe(2);
+  expect(t.toolCalls).toBe(0);
+  expect(t.items.filter((i) => i.turn).map((i) => i.turn)).toEqual([1, 2]);
+});
+
+it('numbers the next item when a turn starts with a to-do update', () => {
+  const t = emptyTranscript();
+  addEntry(t, run(tool('m1', 't1', 'TodoWrite')));
+  addEntry(t, run(tool('m2', 't2')));
+  expect(t.turns).toBe(2);
+  expect(t.items.find((i) => i.kind === 'tool')!.turn).toBe(2);
+});
+
+it('starts the session count again in a new container, and takes Claude Code’s own count', () => {
+  const t = emptyTranscript();
+  const at = (container: string, event: unknown): LogEntry => ({ ...run(event), container });
+  addEntry(t, at('aaa', say('m1', 'One.')));
+  addEntry(t, at('aaa', say('m2', 'Two.')));
+  addEntry(t, at('bbb', say('m3', 'Three.')));
+  expect(t).toMatchObject({ turns: 3, segmentTurns: 1 });
+  addEntry(t, at('bbb', { type: 'result', is_error: false, num_turns: 4 }));
+  expect(t).toMatchObject({ turns: 3, segmentTurns: 4 });
+});
+
+it('counts tool calls and failures, but not to-do updates', () => {
+  const t = emptyTranscript();
+  addEntry(t, run(tool('m1', 't1')));
+  addEntry(t, run(tool('m2', 't2', 'TodoWrite')));
+  addEntry(t, run(tool('m3', 't3')));
+  addEntry(t, run({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'boom', is_error: true }] } }));
+  addEntry(t, run({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't3', content: 'ok' }] } }));
+  expect(t).toMatchObject({ toolCalls: 2, toolErrors: 1 });
+});

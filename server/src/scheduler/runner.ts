@@ -169,18 +169,22 @@ async function runContainer(
       cpus: ctx.host.cfg.cpus,
       memoryMb: memoryGb ? memoryGb * 1024 : undefined,
     });
-    setRun(ctx.run.id, { step, container_id: id });
-    Object.assign(ctx.run, { step, container_id: id });
+    const startedAt = Date.now();
+    setRun(ctx.run.id, { step, container_id: id, step_started_at: startedAt });
+    Object.assign(ctx.run, { step, container_id: id, step_started_at: startedAt });
   }
   const containerId = id;
   const short = id.slice(0, 12);
   if (reattached && onStdout) for (const e of readLog(ctx.run.id)) if (e.container === short && e.stream === 'stdout') onStdout(e.text, true);
   let timedOut = false;
+  // After a re-attach, only the time left counts: the limit runs from when the container started.
+  const started = ctx.run.step_started_at;
+  const left = timeoutMs && reattached && started != null ? Math.max(0, timeoutMs - (Date.now() - started)) : timeoutMs;
   const timer = timeoutMs
     ? setTimeout(() => {
         timedOut = true;
         void ctx.env.kill(containerId);
-      }, timeoutMs)
+      }, left)
     : undefined;
   try {
     await ctx.env.follow(containerId, reattached ? linesFrom(ctx.run.id, short) : 0, (line) => {
@@ -223,7 +227,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
     MODEL: r.model,
     SESSION_ID: r.id,
     EFFORT: agent.effort ?? '',
-    MAX_TURNS: String(agent.max_turns),
+    MAX_TURNS: String(r.max_turns ?? agent.max_turns),
     MAX_BUDGET_USD: r.billing === 'api' ? String(getSettings().apiRunCapUsd) : '',
     RESUME: r.resumes > 0 ? '1' : '',
   };
@@ -291,10 +295,10 @@ async function publishSpec(ctx: Ctx) {
   };
 }
 
-function describeError(res: NonNullable<ClaudeRun['result']>, agent: AgentRow): string {
+function describeError(res: NonNullable<ClaudeRun['result']>, maxTurns: number): string {
   switch (res.subtype) {
     case 'error_max_turns':
-      return `Reached the ${agent.max_turns}-turn limit.`;
+      return `Reached the ${maxTurns}-turn limit.`;
     case 'error_max_budget_usd':
       return `Reached the $${getSettings().apiRunCapUsd} per-run API budget.`;
     case 'error_max_structured_output_retries':
@@ -400,6 +404,13 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   // Set while this segment continues a session another subscription started, until its first turn boundary.
   let switched = r.switched_from !== null;
   let trailing: NodeJS.Timeout | undefined;
+  // A new session records the limits it starts with; a re-attach keeps the ones it has.
+  if (!(r.step === 'run' && r.container_id)) {
+    setRun(r.id, { max_turns: agent.max_turns, timeout_min: agent.timeout_min });
+    Object.assign(r, { max_turns: agent.max_turns, timeout_min: agent.timeout_min });
+  }
+  const maxTurns = r.max_turns ?? agent.max_turns;
+  const timeoutMin = r.timeout_min ?? agent.timeout_min;
   const running = runContainer(
     ctx,
     'run',
@@ -448,7 +459,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
         }
       }
     },
-    agent.timeout_min * 60_000,
+    timeoutMin * 60_000,
   );
   // Record what the run reported even if the container failed.
   const state = await running.finally(() => {
@@ -491,13 +502,13 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     raiseAlert('error', 'claude-auth', 'Claude rejected the credentials Workshop used. For a subscription, run "claude setup-token" again and update the Claude connection.', `model:${r.model_connection_id}`);
   }
   if (!res) {
-    if (state.timedOut) throw new Error(`Stopped after the ${agent.timeout_min}-minute time limit.`);
+    if (state.timedOut) throw new Error(`Stopped after the ${timeoutMin}-minute time limit.`);
     if (state.exitCode === 137 || state.exitCode === 143) {
       raiseAlert('warning', 'container-killed', `${ctx.labels['workshop.ticket']}: the ${name} container was killed on ${ctx.host.name} (exit ${state.exitCode}).`, `run:${r.id}`);
     }
     throw new Error(`Claude Code exited (code ${state.exitCode}) without a result. See the run log.`);
   }
-  if (res.isError) throw new Error(describeError(res, agent));
+  if (res.isError) throw new Error(describeError(res, maxTurns));
   const parsed = parseResult(r.agent, res.structured);
   if (typeof parsed === 'string') throw new Error(`The agent's result was invalid: ${parsed}`);
   await copyBackMedia(ctx, parsed);

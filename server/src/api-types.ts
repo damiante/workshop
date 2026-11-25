@@ -205,6 +205,12 @@ export interface RunView {
   pauseRequested: boolean;
   /** How many images this run added to the ticket's media store. */
   mediaCount: number;
+  /** The turn limit the agent's current or last session ran with; null for runs from before Workshop recorded it. */
+  maxTurns: number | null;
+  /** The time limit in minutes for each agent session (it restarts when a paused run resumes); null for older runs. */
+  timeoutMin: number | null;
+  /** When the current step's container started: the time limit counts from here. */
+  stepStartedAt: number | null;
 }
 
 export type PauseReason = 'limit' | 'threshold' | 'manual' | 'connection';

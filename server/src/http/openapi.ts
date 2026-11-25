@@ -93,6 +93,9 @@ const schemas: Record<string, Schema> = {
     pauseReason: nullable(enumOf('limit', 'threshold', 'manual', 'connection')),
     pauseRequested: bool,
     mediaCount: int,
+    maxTurns: nullable(int),
+    timeoutMin: nullable(int),
+    stepStartedAt: nullable(int),
   }),
   TicketView: object({
     id: int,
