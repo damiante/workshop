@@ -21,7 +21,42 @@ export interface WorkResult {
   media?: { path: string; caption: string }[];
 }
 
-export type AgentResult = ClassifierResult | WorkResult;
+export const SEVERITIES = ['severe', 'moderate', 'minor'] as const;
+export const CAUSES = ['design', 'implementation'] as const;
+
+/** One problem the Code reviewer found. */
+export interface Finding {
+  severity: (typeof SEVERITIES)[number];
+  cause: (typeof CAUSES)[number];
+  title: string;
+  detail: string;
+  /** How the reviewer checked it. */
+  evidence: string;
+  fix: string;
+  file?: string;
+  line?: number;
+}
+
+export interface ReviewResult extends WorkResult {
+  findings?: Finding[];
+}
+
+export type AgentResult = ClassifierResult | WorkResult | ReviewResult;
+
+/** `tickets.rework`: automatic reworks this review round, and the severe findings to fix. */
+export interface Rework {
+  count: number;
+  findings: Finding[];
+}
+
+/** `tickets.handoff`: the Implementation result the pull request describes, kept until it opens. */
+export interface Handoff {
+  runId: string;
+  result: WorkResult;
+  /** The branch before and after the push. */
+  before?: string;
+  after?: string;
+}
 
 /** A run whose push was rescued: what to finish once the Merge agent has merged the saved work. */
 export interface Rescue {
@@ -67,9 +102,55 @@ const WORK_SCHEMA = {
   additionalProperties: false,
 };
 
-export const schemaFor = (agent: AgentName) => (agent === 'classifier' ? CLASSIFIER_SCHEMA : WORK_SCHEMA);
+const REVIEW_SCHEMA = {
+  ...WORK_SCHEMA,
+  properties: {
+    ...WORK_SCHEMA.properties,
+    findings: {
+      type: 'array',
+      description: 'Every problem you found, each reported once. Empty when there are none (outcome done).',
+      items: {
+        type: 'object',
+        properties: {
+          severity: {
+            type: 'string',
+            enum: SEVERITIES,
+            description:
+              "severe: verified, glaring: doesn't do what the ticket asks, breaks existing behaviour, loses data, opens a security hole, crashes on an ordinary path, fails the repository's tests or type-check, or follows a design that can't work. moderate: a real bug on an edge path, a missing test, or a clear deviation from the conventions or design. minor: style, naming, small simplifications, comments and docs. When in doubt, it isn't severe.",
+          },
+          cause: { type: 'string', enum: CAUSES, description: "design when fixing it means changing the design document's approach; implementation when the code doesn't do what the design (or ticket) says." },
+          title: { type: 'string', description: 'The problem in a few words.' },
+          detail: { type: 'string', description: 'What is wrong and what goes wrong because of it.' },
+          evidence: { type: 'string', description: 'How you checked it: the command you ran and what it printed, or the code you read. A few words are enough for minor findings.' },
+          fix: { type: 'string', description: 'A concrete fix.' },
+          file: { type: 'string', description: 'The file, relative to the repository root, when it applies.' },
+          line: { type: 'integer', minimum: 1, description: 'The line in file, when it applies.' },
+        },
+        required: ['severity', 'cause', 'title', 'detail', 'evidence', 'fix'],
+        additionalProperties: false,
+      },
+    },
+  },
+};
+
+const SCHEMAS: Partial<Record<AgentName, object>> = { classifier: CLASSIFIER_SCHEMA, 'code-review': REVIEW_SCHEMA };
+
+export const schemaFor = (agent: AgentName) => SCHEMAS[agent] ?? WORK_SCHEMA;
 
 const isStringList = (v: unknown) => Array.isArray(v) && v.every((q) => typeof q === 'string');
+const isText = (v: unknown) => typeof v === 'string' && v.trim() !== '';
+
+function isFinding(v: unknown): v is Finding {
+  if (!v || typeof v !== 'object') return false;
+  const f = v as Record<string, unknown>;
+  return (
+    SEVERITIES.includes(f.severity as Finding['severity']) &&
+    CAUSES.includes(f.cause as Finding['cause']) &&
+    [f.title, f.detail, f.evidence, f.fix].every(isText) &&
+    (f.file === undefined || typeof f.file === 'string') &&
+    (f.line === undefined || (Number.isInteger(f.line) && (f.line as number) > 0))
+  );
+}
 
 /** Validates the agent's structured output. Returns the result, or an error message. */
 export function parseResult(agent: AgentName, value: unknown): AgentResult | string {
@@ -93,5 +174,8 @@ export function parseResult(agent: AgentName, value: unknown): AgentResult | str
   if (!['done', 'needs_info', 'failed'].includes(v.outcome as string)) return 'outcome must be done, needs_info or failed.';
   if (typeof v.summary !== 'string') return 'summary is required.';
   if (v.media !== undefined && !(Array.isArray(v.media) && v.media.every((m) => m && typeof m === 'object' && typeof m.path === 'string' && typeof m.caption === 'string'))) return 'media must be a list of { path, caption }.';
+  if (agent === 'code-review' && (v.outcome === 'done' || v.findings !== undefined) && !(Array.isArray(v.findings) && v.findings.every(isFinding))) {
+    return 'findings must be a list of { severity, cause, title, detail, evidence, fix }, with severity severe, moderate or minor and cause design or implementation.';
+  }
   return v as unknown as WorkResult;
 }

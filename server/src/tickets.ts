@@ -6,7 +6,7 @@ import type { RepoRef, TicketLink } from './providers/types.ts';
 import { mediaCount } from './media.ts';
 import { getSettings } from './settings.ts';
 import { dependencyBlock, inScope } from './scheduler/gates.ts';
-import type { Rescue } from './workflow/schemas.ts';
+import type { Handoff, Rescue, Rework } from './workflow/schemas.ts';
 import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
 
 export interface RepoRow {
@@ -47,6 +47,8 @@ export interface TicketRow {
   push_stage: string | null;
   ui: number;
   rescue: string | null;
+  handoff: string | null;
+  rework: string | null;
   dismissed: string | null;
   prioritised: number;
   updated_at: string;
@@ -56,6 +58,8 @@ export interface TicketRow {
 export const MAX_ATTEMPTS = 2;
 
 export const rescueOf = (t: TicketRow): Rescue | null => (t.rescue ? JSON.parse(t.rescue) : null);
+export const handoffOf = (t: TicketRow): Handoff | null => (t.handoff ? JSON.parse(t.handoff) : null);
+export const reworkOf = (t: TicketRow): Rework | null => (t.rework ? JSON.parse(t.rework) : null);
 
 export const repoRef = (r: RepoRow): RepoRef => ({ fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url });
 

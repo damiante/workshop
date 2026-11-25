@@ -20,9 +20,9 @@ const schemas: Record<string, Schema> = {
   Mode: enumOf('paused', 'scheduled', 'always'),
   TicketOrder: enumOf('updated-asc', 'updated-desc', 'created-asc', 'created-desc'),
   Billing: enumOf('subscription', 'api'),
-  Stage: enumOf('design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify', 'reconcile'),
+  Stage: enumOf('design', 'design-review', 'implement', 'code-review', 'pr-review', 'merge', 'reclassify', 'reconcile'),
   Size: enumOf('xs', 's', 'm', 'l', 'xl'),
-  AgentName: enumOf('classifier', 'design', 'design-review', 'implement', 'merge'),
+  AgentName: enumOf('classifier', 'design', 'design-review', 'implement', 'code-review', 'merge'),
   RunStatus: enumOf('starting', 'running', 'publishing', 'paused', 'succeeded', 'failed', 'cancelled', 'lost'),
   Settings: object({
     mode: ref('Mode'),

@@ -5,6 +5,7 @@ export const AGENT_LABEL: Record<AgentName, string> = {
   design: 'Design',
   'design-review': 'Design adversary',
   implement: 'Implementation',
+  'code-review': 'Code reviewer',
   merge: 'Merge',
 };
 
@@ -12,6 +13,7 @@ export const STAGE_TEXT: Record<Stage, string> = {
   design: 'Design',
   'design-review': 'Design review',
   implement: 'Implementation',
+  'code-review': 'Code review',
   'pr-review': 'Your review',
   merge: 'Merge',
   reclassify: 'Re-classify changes',

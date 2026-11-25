@@ -82,7 +82,7 @@ Usage limits are set per subscription. `PUT /api/settings` with the old global `
 
 `POST /api/tickets/:id/push` with `{"scope": "stage"}` or `{"scope": "lifecycle"}` lets one ticket keep moving whatever the operation mode, so you can leave Workshop paused and still push chosen tickets. It answers with the ticket, whose `push` field shows the scope.
 
-- **`stage`** runs the ticket's next step (classify, design, design review, implement, or merge) and stops once the stage label changes.
+- **`stage`** runs the ticket's next step (classify, design, design review, implement, code review, or merge) and stops once the stage label changes.
 - **`lifecycle`** keeps going, stage after stage.
 
 Either push also ends where Workshop would wait for you anyway: your pull request review, a question (`workshop/needs-info`), `workshop/skip`, `workshop/failed`, or the ticket closing. A push only lifts the mode gate: dependencies, model settings, the Claude allowance, the API cap, free agent hosts and one agent per ticket still apply, and pushed tickets go to the front of the queue. An approved pull request is merged while Workshop is paused only if its ticket was pushed.

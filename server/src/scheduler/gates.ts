@@ -131,7 +131,7 @@ export function priorityBlock(priority: number, waiting: { repo: string; priorit
 export function stepPriority(step: Step): number {
   if (step.kind === 'merge') return 0;
   if (step.agent === 'merge') return 0;
-  if (step.agent === 'implement' || step.mode === 'delta') return 1;
+  if (step.agent === 'implement' || step.agent === 'code-review' || step.mode === 'delta') return 1;
   if (step.agent === 'design-review') return 2;
   if (step.agent === 'design') return 3;
   return 4;

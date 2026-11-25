@@ -236,6 +236,15 @@ export const MIGRATIONS = [
     weekly_max = COALESCE((SELECT json_extract(value, '$.weeklyMax') FROM settings WHERE key = 'settings'), 80);
   UPDATE settings SET value = json_remove(value, '$.fiveHourMax', '$.weeklyMax') WHERE key = 'settings';
   `,
+  `
+  -- The Implementation result the pull request describes, until it opens (JSON).
+  ALTER TABLE tickets ADD COLUMN handoff TEXT;
+  -- Automatic reworks this review round and the severe findings to fix (JSON).
+  ALTER TABLE tickets ADD COLUMN rework TEXT;
+  -- Existing installs: the Code reviewer starts with the Design adversary's model and billing.
+  INSERT OR IGNORE INTO agent_classes (name, model, model_connection_id, effort, billing, max_turns, timeout_min)
+    SELECT 'code-review', model, model_connection_id, effort, billing, 150, 60 FROM agent_classes WHERE name = 'design-review';
+  `,
 ];
 
 export let db: DatabaseSync;

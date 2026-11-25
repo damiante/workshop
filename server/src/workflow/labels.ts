@@ -3,7 +3,7 @@ import type { AgentName, Size, Stage, TicketStatePatch } from '../api-types.ts';
 import type { LabelDef } from '../providers/types.ts';
 
 export const SIZES: Size[] = ['xs', 's', 'm', 'l', 'xl'];
-export const STAGES: Stage[] = ['design', 'design-review', 'implement', 'pr-review', 'merge', 'reclassify', 'reconcile'];
+export const STAGES: Stage[] = ['design', 'design-review', 'implement', 'code-review', 'pr-review', 'merge', 'reclassify', 'reconcile'];
 
 export const CAPABILITIES = ['browser'] as const;
 export type Capability = (typeof CAPABILITIES)[number];
@@ -23,6 +23,7 @@ const STAGE_TEXT: Record<Stage, string> = {
   design: 'design next',
   'design-review': 'design review next',
   implement: 'implementation next',
+  'code-review': 'code review next',
   'pr-review': 'pull request waiting for your review',
   merge: 'approved, merge next',
   reclassify: 'changes requested, re-classify next',
@@ -75,6 +76,7 @@ export function nextStep(state: TicketState, open: boolean): Step | null {
     case 'design':
     case 'design-review':
     case 'implement':
+    case 'code-review':
       return { kind: 'agent', agent: state.stage, mode: 'normal' };
     case 'reconcile':
       return { kind: 'agent', agent: 'merge', mode: 'normal' };
@@ -90,6 +92,7 @@ const AGENT_TEXT: Record<AgentName, string> = {
   design: 'Design',
   'design-review': 'Design review',
   implement: 'Implement',
+  'code-review': 'Code review',
   merge: 'Resolve merge conflicts',
 };
 
@@ -145,12 +148,12 @@ export function addNeeds(labels: string[], needs: Capability[]) {
 }
 
 /**
- * The image for a run: a repository's own image always wins; Implementation on a ticket that needs a
- * browser gets the browser image, and so do Design and Design adversary when the Classifier set `ui`.
+ * The image for a run: a repository's own image always wins; Implementation and the Code reviewer on a
+ * ticket that needs a browser get the browser image, and so do Design and Design adversary when the Classifier set `ui`.
  */
 export function imageFor(agent: AgentName, state: TicketState, images: { repo: string | null; base: string; browser: string }, ui = false): string {
   if (images.repo) return images.repo;
-  const browser = (agent === 'implement' && state.needs.includes('browser')) || ((agent === 'design' || agent === 'design-review') && ui);
+  const browser = ((agent === 'implement' || agent === 'code-review') && state.needs.includes('browser')) || ((agent === 'design' || agent === 'design-review') && ui);
   return browser ? images.browser : images.base;
 }
 

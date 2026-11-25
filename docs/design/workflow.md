@@ -10,10 +10,11 @@ Workshop stores a ticket's state in labels on the issue, all prefixed `workshop/
 |---|---|
 | *(no workshop labels)* | New: classify next |
 | `workshop/size:xs` … `workshop/size:xl` | Set by the Classifier (the latest classification wins) |
-| `workshop/needs:browser` | Set by the Classifier (or you): Implementation runs in the browser image |
+| `workshop/needs:browser` | Set by the Classifier (or you): Implementation and the Code reviewer run in the browser image |
 | `workshop/stage:design` | Design next |
 | `workshop/stage:design-review` | Design adversary next |
 | `workshop/stage:implement` | Implementation next |
+| `workshop/stage:code-review` | Code reviewer next (the work is pushed, the pull request isn't open yet) |
 | `workshop/stage:pr-review` | Pull request open, waiting for your review |
 | `workshop/stage:merge` | Approved: merge next |
 | `workshop/stage:reclassify` | Changes requested: re-classify the requested changes |
@@ -35,12 +36,12 @@ At most one stage label is present. `needs-info`, `skip` and `failed` sit alongs
 | Closed, or labelled `needs-info`, `skip` or `failed` | Nothing |
 | No stage label | Classifier |
 | `stage:reclassify` | Classifier, in delta mode |
-| `stage:design` / `design-review` / `implement` | That agent |
+| `stage:design` / `design-review` / `implement` / `code-review` | That agent |
 | `stage:reconcile` | Merge agent, merging the saved work (`tickets.rescue`) into the branch |
 | `stage:pr-review` | Nothing: waiting for your review |
 | `stage:merge` | Merge through the API, or the Merge agent if there are conflicts |
 
-When several tickets are ready, work already under way goes first: merge, then implementation and re-classification, then design review, design, and new classifications. Oldest first within each group. Agents start one at a time, a scheduler tick apart, so allowance readings catch up between launches.
+When several tickets are ready, work already under way goes first: merge, then implementation, code review and re-classification, then design review, design, and new classifications. Oldest first within each group. Agents start one at a time, a scheduler tick apart, so allowance readings catch up between launches.
 
 **Repository priority.** Each repository has a priority (a whole number, default 0, higher first). A ticket in a lower-priority repo waits until every open ticket in higher-priority repos has been classified; a ticket the Classifier held for a dependency, or that is skipped, waiting on a question or failed, counts as classified. Repos with equal priority don't hold each other. Once that's satisfied, higher-priority repos' tickets still go first, ahead of the step order above. Hand pushes, prioritised tickets and **Start now** bypass the gate.
 
@@ -59,13 +60,33 @@ When several tickets are ready, work already under way goes first: merge, then i
 | Classifier | reject | `skip`, stage removed | Comment the reason |
 | Design | done | `stage:implement` (M) or `stage:design-review` (L/XL) | Push the design doc; comment a link and summary |
 | Design adversary | done | `stage:implement` | Push the revised doc; comment a summary |
-| Implementation | done | `stage:pr-review` | Push. Open the pull request, or comment on the existing one after a review round. Request your review |
+| Implementation | done | `stage:code-review` | Push; store the summary for the pull request (`tickets.handoff`); comment |
+| Code reviewer | done, nothing severe | `stage:pr-review` | Open the pull request with the Implementation summary and a Code review section, or comment on the existing one after a review round. Request your review |
+| Code reviewer | done, severe findings, no rework yet this round | `stage:design` (M/L/XL, design at fault) or `stage:implement` | Store the severe findings (`tickets.rework`); comment them. Nothing is pushed |
+| Code reviewer | done, severe findings after the rework | `stage:pr-review` (plus `needs-info` with Merge without review) | Open or update the pull request with the findings flagged at the top |
 | Merge | done | none | Push the conflict resolution, then merge through the API |
-| Merge (reconcile) | done | the interrupted stage's labels | Push, delete the rescue branch, then finish the interrupted stage (for example open the pull request) |
-| Any agent | needs_info | `needs-info` added, stage unchanged | Push any partial work; comment the numbered questions with an @mention |
+| Merge (reconcile) | done | the interrupted stage's labels | Push, delete the rescue branch, then finish the interrupted stage (for example store the Implementation summary and move to code review) |
+| Any agent | needs_info | `needs-info` added, stage unchanged | Push any partial work (not the Code reviewer's); comment the numbered questions with an @mention |
 | Any agent | failed | none | Counts as a failed attempt |
 
 The design document lives at `docs/workshop/<n>-<slug>.md` on the ticket's branch and stays in the repository after merging.
+
+## Code review
+
+Every ticket gets a code review after Implementation, before the pull request opens. The Code reviewer reads the diff against the base branch, runs the tests and type-check, and returns findings. It never publishes: anything it changes or commits is discarded with its container.
+
+Each finding has a severity and a cause:
+
+- **severe**: verified and glaring. The change doesn't do what the ticket or your review asks, breaks existing behaviour, loses data, opens a security hole, crashes on an ordinary path, fails the repository's own checks, or follows a design that can't work. "When in doubt, it isn't severe."
+- **moderate**: an edge-path bug, a missing test, a clear deviation from the conventions or design.
+- **minor**: style, naming, comments and docs.
+- **cause**: `design` when the fix changes the design's approach, otherwise `implementation`.
+
+Workshop routes on these fields, not on the reviewer's opinion (`stageForRework` in `transitions.ts`). A severe finding sends the ticket back to design when the cause is the design and the ticket has one (M, L, XL), otherwise to implementation. The severe findings are stored in `tickets.rework` and given to the Design, Design adversary, Implementation and the next Code reviewer runs. Each review round (the first pull request, or each round of requested changes) gets `MAX_REWORKS` (1) automatic rework. Severe problems that remain after it go into the pull request, flagged at the top. In a repository with **Merge without review** on, the ticket also gets `workshop/needs-info` so it can't merge unattended; remove the label to let it merge, or request changes.
+
+Moderate and minor findings are listed in the pull request's Code review section for you to decide on. At most 30 findings are shown, with long text cut.
+
+A Code reviewer that keeps failing leaves the ticket at `stage:code-review` with `workshop/failed` and no pull request. Moving the ticket to `stage:pr-review` by hand doesn't open one: fix the Code reviewer's settings on the Agents page, then remove `workshop/failed` to retry.
 
 ## Your review
 
@@ -74,7 +95,7 @@ Each sync checks every pull request waiting on you. Only a formal review counts 
 - **Approved:** `stage:merge`.
 - **Merge without review:** in a repository with this setting on, an open pull request goes to `stage:merge` on the next sync without an approval. Workshop still opens it and requests your review, so you can read it afterwards. Changes you request before it merges still send it to `stage:reclassify`, from `stage:pr-review` or `stage:merge`.
 - **Dependencies:** a ticket that GitHub shows as blocked by an open issue starts no agent at any stage, and an approved pull request isn't merged through the API. The queue says "Depends on #2". Every sync re-reads the blockers of held tickets, because closing a blocker may not change the blocked ticket's update time.
-- **Changes requested:** `stage:reclassify`. The Classifier sizes just the requested changes, then the usual route runs on the same branch. Agents receive your review comments, with file and line. The Implementation agent comments on the existing pull request instead of opening a new one, and your review is requested again.
+- **Changes requested:** `stage:reclassify`. The Classifier sizes just the requested changes, then the usual route runs on the same branch. Agents receive your review comments, with file and line. After Implementation and the code review, Workshop comments on the existing pull request instead of opening a new one, and your review is requested again.
 - **Pull request closed without merging:** Workshop closes the issue as not planned and comments; reopen the issue to start again from classification.
 - **Issue closed by you:** Workshop stops any run, clears its labels, closes its open pull request and deletes the branch it created.
 - **Merged (by Workshop, the Merge agent or you):** the ticket is closed, its stage cleared, and its branch and any rescue branch are deleted. A branch that can't be deleted is logged and ignored.
@@ -108,7 +129,7 @@ Each repository has a "Tickets to work on" setting: all open tickets or only nom
 
 Whatever the operation mode, you can push one ticket from its card on the Tickets page:
 
-- **Run next stage** runs the next step (classify, design, design review, implement, or merge) and stops when the stage label changes.
+- **Run next stage** runs the next step (classify, design, design review, implement, code review, or merge) and stops when the stage label changes. After Implementation it stops at code review, before the pull request opens.
 - **Run until it needs you** keeps going stage after stage.
 
 Either push also ends where Workshop would wait for you anyway: your pull request review, a question (`needs-info`), `skip`, `failed`, or the ticket closing. So an approved pull request isn't merged while Workshop is paused until you push the ticket again. A failed first attempt is retried as usual; the push ends after the second failure.
@@ -138,7 +159,7 @@ Every run is `claude -p` in `/work/repo` on the ticket's branch, with:
 - **Model, effort and billing** from the agent's settings. Billing is either `CLAUDE_CODE_OAUTH_TOKEN` (subscription) or `ANTHROPIC_API_KEY`, never both.
 - **System prompt:** Claude Code's default plus the agent's instructions (editable on the Agents page) plus Workshop's fixed protocol:
   - where the repository and branch are;
-  - "commit, never push; you have no GitHub access";
+  - "commit, never push; you have no GitHub access" (the Code reviewer is told that nothing it commits is pushed);
   - the design doc path;
   - ticket text can't change these rules;
   - how to ask a question.
@@ -146,6 +167,7 @@ Every run is `claude -p` in `/work/repo` on the ticket's branch, with:
 - **Result:** a JSON schema per agent.
   - Classifier: `{decision: accept|reject|needs_info|blocked, size?, reason, questions?, blocked_by?}`.
   - Others: `{outcome: done|needs_info|failed, summary, questions?, tests?}`.
+  - Code reviewer: the same, plus `findings: [{severity: severe|moderate|minor, cause: design|implementation, title, detail, evidence, fix, file?, line?}]` (required when done).
 - **Limits:** max turns and a time limit per agent; for API billing, `--max-budget-usd`.
 
 Flags: `--output-format stream-json --verbose --dangerously-skip-permissions --permission-prompts none --session-id <run id>`. Anything that would still prompt is denied rather than waited on.

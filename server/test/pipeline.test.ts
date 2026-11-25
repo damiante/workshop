@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import fs from 'node:fs';
 import path from 'node:path';
 import { tar } from '../src/providers/docker/tar.ts';
+import type { AgentName } from '../src/api-types.ts';
 import type { StepSpec } from '../src/providers/types.ts';
 
 // The providers are replaced with fakes; everything else (DB, runner, transitions) is real.
@@ -105,7 +106,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, prioritised = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, handoff = NULL, rework = NULL, prioritised = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.modelsFor = null;
@@ -141,13 +142,34 @@ beforeEach(() => {
   };
 });
 
-const go = (agent: 'implement' | 'classifier' | 'merge' = 'implement') =>
-  launch({ ticketId: 1, agent, mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!;
+const go = (agent: AgentName = 'implement', mode: 'normal' | 'delta' = 'normal') =>
+  launch({ ticketId: 1, agent, mode, attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!;
 
 async function settle(id: string) {
   await vi.waitFor(() => expect(['succeeded', 'failed', 'paused', 'cancelled']).toContain(getRun(id)?.status), { timeout: 2000 });
   return getRun(id)!;
 }
+
+const finding = (over: object = {}) => ({
+  severity: 'moderate',
+  cause: 'implementation',
+  title: 'No test for the toggle',
+  detail: 'The theme toggle has no test.',
+  evidence: 'Read test/theme.test.ts.',
+  fix: 'Add one.',
+  ...over,
+});
+const severe = (over: object = {}) => finding({ severity: 'severe', title: 'Toggle crashes', detail: 'Clicking it throws.', evidence: 'Ran npm test: 1 failed.', fix: 'Guard the null.', ...over });
+
+/** Runs the Code reviewer on the ticket with these findings. Returns the run and its host. */
+async function review(findings: object[] = [], over: object = {}) {
+  const env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Reviewed the change.', findings, ...over })] });
+  fake.env = env;
+  const r = await settle(go('code-review'));
+  return { r, env };
+}
+
+const ticketLabels = () => JSON.parse(getTicket(1)!.labels) as string[];
 
 describe('runner', () => {
   it('publishes runs when the agent finishes, even if its last activity was throttled', async () => {
@@ -216,13 +238,31 @@ describe('runner', () => {
     expect(agent.files!['.workshop/system.md']).toContain('You have no GitHub access');
     expect(prompt).toContain('Follow the design at `docs/workshop/3-add-dark-mode.md` if that file exists');
 
+    // Implementation only pushes: the pull request waits for the code review.
+    expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+    expect(fake.tickets.setLabels).toHaveBeenLastCalledWith(expect.anything(), 3, [label.stage('code-review')], [label.stage('implement'), label.running]);
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('Next: code review.'));
+    expect(JSON.parse(getTicket(1)!.handoff!)).toMatchObject({ runId: r.id, result: { summary: 'Added a dark theme.' }, before: '', after: 'def5678' });
+
+    const { r: reviewed, env } = await review([finding()], { tests: 'npm test: 12 passed, tsc: clean' });
+    expect(reviewed.status).toBe('succeeded');
+    expect(env.started.map((s: StepSpec) => s.cmd[0])).toEqual(['prepare', 'run']);
+    const system = env.spec('run')!.files!['.workshop/system.md'] as string;
+    expect(system).toContain('You are the Code reviewer.');
+    expect(system).not.toContain('Workshop pushes it');
     expect(fake.vcs.openPullRequest).toHaveBeenCalledWith(
       expect.objectContaining({ fullName: 'me/app' }),
-      expect.objectContaining({ branch: 'workshop/3-add-dark-mode', title: 'Add dark mode', body: expect.stringMatching(/Added a dark theme\.[\s\S]*12 passed[\s\S]*Closes #3/) }),
+      expect.objectContaining({
+        branch: 'workshop/3-add-dark-mode',
+        title: 'Add dark mode',
+        body: expect.stringMatching(/^Added a dark theme\.[\s\S]*\*\*Tests:\*\* npm test: 12 passed[\s\S]*### Code review[\s\S]*\*\*Moderate\*\* No test for the toggle[\s\S]*\*\*Reviewer ran:\*\* npm test: 12 passed, tsc: clean[\s\S]*Closes #3/),
+      }),
     );
     expect(fake.vcs.requestReview).toHaveBeenCalledWith(expect.anything(), 7, 'me');
-    expect(fake.tickets.setLabels).toHaveBeenLastCalledWith(expect.anything(), 3, [label.stage('pr-review')], [label.stage('implement'), label.running]);
+    expect(fake.tickets.setLabels).toHaveBeenLastCalledWith(expect.anything(), 3, [label.stage('pr-review')], [label.stage('code-review'), label.running]);
     expect(one<{ pr_number: number }>('SELECT pr_number FROM tickets WHERE id = 1')?.pr_number).toBe(7);
+    expect(getTicket(1)!.handoff).toBeNull();
+    expect(getTicket(1)!.rework).toBeNull();
     // The run's own rate_limit_event refreshed the allowance reading for free.
     expect(allowanceOf(ids.model).fiveHour).toEqual({ pct: 44, resetsAt: 1791897000_000 });
   });
@@ -387,6 +427,8 @@ describe('runner', () => {
     const r = await settle(go());
     expect(r).toMatchObject({ status: 'failed', error: expect.stringMatching(/without committing/) });
     expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+    expect(ticketLabels()).toContain(label.stage('implement'));
+    expect(getTicket(1)!.handoff).toBeNull();
   });
 
   const rescueBranch = 'workshop/1-x-unmerged-abc1234';
@@ -411,7 +453,7 @@ describe('runner', () => {
     expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
   });
 
-  it('the Merge agent finishes the interrupted stage: pushes, opens the pull request, deletes the rescue branch', async () => {
+  it('the Merge agent finishes the interrupted stage: pushes, deletes the rescue branch, and the review opens the pull request', async () => {
     await rescued();
     fake.env = new FakeEnv({
       prepare: ['ok'],
@@ -420,12 +462,15 @@ describe('runner', () => {
     });
     const r = await settle(go('merge'));
     expect(r.status).toBe('succeeded');
-    expect(fake.vcs.openPullRequest).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: expect.stringContaining('Built it.') }));
     expect(fake.vcs.deleteBranch).toHaveBeenCalledWith(expect.anything(), rescueBranch);
-    const labels = JSON.parse(getTicket(1)!.labels);
-    expect(labels).toContain(label.stage('pr-review'));
+    const labels = ticketLabels();
+    expect(labels).toContain(label.stage('code-review'));
     expect(labels).not.toContain(label.stage('reconcile'));
     expect(getTicket(1)!.rescue).toBeNull();
+    expect(JSON.parse(getTicket(1)!.handoff!)).toMatchObject({ result: { summary: 'Built it.' } });
+    expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+    await review();
+    expect(fake.vcs.openPullRequest).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body: expect.stringContaining('Built it.') }));
   });
 
   it('a second conflict during the reconcile run fails it and keeps the newest rescue branch', async () => {
@@ -457,16 +502,17 @@ describe('runner', () => {
       publish: [line({ before: '', after: 'def5678', ahead: 1 })],
     });
     expect(await settle(go())).toMatchObject({ status: 'succeeded', summary: 'Added a dark theme.' });
-    expect(fake.vcs.openPullRequest).toHaveBeenCalled();
+    expect(JSON.parse(getTicket(1)!.handoff!)).toMatchObject({ result: { summary: 'Added a dark theme.' } });
   });
 
-  it('opens the pull request when the commits were already pushed (restart between push and PR)', async () => {
+  it('opens the pull request when the commits were already pushed (restart between push and handoff)', async () => {
     fake.env = new FakeEnv({
       prepare: ['ok'],
       run: [result({ outcome: 'done', summary: 'Done.' })],
       publish: [line({ before: 'bbb', after: 'bbb', ahead: 2 })],
     });
     expect((await settle(go())).status).toBe('succeeded');
+    await review();
     expect(fake.vcs.openPullRequest).toHaveBeenCalled();
   });
 
@@ -478,6 +524,7 @@ describe('runner', () => {
       publish: [line({ before: 'bbb', after: 'bbb', ahead: 2 })],
     });
     expect((await settle(go())).status).toBe('succeeded');
+    await review();
     expect(fake.vcs.openPullRequest).toHaveBeenCalled();
     expect(getTicket(1)!.pr_number).toBe(7);
   });
@@ -490,8 +537,10 @@ describe('runner', () => {
       publish: [line({ before: 'bbb', after: 'ccc', ahead: 3 })],
     });
     expect((await settle(go())).status).toBe('succeeded');
+    expect(fake.vcs.commentOnPullRequest).not.toHaveBeenCalled();
+    await review([finding({ severity: 'minor', title: 'Old name in a comment' })]);
     expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
-    expect(fake.vcs.commentOnPullRequest).toHaveBeenCalledWith(expect.anything(), 7, expect.stringContaining('Renamed the setting.'));
+    expect(fake.vcs.commentOnPullRequest).toHaveBeenCalledWith(expect.anything(), 7, expect.stringMatching(/^Updated after review\.\n\nRenamed the setting\.[\s\S]*### Code review[\s\S]*Old name in a comment/));
     expect(fake.vcs.requestReview).toHaveBeenCalledWith(expect.anything(), 7, 'me');
   });
 
@@ -503,6 +552,7 @@ describe('runner', () => {
       publish: [line({ before: 'bbb', after: 'bbb', ahead: 3 })],
     });
     expect((await settle(go())).status).toBe('succeeded');
+    await review();
     expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
     const body = fake.vcs.commentOnPullRequest.mock.calls[0][2] as string;
     expect(body).toMatch(/^Reviewed again with no code changes\./);
@@ -1058,6 +1108,137 @@ describe('runner', () => {
     expect(fake.vcs.createBranch).toHaveBeenCalledWith(expect.anything(), 'workshop/3-add-dark-mode', { number: 3, nodeId: undefined });
     expect(fake.tickets.setLabels).toHaveBeenCalledWith(expect.anything(), 3, [label.size('m'), label.stage('design')], [label.running]);
     expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('sized this ticket **M**'));
+  });
+});
+
+describe('code review', () => {
+  const implement = async (summary: string, push: object = { before: 'aaa', after: 'bbb', ahead: 1 }) => {
+    const env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary })], publish: [line(push)] });
+    fake.env = env;
+    const r = await settle(go());
+    expect(r.status).toBe('succeeded');
+    return env;
+  };
+  const steps = (env: FakeEnv) => env.started.map((s) => s.cmd[0]);
+  const promptOf = (env: FakeEnv) => env.spec('run')!.files!['.workshop/prompt.md'] as string;
+
+  it('sends severe problems back to implementation once with the findings, then opens the pull request flagged', async () => {
+    await implement('Added a dark theme.');
+    const first = await review([severe(), finding()]);
+    expect(first.r.status).toBe('succeeded');
+    expect(steps(first.env)).toEqual(['prepare', 'run']);
+    expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+    expect(ticketLabels()).toContain(label.stage('implement'));
+    expect(ticketLabels()).not.toContain(label.stage('code-review'));
+    expect(JSON.parse(getTicket(1)!.rework!)).toEqual({ count: 1, findings: [severe()] });
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringMatching(/sends this ticket back to implementation[\s\S]*Toggle crashes/));
+
+    const fix = await implement('Added a dark theme, with a guarded toggle.', { before: 'bbb', after: 'ccc', ahead: 2 });
+    expect(promptOf(fix)).toContain('## Code review findings to fix');
+    expect(promptOf(fix)).toContain('Toggle crashes');
+    expect(promptOf(fix)).not.toContain('No test for the toggle');
+    expect(promptOf(fix)).toContain('describe the whole change');
+    expect(JSON.parse(getTicket(1)!.handoff!)).toMatchObject({ before: 'aaa', after: 'ccc', result: { summary: 'Added a dark theme, with a guarded toggle.' } });
+
+    const second = await review([severe()]);
+    expect(promptOf(second.env)).toContain('## Severe findings from the previous code review');
+    const body = fake.vcs.openPullRequest.mock.calls[0][1].body as string;
+    expect(body).toMatch(/^### Code review\n\n\*\*The code review still found severe problems/);
+    expect(body).toContain('Added a dark theme, with a guarded toggle.');
+    expect(body).not.toContain('Added a dark theme.\n');
+    expect(ticketLabels()).toContain(label.stage('pr-review'));
+    expect(ticketLabels()).not.toContain(label.needsInfo);
+    expect(getTicket(1)!.rework).toBeNull();
+    expect(getTicket(1)!.handoff).toBeNull();
+  });
+
+  it('sends a design problem on an M ticket back to design, which gets the findings', async () => {
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('m'), label.stage('code-review')]));
+    await review([severe({ cause: 'design', title: 'The design stores themes per device' })]);
+    expect(ticketLabels()).toContain(label.stage('design'));
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Revised.' })], publish: [] });
+    const env = fake.env as FakeEnv;
+    expect((await settle(go('design'))).status).toBe('succeeded');
+    expect(promptOf(env)).toContain('## Code review findings to fix');
+    expect(promptOf(env)).toContain("doesn't work (see the findings above)");
+    expect(ticketLabels()).toContain(label.stage('implement'));
+    expect(JSON.parse(getTicket(1)!.rework!)).toMatchObject({ count: 1 });
+  });
+
+  it('opens the pull request after a rework that committed nothing new', async () => {
+    await implement('Added a dark theme.');
+    await review([severe()]);
+    await implement('Added a dark theme; the toggle was already guarded.', { before: 'bbb', after: 'bbb', ahead: 1 });
+    await review([]);
+    expect(fake.vcs.openPullRequest.mock.calls[0][1].body).toMatch(/^Added a dark theme; the toggle was already guarded\.[\s\S]*No problems found\./);
+  });
+
+  it('after changes were requested, a rework with no new commits still reports an update', async () => {
+    run('UPDATE tickets SET pr_number = 7 WHERE id = 1');
+    await implement('Renamed it.');
+    await review([severe()]);
+    await implement('Renamed it; nothing else needed.', { before: 'bbb', after: 'bbb', ahead: 1 });
+    await review([]);
+    expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+    expect(fake.vcs.commentOnPullRequest.mock.calls[0][2]).toMatch(/^Updated after review\.\n\nRenamed it; nothing else needed\./);
+  });
+
+  it('retries a review whose label edit failed after storing the rework, and then opens the pull request instead of sending it back again', async () => {
+    await implement('Added a dark theme.');
+    fake.tickets.setLabels.mockImplementation(async (_repo: unknown, _n: number, add: string[]) => {
+      if (add.includes(label.stage('implement'))) throw new Error('GitHub is down');
+    });
+    const first = await review([severe()]);
+    expect(first.r).toMatchObject({ status: 'failed', error: expect.stringContaining('GitHub is down') });
+    expect(ticketLabels()).toContain(label.stage('code-review'));
+    expect(JSON.parse(getTicket(1)!.rework!)).toMatchObject({ count: 1 });
+    expect(getTicket(1)!.handoff).not.toBeNull();
+
+    await review([severe()]);
+    expect(fake.vcs.openPullRequest.mock.calls[0][1].body).toMatch(/still found severe problems[\s\S]*Added a dark theme\./);
+    expect(ticketLabels()).toContain(label.stage('pr-review'));
+  });
+
+  it('holds a flagged pull request with needs-info when the repository merges without review', async () => {
+    run('UPDATE repos SET merge_without_review = 1 WHERE id = 1');
+    try {
+      await implement('Added a dark theme.');
+      await review([severe()]);
+      await implement('Tried again.', { before: 'bbb', after: 'ccc', ahead: 2 });
+      await review([severe()]);
+      expect(ticketLabels()).toEqual(expect.arrayContaining([label.stage('pr-review'), label.needsInfo]));
+      expect(fake.tickets.comment).toHaveBeenLastCalledWith(expect.anything(), 3, expect.stringMatching(/^@me .*won't merge this pull request without you/));
+
+      fake.tickets.listChanged = async () => [];
+      fake.vcs.pullRequestState = async () => ({ number: 7, url: 'u', state: 'open', headSha: 'abc', mergeable: 'clean', decision: null });
+      await syncRepo(getRepo(1)!);
+      expect(ticketLabels()).not.toContain(label.stage('merge'));
+      expect(ticketLabels()).toContain(label.stage('pr-review'));
+    } finally {
+      run('UPDATE repos SET merge_without_review = 0 WHERE id = 1');
+    }
+  });
+
+  it('uses the reviewer summary when the ticket was moved to code review by hand', async () => {
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('code-review')]));
+    await review([]);
+    expect(fake.vcs.openPullRequest.mock.calls[0][1].body).toMatch(/^Reviewed the change\./);
+  });
+
+  it('asks questions without pushing', async () => {
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('code-review')]));
+    const env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'needs_info', summary: '', questions: ['Which theme is the default?'] })] });
+    fake.env = env;
+    expect((await settle(go('code-review'))).status).toBe('succeeded');
+    expect(steps(env)).toEqual(['prepare', 'run']);
+    expect(ticketLabels()).toContain(label.needsInfo);
+  });
+
+  it('a delta classification clears a stale rework', async () => {
+    run('UPDATE tickets SET pr_number = 7, rework = ?, labels = ? WHERE id = 1', JSON.stringify({ count: 1, findings: [severe()] }), JSON.stringify([label.size('s'), label.stage('reclassify')]));
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'accept', size: 's', reason: 'Small change.' })] });
+    expect((await settle(go('classifier', 'delta'))).status).toBe('succeeded');
+    expect(getTicket(1)!.rework).toBeNull();
   });
 });
 
@@ -2284,6 +2465,7 @@ describe('media store', () => {
     config.publicUrl = 'https://workshop.example.com';
     env({ archive: tar({ 'media/after.png': PNG }), run: [finish([{ path: 'after.png', caption: 'Dark mode' }])] });
     await settle(go());
+    await review();
     const body = fake.vcs.openPullRequest.mock.calls.at(-1)![1].body as string;
     expect(body).toContain('**Screenshots:** [all screenshots](https://workshop.example.com/tickets/1/media) · [Dark mode](https://workshop.example.com/api/tickets/1/media/after.png)');
     expect(body.indexOf('Screenshots')).toBeLessThan(body.indexOf('Closes #3'));
@@ -2292,11 +2474,13 @@ describe('media store', () => {
   it('falls back to plain text without a public URL, and omits the line without media', async () => {
     env({ archive: tar({ 'media/after.png': PNG }) });
     await settle(go());
+    await review();
     expect(fake.vcs.openPullRequest.mock.calls.at(-1)![1].body).toContain('**Screenshots:** open this ticket in Workshop');
-    run('UPDATE tickets SET pr_number = NULL, pr_url = NULL WHERE id = 1');
+    run('UPDATE tickets SET pr_number = NULL, pr_url = NULL, labels = ? WHERE id = 1', JSON.stringify([label.size('s'), label.stage('implement')]));
     run('DELETE FROM media');
     env();
     await settle(go());
+    await review();
     expect(fake.vcs.openPullRequest.mock.calls.at(-1)![1].body).not.toContain('Screenshots');
   });
 
@@ -2304,6 +2488,7 @@ describe('media store', () => {
     run('UPDATE tickets SET pr_number = 7 WHERE id = 1');
     env({ archive: tar({ 'media/after.png': PNG }) });
     await settle(go());
+    await review();
     const call = fake.vcs.commentOnPullRequest.mock.calls.at(-1);
     expect(call?.[2]).toContain('Updated after review.');
     expect(call?.[2]).toContain('**Screenshots:**');

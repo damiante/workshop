@@ -20,7 +20,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/spend.ts` | Lifetime spend ledger: one row per claude invocation, kept past run cleanup. New dimensions are recorded in `recordSpend`, filled in `backfillSpend`, and grouped through `DIMENSIONS` |
 | `src/backfill-spend.ts` | CLI: fill in spend ledger dimensions and missing rows, optionally from an old database copy |
 | `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
-| `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
+| `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`, and the code review's routing `stageForRework` and formatters), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |
 | `src/scheduler/loop.ts` | The 60-second tick: host checks, re-attach, sync, API merges, resume paused runs, the queue, launch one, usage probe, cleanup |
 | `src/media.ts` | The per-ticket media store (`DATA_DIR/media/<ticket id>/` plus the `media` table): downloads issue images, copies agent screenshots back, delivers the folder to runs, deletes it on finish and in the 30-day sweep |
@@ -44,6 +44,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - The unique index `runs_one_active_per_ticket` enforces one agent per ticket (paused runs included). `launch()` returns null on conflict.
 - `publish` merges in commits that appeared on the remote branch and retries the push; on a conflict it saves the work on `<branch>-unmerged-<sha>` (exit 3). The run then succeeds and the ticket moves to `stage:reconcile`, with what was interrupted kept in `tickets.rescue`; the Merge agent merges the rescue branch and `planTransition` finishes the interrupted stage. A conflict during that reconcile run fails it.
 - Side effects happen only in `publishRun`, from `planTransition`'s plan. Agents never apply labels.
+- The Code reviewer never publishes (no `publish` container, so it's never rescued). Implementation's publish stores its result in `tickets.handoff`; the Code reviewer's run opens the pull request from it, and clears it last. `tickets.rework` holds the automatic rework count and severe findings for the current review round; it's written before the label edit, so a retry after a failed edit opens the pull request rather than sending the ticket back twice.
 - `fail()` increments `tickets.failures`. At `MAX_ATTEMPTS` (2) it adds `workshop/failed` plus a comment. Sync resets the count when you remove the label.
 
 ## Invariants: don't break these
@@ -81,7 +82,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 - Podman returns 409 when a volume already exists, where Docker reuses it; `createVolume` ignores 409.
 - SSH hosts run `docker system dial-stdio` remotely (docker-modem), so they need the `docker` CLI. The host key is pinned on first connect (`config.hostKey`).
 - Prompt files reach a created container through `putArchive`, with a small tar writer in `providers/docker/tar.ts`. Names must be under 100 bytes. Contents may be `Buffer`s, and `untar()` reads what `Environment.readArchive()` returns (media is copied back from a never-started container on the run's volume).
-- `imageFor` (in `workflow/labels.ts`) picks the image per run: a repository's own image, else the browser image for Implementation on `workshop/needs:browser` tickets and for Design and Design adversary when the Classifier set `ui`, else the base image.
+- `imageFor` (in `workflow/labels.ts`) picks the image per run: a repository's own image, else the browser image for Implementation and the Code reviewer on `workshop/needs:browser` tickets and for Design and Design adversary when the Classifier set `ui`, else the base image.
 - `chooseImage` (in `scheduler/runner.ts`) runs once when a run starts, and its choice is stored in `runs.image`. With no hand-set image, a `.workshop/Dockerfile` on the default branch is built on top of `imageFor`'s choice (`WORKSHOP_BASE` build arg), tagged `workshop-repo-<id>:<hash of files + base image id>`. Any failure falls back to the standard image with a `repo-image` alert. Tickets Workshop's own App opens (Set up agent image) count as allowed authors.
 - Image capabilities come from the `workshop.capabilities` label (`imageLabels`), read per run and described to the agent in `system.md`. The `workshop.environment` label's text is added there too.
 

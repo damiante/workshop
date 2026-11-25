@@ -10,6 +10,7 @@ export const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
   { title: 'Design', match: (t) => t.stage === 'design' },
   { title: 'Design review', match: (t) => t.stage === 'design-review' },
   { title: 'Implementation', match: (t) => t.stage === 'implement' },
+  { title: 'Code review', match: (t) => t.stage === 'code-review' },
   { title: 'Your review', match: (t) => t.stage === 'pr-review' },
   // Reconcile is rare and the Merge agent works it, so it shares the Merge column.
   { title: 'Merge', match: (t) => t.stage === 'merge' || t.stage === 'reconcile' },

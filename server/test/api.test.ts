@@ -286,12 +286,13 @@ describe('usage limits per subscription', () => {
   });
 
   it('migrates the global limits onto every connection', () => {
+    const limits = MIGRATIONS.findIndex((m) => m.includes('ADD COLUMN five_hour_max'));
     const migrate = (settings: object | null) => {
       const db = new DatabaseSync(':memory:');
-      for (const m of MIGRATIONS.slice(0, -1)) db.exec(m);
+      for (const m of MIGRATIONS.slice(0, limits)) db.exec(m);
       db.exec("INSERT INTO connections (kind, provider, name, config, created_at, updated_at) VALUES ('model', 'anthropic', 'c', '{}', 0, 0)");
       if (settings) db.prepare("INSERT INTO settings (key, value) VALUES ('settings', ?)").run(JSON.stringify(settings));
-      db.exec(MIGRATIONS.at(-1)!);
+      db.exec(MIGRATIONS[limits]);
       const conn = db.prepare('SELECT five_hour_max, weekly_max FROM connections').get();
       const stored = db.prepare("SELECT value FROM settings WHERE key = 'settings'").get() as { value: string } | undefined;
       db.close();
@@ -300,6 +301,28 @@ describe('usage limits per subscription', () => {
     expect(migrate({ mode: 'always', fiveHourMax: 55, weeklyMax: 65 })).toEqual({ conn: { five_hour_max: 55, weekly_max: 65 }, settings: { mode: 'always' } });
     expect(migrate(null)).toEqual({ conn: { five_hour_max: 70, weekly_max: 80 }, settings: null });
     expect(migrate({ mode: 'paused' })).toEqual({ conn: { five_hour_max: 70, weekly_max: 80 }, settings: { mode: 'paused' } });
+  });
+});
+
+describe('code reviewer migration', () => {
+  it("gives existing installs a Code reviewer with the Design adversary's model and billing", () => {
+    const db = new DatabaseSync(':memory:');
+    for (const m of MIGRATIONS.slice(0, -1)) db.exec(m);
+    db.exec("INSERT INTO connections (kind, provider, name, config, created_at, updated_at) VALUES ('model', 'anthropic', 'c', '{}', 0, 0)");
+    db.exec("INSERT INTO agent_classes (name, model, model_connection_id, effort, billing, max_turns, timeout_min) VALUES ('design-review', 'claude-opus-5-5', 1, 'high', 'api', 80, 45)");
+    db.exec(MIGRATIONS.at(-1)!);
+    const row = { ...db.prepare("SELECT * FROM agent_classes WHERE name = 'code-review'").get() };
+    const columns = db.prepare('SELECT name FROM pragma_table_info(?)').all('tickets').map((c) => c.name);
+    db.close();
+    expect(row).toEqual({ name: 'code-review', model: 'claude-opus-5-5', model_connection_id: 1, effort: 'high', billing: 'api', prompt: null, max_turns: 150, timeout_min: 60 });
+    expect(columns).toEqual(expect.arrayContaining(['handoff', 'rework']));
+  });
+
+  it('adds no row to a fresh database, so seeding gives the defaults', () => {
+    const db = new DatabaseSync(':memory:');
+    for (const m of MIGRATIONS) db.exec(m);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM agent_classes WHERE name = 'code-review'").get()).toEqual({ n: 0 });
+    db.close();
   });
 });
 

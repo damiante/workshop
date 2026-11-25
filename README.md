@@ -1,6 +1,6 @@
 # Workshop
 
-Workshop works through your GitHub issues while you're away, using the Claude allowance you'd otherwise leave unused. It picks up issues from the repositories you choose and runs Claude Code agents in Docker containers on machines you control. The agents classify, design, adversarially review, implement and merge, and the result is pull requests for you to review. A web UI shows what's running and what's waiting on you, and stays inside the allowance limits and operating hours you set.
+Workshop works through your GitHub issues while you're away, using the Claude allowance you'd otherwise leave unused. It picks up issues from the repositories you choose and runs Claude Code agents in Docker containers on machines you control. The agents classify, design, adversarially review, implement, review the code and merge, and the result is pull requests for you to review. A web UI shows what's running and what's waiting on you, and stays inside the allowance limits and operating hours you set.
 
 - **[How it works](#how-it-works)**: the pipeline and its labels
 - **[Install](#install)**: Docker Compose, first sign-in
@@ -23,8 +23,11 @@ Every few minutes Workshop reads open issues opened by you (or anyone else you l
 1. **Classify.** The Classifier sizes the issue XS to XL, or declines it with a reason. Workshop creates a branch linked to the issue. A ticket waits while GitHub shows it as blocked by an open issue, and the Classifier can add that link itself when a ticket needs another one first.
 2. **Design** (M, L and XL only). The Design agent writes a design doc on the branch.
 3. **Design review** (L and XL only). The Design adversary attacks the design and revises it.
-4. **Implement.** The Implementation agent writes the change and tests, and Workshop opens a pull request and asks for your review. On L and XL tickets the agent also runs an adversarial self-review before finishing.
-5. **Your review.**
+4. **Implement.** The Implementation agent writes the change and tests and pushes them.
+5. **Code review.** The Code reviewer reads the change and runs the tests, and reports what it finds. It changes nothing.
+   - Severe problems (the change doesn't do what the ticket asks, breaks something, loses data, opens a security hole) send the ticket back automatically: to design when the design is at fault and the ticket has one, otherwise to implementation. This happens once per review round. Severe problems that remain after that are flagged at the top of the pull request.
+   - Everything else goes into the pull request for you to decide on. Workshop then opens the pull request and asks for your review.
+6. **Your review.**
    - Approve, and Workshop merges the pull request (through GitHub, no tokens needed), closes the issue and deletes the branch. Only real merge conflicts need the Merge agent.
    - Request changes, and the Classifier sizes just those changes and the pipeline runs again on the same branch.
 
@@ -94,7 +97,7 @@ Under **AI models**, add Claude with either or both of:
 - **Subscription token:** on any computer with a browser, run `claude setup-token`, sign in, and paste the `sk-ant-oat01-…` token. It lasts about a year; Workshop raises an alert if Claude starts rejecting it.
 - **API key:** from platform.claude.com. Runs billed this way are capped per run and per day (Settings).
 
-The connection check runs a tiny Claude Code session on an agent host (about 700 input tokens on Haiku) and shows your current 5-hour and weekly usage. Agents are pre-assigned: Haiku for the Classifier, Opus for Design and the Design adversary, Sonnet for Implementation and Merge. Change this on the **Agents** page, along with each agent's billing (subscription or API key), effort, instructions, turn limit and time limit.
+The connection check runs a tiny Claude Code session on an agent host (about 700 input tokens on Haiku) and shows your current 5-hour and weekly usage. Agents are pre-assigned: Haiku for the Classifier, Opus for Design, the Design adversary and the Code reviewer, Sonnet for Implementation and Merge. Change this on the **Agents** page, along with each agent's billing (subscription or API key), effort, instructions, turn limit and time limit.
 
 ### 4. Repositories
 

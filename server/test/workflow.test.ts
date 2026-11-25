@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { addNeeds, applyEdits, branchFor, labelDiff, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
-import { parseResult, type Rescue } from '../src/workflow/schemas.ts';
-import { planTransition, type PlanContext } from '../src/workflow/transitions.ts';
-import { capabilitiesOf, environmentText, taskPrompt } from '../src/workflow/prompts.ts';
+import { addNeeds, applyEdits, branchFor, describeStep, labelDiff, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
+import { parseResult, type Finding, type Rescue } from '../src/workflow/schemas.ts';
+import { MAX_FINDINGS_SHOWN, planTransition, reviewSection, stageForRework, type PlanContext } from '../src/workflow/transitions.ts';
+import { capabilitiesOf, DEFAULT_PROMPTS, environmentText, protocolText, taskPrompt } from '../src/workflow/prompts.ts';
+import { stepPriority } from '../src/scheduler/gates.ts';
 
 const step = (labels: string[], open = true) => nextStep(parseLabels(labels), open);
 
@@ -57,6 +58,8 @@ const ctx = (over: Partial<PlanContext> = {}): PlanContext => {
     author: 'damiante',
     docPath: 'docs/workshop/1-x.md',
     docUrl: 'https://example/doc',
+    rework: null,
+    mergeWithoutReview: false,
     ...over,
   };
 };
@@ -114,10 +117,12 @@ describe('planTransition', () => {
     expect(plan).toMatchObject({ add: [label.stage('implement')], remove: [label.stage('design-review')], publish: true });
   });
 
-  it('implement pushes, opens the PR and waits for review', () => {
+  it('implement pushes, stores its summary and goes to code review without opening the PR', () => {
     const labels = [label.size('s'), label.stage('implement')];
     const plan = planTransition(ctx({ agent: 'implement', labels }), { outcome: 'done', summary: 'ok' });
-    expect(plan).toMatchObject({ add: [label.stage('pr-review')], publish: true, openPr: true });
+    expect(plan).toMatchObject({ add: [label.stage('code-review')], remove: [label.stage('implement')], publish: true, handOff: true });
+    expect(plan.openPr).toBeUndefined();
+    expect(plan.comment).toContain('Next: code review.');
   });
 
   it('merge agent pushes then merges', () => {
@@ -270,7 +275,7 @@ describe('media and ui results', () => {
   });
 
   it('carries ui on accept and deletes the media store on reject', () => {
-    const ctx = { agent: 'classifier', mode: 'normal', labels: [], state: parseLabels([]), author: 'me', docPath: 'd.md', docUrl: 'u' } as PlanContext;
+    const ctx: PlanContext = { agent: 'classifier', mode: 'normal', labels: [], state: parseLabels([]), author: 'me', docPath: 'd.md', docUrl: 'u', rework: null, mergeWithoutReview: false };
     expect(planTransition(ctx, { decision: 'accept', size: 'm', reason: 'r', ui: true })).toMatchObject({ ui: true });
     expect(planTransition(ctx, { decision: 'accept', size: 'm', reason: 'r' }).ui).toBeUndefined();
     expect(planTransition(ctx, { decision: 'reject', reason: 'r' }).deleteMedia).toBe(true);
@@ -375,10 +380,11 @@ describe('reconcile (a rescued push)', () => {
     expect(applyEdits(['a', 'b'], diff).sort()).toEqual(['b', 'c']);
   });
 
-  it('finishes an Implementation rescue: pull request, review stage, branch cleanup', () => {
+  it('finishes an Implementation rescue: code review next with the handoff, branch cleanup', () => {
     const plan = planTransition(reconcileCtx(rescue()), merged);
-    expect(plan).toMatchObject({ publish: true, openPr: true, deleteBranch: 'workshop/1-x-unmerged-abc', clearRescue: true });
-    expect(plan.add).toEqual([label.stage('pr-review')]);
+    expect(plan).toMatchObject({ publish: true, handOff: true, deleteBranch: 'workshop/1-x-unmerged-abc', clearRescue: true });
+    expect(plan.openPr).toBeUndefined();
+    expect(plan.add).toEqual([label.stage('code-review')]);
     expect(plan.remove).toEqual([label.stage('reconcile')]);
     expect(plan.comment).toContain('Resolved CLAUDE.md.');
   });
@@ -428,5 +434,202 @@ describe('attentionOf', () => {
     expect(attentionOf({ ...base, stage: 'pr-review', activeRunId: 'r' })).toBeNull();
     expect(attentionOf({ ...base, stage: 'pr-review', prStatus: 'changes_requested' })).toBeNull();
     expect(attentionOf({ ...base, stage: 'pr-review', failed: true, skipped: true })).toBeNull();
+  });
+});
+
+describe('code review', () => {
+  const finding = (over: Partial<Finding> = {}): Finding => ({
+    severity: 'severe',
+    cause: 'implementation',
+    title: 'Crashes on empty input',
+    detail: 'parse() throws on an empty string.',
+    evidence: 'Ran npm test: 1 failed.',
+    fix: 'Return null for empty input.',
+    file: 'src/a.ts',
+    line: 4,
+    ...over,
+  });
+  const reviewCtx = (size: 's' | 'm' | 'l' | 'xl' = 's', over: Partial<PlanContext> = {}) => {
+    const labels = [label.size(size), label.stage('code-review')];
+    return ctx({ agent: 'code-review', labels, ...over });
+  };
+  const done = (findings: Finding[], over: object = {}) => ({ outcome: 'done' as const, summary: 'Looks mostly fine.', findings, ...over });
+
+  it('is an agent step at implementation priority, called Code review', () => {
+    const s = step([label.stage('code-review')]);
+    expect(s).toEqual({ kind: 'agent', agent: 'code-review', mode: 'normal' });
+    expect(describeStep(s)).toBe('Code review');
+    expect(stepPriority(s!)).toBe(1);
+  });
+
+  it('gets the browser image on a ticket that needs one', () => {
+    const images = { repo: null, base: 'base', browser: 'browser' };
+    expect(imageFor('code-review', parseLabels([label.needs('browser')]), images)).toBe('browser');
+    expect(imageFor('code-review', parseLabels([]), images, true)).toBe('base');
+  });
+
+  describe('stageForRework', () => {
+    it('returns null without a severe finding, even when moderate ones blame the design', () => {
+      expect(stageForRework('l', [])).toBeNull();
+      expect(stageForRework('l', [finding({ severity: 'moderate', cause: 'design' }), finding({ severity: 'minor' })])).toBeNull();
+    });
+    it('sends implementation causes back to implementation', () => {
+      expect(stageForRework('xl', [finding()])).toBe('implement');
+    });
+    it('sends design causes back to design on M, L and XL, and to implementation on XS and S', () => {
+      for (const size of ['m', 'l', 'xl'] as const) expect(stageForRework(size, [finding(), finding({ cause: 'design' })])).toBe('design');
+      for (const size of ['xs', 's'] as const) expect(stageForRework(size, [finding({ cause: 'design' })])).toBe('implement');
+      expect(stageForRework(null, [finding({ cause: 'design' })])).toBe('implement');
+    });
+  });
+
+  it('opens the PR with the findings when nothing is severe', () => {
+    for (const findings of [[], [finding({ severity: 'moderate', title: 'No test for X' }), finding({ severity: 'minor', title: 'Rename y' })]]) {
+      const plan = planTransition(reviewCtx(), done(findings, { tests: 'npm test: 3 passed' }));
+      expect(plan).toMatchObject({ add: [label.stage('pr-review')], remove: [label.stage('code-review')], openPr: true, rework: null });
+      expect(plan.publish).toBeUndefined();
+      expect(plan.flagged).toBeUndefined();
+      expect(plan.comment).toBeUndefined();
+      expect(plan.reviewNotes).toMatch(/^### Code review/);
+      expect(plan.reviewNotes).toContain('**Reviewer ran:** npm test: 3 passed');
+      if (findings.length) {
+        expect(plan.reviewNotes).toContain('- **Moderate** (`src/a.ts:4`) No test for X: parse() throws');
+        expect(plan.reviewNotes).toContain('Checked: Ran npm test');
+        expect(plan.reviewNotes).toContain('Fix: Return null');
+        expect(plan.reviewNotes!.indexOf('Moderate')).toBeLessThan(plan.reviewNotes!.indexOf('Minor'));
+      } else expect(plan.reviewNotes).toContain('No problems found.');
+    }
+  });
+
+  it('sends severe findings back once, storing them, without publishing or opening the PR', () => {
+    const plan = planTransition(reviewCtx(), done([finding({ severity: 'minor', title: 'Nit' }), finding()]));
+    expect(plan).toMatchObject({ add: [label.stage('implement')], remove: [label.stage('code-review')] });
+    expect(plan.publish).toBeUndefined();
+    expect(plan.openPr).toBeUndefined();
+    expect(plan.rework).toEqual({ count: 1, findings: [finding()] });
+    expect(plan.comment).toContain('Code review found 1 severe problem, so Workshop sends this ticket back to implementation (rework 1 of 1):');
+    expect(plan.comment).toContain('Crashes on empty input');
+    expect(plan.comment).not.toContain('Nit');
+    expect(plan.comment).toMatch(/Next: implementation\.$/);
+
+    const design = planTransition(reviewCtx('l'), done([finding({ cause: 'design' })]));
+    expect(design.add).toEqual([label.stage('design')]);
+    expect(design.comment).toContain('back to design');
+  });
+
+  it('opens the PR flagged when severe findings remain after the rework', () => {
+    const rework = { count: 1, findings: [finding()] };
+    const plan = planTransition(reviewCtx('s', { rework }), done([finding()]));
+    expect(plan).toMatchObject({ add: [label.stage('pr-review')], openPr: true, rework: null, flagged: true });
+    expect(plan.reviewNotes).toContain('still found severe problems after one rework');
+    expect(plan.reviewNotes!.indexOf('still found')).toBeLessThan(plan.reviewNotes!.indexOf('Crashes'));
+    expect(plan.add).not.toContain(label.needsInfo);
+    expect(plan.comment).toBeUndefined();
+  });
+
+  it('holds the PR with needs-info when it would merge without review', () => {
+    const rework = { count: 1, findings: [finding()] };
+    const plan = planTransition(reviewCtx('s', { rework, mergeWithoutReview: true }), done([finding()]));
+    expect(plan.add).toEqual([label.stage('pr-review'), label.needsInfo]);
+    expect(plan.comment).toMatch(/^@damiante .*won't merge this pull request without you/);
+    // Nothing severe: no hold.
+    expect(planTransition(reviewCtx('s', { rework, mergeWithoutReview: true }), done([])).add).toEqual([label.stage('pr-review')]);
+  });
+
+  it('asks questions without publishing', () => {
+    const plan = planTransition(reviewCtx(), { outcome: 'needs_info', summary: '', questions: ['Which?'] });
+    expect(plan).toMatchObject({ add: [label.needsInfo], publish: false });
+  });
+
+  it('a new classification clears the rework state', () => {
+    const rework = { count: 1, findings: [finding()] };
+    expect(planTransition(ctx({ rework }), { decision: 'accept', size: 's', reason: 'x' }).rework).toBeNull();
+    const labels = [label.size('s'), label.stage('reclassify')];
+    expect(planTransition(ctx({ labels, mode: 'delta', rework }), { decision: 'accept', size: 's', reason: 'x' }).rework).toBeNull();
+  });
+
+  it('caps the findings shown and cuts long text', () => {
+    const many = Array.from({ length: MAX_FINDINGS_SHOWN + 5 }, (_, i) => finding({ severity: i === 34 ? 'severe' : 'minor', title: `T${i}`, detail: 'd'.repeat(3000) }));
+    const notes = reviewSection(done(many), false);
+    expect(notes.indexOf('T34')).toBeLessThan(notes.indexOf('T0:'));
+    expect(notes.match(/^- \*\*/gm)).toHaveLength(MAX_FINDINGS_SHOWN);
+    expect(notes).toContain("5 more findings left out; see the Code reviewer's run.");
+    expect(notes).toContain(`${'d'.repeat(1000)}…`);
+    expect(notes).not.toContain('d'.repeat(1001));
+    expect(notes.length).toBeLessThan(65_536);
+  });
+
+  describe('parseResult', () => {
+    it('requires findings when done, and accepts an empty list', () => {
+      expect(parseResult('code-review', { outcome: 'done', summary: 's' })).toMatch(/^findings must be a list of \{ severity, cause, title, detail, evidence, fix \}/);
+      expect(parseResult('code-review', done([]))).toMatchObject({ findings: [] });
+      expect(parseResult('code-review', done([finding()]))).toMatchObject({ findings: [finding()] });
+      expect(parseResult('code-review', done([finding({ file: undefined, line: undefined })]))).toMatchObject({ outcome: 'done' });
+      expect(parseResult('code-review', { outcome: 'failed', summary: 's' })).toMatchObject({ outcome: 'failed' });
+    });
+    it('rejects a bad severity, cause, fix, evidence or line', () => {
+      for (const bad of [{ severity: 'critical' }, { cause: 'tests' }, { fix: '' }, { evidence: undefined }, { line: 0 }, { line: 1.5 }, { file: 3 }]) {
+        expect(parseResult('code-review', done([finding(bad as Partial<Finding>)]))).toMatch(/^findings must be/);
+      }
+    });
+    it('other agents ignore findings', () => {
+      expect(parseResult('implement', { outcome: 'done', summary: 's' })).toMatchObject({ outcome: 'done' });
+    });
+  });
+
+  describe('prompts', () => {
+    const base = {
+      mode: 'normal' as const,
+      repo: 'me/app',
+      base: 'main',
+      branch: 'workshop/3-x',
+      docPath: 'd.md',
+      ticket: { number: 3, title: 'X', body: 'Do X', url: 'u', labels: [], size: 'l' as const },
+      comments: [],
+      omittedComments: 0,
+      review: [],
+      ui: false,
+      media: [],
+    };
+    const rework = { count: 1, findings: [finding()] };
+
+    it("gives the reviewer its task, the review feedback check and the earlier findings", () => {
+      const plain = taskPrompt({ ...base, agent: 'code-review' });
+      expect(plain).toContain('Review the work on branch `workshop/3-x` (compare with `git diff origin/main...HEAD`) against the ticket and the design at `d.md`');
+      expect(plain).not.toContain('review feedback above');
+      expect(plain).not.toContain('previous code review');
+      const reviewed = taskPrompt({ ...base, agent: 'code-review', review: [{ author: 'me', body: 'Rename' }], rework });
+      expect(reviewed).toContain('Check that the review feedback above was addressed.');
+      expect(reviewed).toContain('## Severe findings from the previous code review');
+      expect(reviewed).toContain('Crashes on empty input');
+      expect(reviewed).toContain('Check each one again');
+    });
+
+    it('lists the findings to fix for design, design review and implementation during a rework only', () => {
+      for (const agent of ['design', 'design-review', 'implement'] as const) {
+        expect(taskPrompt({ ...base, agent })).not.toContain('Code review findings');
+        const prompt = taskPrompt({ ...base, agent, rework });
+        expect(prompt).toContain('## Code review findings to fix');
+        expect(prompt).toContain('- **Severe** (`src/a.ts:4`) Crashes on empty input');
+      }
+      expect(taskPrompt({ ...base, agent: 'design', rework })).toContain("The code review found that the design at `d.md` doesn't work");
+      expect(taskPrompt({ ...base, agent: 'design', rework })).not.toContain('Write the design');
+      expect(taskPrompt({ ...base, agent: 'design', rework, review: [{ author: 'me', body: 'More' }] })).toContain('to cover the review feedback above');
+      expect(taskPrompt({ ...base, agent: 'design-review', rework })).toContain('Check that the revision fixes the code review findings above.');
+      expect(taskPrompt({ ...base, agent: 'implement', rework })).toContain('describe the whole change, not only the fixes');
+      expect(taskPrompt({ ...base, agent: 'merge', rework })).not.toContain('Code review findings');
+    });
+
+    it('no longer asks Implementation for its own adversarial review', () => {
+      expect(DEFAULT_PROMPTS.implement).not.toMatch(/adversarial|subagent/);
+      expect(DEFAULT_PROMPTS['code-review']).toContain("When in doubt, it isn't severe");
+    });
+
+    it("doesn't tell the reviewer that Workshop pushes its commits", () => {
+      expect(protocolText({ branch: 'b', base: 'main' })).toContain('Workshop pushes it');
+      const reviewer = protocolText({ branch: 'b', base: 'main', publishes: false });
+      expect(reviewer).not.toContain('Workshop pushes it');
+      expect(reviewer).toContain('Workshop discards this container');
+    });
   });
 });

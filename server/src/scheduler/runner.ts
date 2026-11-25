@@ -21,6 +21,7 @@ import {
   editLabels,
   getRepo,
   getTicket,
+  handoffOf,
   isAllowedAuthor,
   labelsOf,
   linkRef,
@@ -28,6 +29,7 @@ import {
   MAX_ATTEMPTS,
   repoRef,
   rescueOf,
+  reworkOf,
   setBlockers,
   sourceFor,
   vcsFor,
@@ -36,8 +38,8 @@ import {
 } from '../tickets.ts';
 import { imageFor, label, moveTo, parseLabels, REPO_IMAGE_DIR, repoImageTag } from '../workflow/labels.ts';
 import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
-import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, protocolText, taskPrompt } from '../workflow/prompts.ts';
-import { parseResult, schemaFor, type AgentResult, type Rescue, type WorkResult } from '../workflow/schemas.ts';
+import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, protocolText, publishes, taskPrompt } from '../workflow/prompts.ts';
+import { parseResult, schemaFor, type AgentResult, type Handoff, type Rescue, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition } from '../workflow/transitions.ts';
 import { check } from '../http/util.ts';
 import { ALLOWANCE_MAX_AGE_MS, joinRefs, thresholdBlock } from './gates.ts';
@@ -258,7 +260,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
         : undefined;
     const imageLabels: Record<string, string> = await ctx.env.imageLabels(ctx.image).catch(() => ({}));
     const environment = environmentText(capabilitiesOf(imageLabels), imageLabels[ENVIRONMENT_LABEL]);
-    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch })}\n\n${environment}`;
+    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch, publishes: publishes(r.agent) })}\n\n${environment}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
       mode: r.mode,
@@ -274,6 +276,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
       ui: Boolean(t.ui),
       media: stored.map((m) => ({ name: m.name, source: m.source, runId: m.run_id, caption: m.caption })),
       rescue: r.agent === 'merge' && parseLabels(labels).stage === 'reconcile' && rescue ? { branch: rescue.branch, agent: rescue.agent, summary: rescue.result.summary } : undefined,
+      rework: reworkOf(t) ?? undefined,
     });
     Object.assign(files, mediaFiles(t.id));
   }
@@ -511,28 +514,35 @@ interface Pushed {
   rescued?: string;
 }
 
-async function openOrUpdatePr(ctx: Ctx, t: TicketRow, result: WorkResult, pushed: Pushed, mediaRunId = ctx.run.id) {
+/**
+ * Opens the pull request, or comments on the one under review, with the Implementation summary in
+ * `handoff` and the code review's notes (first when `flagged`: severe problems remain).
+ */
+async function openOrUpdatePr(ctx: Ctx, t: TicketRow, handoff: Handoff, reviewNotes = '', flagged = false) {
   const repo = repoRef(ctx.repo);
   const vcs = vcsFor(ctx.repo);
   const branch = branchOf(t);
+  const result = handoff.result;
   const tests = result.tests ? `\n\n**Tests:** ${result.tests}` : '';
   // Only a recorded PR means "update after review". One opened but never recorded (a retried request, a
   // restart) goes through openPullRequest, which takes it over.
   let number = t.pr_number;
-  // A new pull request needs commits on the branch. (Judging it by "ahead" also covers a restart between
-  // pushing and opening the PR, when nothing is new.) After a review, no new commits is a valid answer:
-  // the review may only ask to re-run the tests or explain something, so the summary goes to the reviewer.
-  if (!number && !pushed.ahead) throw new Error('The implementation agent finished without committing any changes.');
   let url = t.pr_url;
-  const shots = screenshotsLine(listMedia(t.id).filter((m) => m.run_id === mediaRunId), config.publicUrl, t.id);
+  const shots = screenshotsLine(listMedia(t.id).filter((m) => m.run_id === handoff.runId), config.publicUrl, t.id);
   const screenshots = shots ? `\n\n${shots}` : '';
+  const notes = reviewNotes ? `\n\n${reviewNotes}` : '';
   if (number) {
-    const head = pushed.before === pushed.after ? 'Reviewed again with no code changes.' : 'Updated after review.';
-    await vcs.commentOnPullRequest(repo, number, `${head}\n\n${result.summary}${tests}${screenshots}`);
+    // After a review, no new commits is a valid answer: the review may only ask to re-run the tests or
+    // explain something, so the summary goes to the reviewer.
+    const head = handoff.before === handoff.after ? 'Reviewed again with no code changes.' : 'Updated after review.';
+    const work = `${result.summary}${tests}${screenshots}`;
+    await vcs.commentOnPullRequest(repo, number, flagged ? `${head}${notes}\n\n${work}` : `${head}\n\n${work}${notes}`);
   } else {
     const size = parseLabels(labelsOf(t)).size;
     const design = size === 'm' || size === 'l' || size === 'xl' ? `\n\n**Design:** [\`${docPathOf(t)}\`](${vcs.fileUrl(repo, branch, docPathOf(t))})` : '';
-    const body = `${result.summary}${tests}${screenshots}${design}\n\nCloses #${t.number}\n\n---\n_Opened by Workshop. Approve to merge it, or request changes and Workshop will work on them._`;
+    const work = `${result.summary}${tests}${screenshots}${design}`;
+    const described = flagged && reviewNotes ? `${reviewNotes}\n\n${work}` : `${work}${notes}`;
+    const body = `${described}\n\nCloses #${t.number}\n\n---\n_Opened by Workshop. Approve to merge it, or request changes and Workshop will work on them._`;
     const pr = await vcs.openPullRequest(repo, { branch, title: t.title, body });
     number = pr.number;
     url = pr.url;
@@ -551,8 +561,20 @@ async function publishRun(ctx: Ctx) {
   const branch = branchOf(t);
   const docPath = docPathOf(t);
   const result = JSON.parse(r.result!) as AgentResult;
+  const rework = reworkOf(t);
   const plan = planTransition(
-    { agent: r.agent, mode: r.mode, labels, state: parseLabels(labels), author: t.author, docPath, docUrl: vcs.fileUrl(repo, branch, docPath), rescue: rescueOf(t) ?? undefined },
+    {
+      agent: r.agent,
+      mode: r.mode,
+      labels,
+      state: parseLabels(labels),
+      author: t.author,
+      docPath,
+      docUrl: vcs.fileUrl(repo, branch, docPath),
+      rescue: rescueOf(t) ?? undefined,
+      rework,
+      mergeWithoutReview: Boolean(ctx.repo.merge_without_review),
+    },
     result,
   );
   if (plan.failure) throw new Error(plan.failure);
@@ -594,6 +616,22 @@ async function publishRun(ctx: Ctx) {
     }
     if (state.exitCode !== 0) throw new Error(`Pushing ${branch} failed (exit ${state.exitCode}). See the run log.`);
   }
+  if (plan.handOff) {
+    // A new pull request needs commits on the branch. (Judging it by "ahead" also covers a restart between
+    // pushing and recording the handoff, when nothing is new.)
+    if (!t.pr_number && !pushed.ahead) throw new Error('The implementation agent finished without committing any changes.');
+    // When reconciling, the pull request describes the interrupted run's work, not the merge.
+    const rescued = plan.clearRescue ? rescueOf(t) : null;
+    // A rework compares against where its review round started, so one with no new commits still counts as an update.
+    const earlier = rework ? handoffOf(t) : null;
+    const handoff: Handoff = {
+      runId: rescued ? rescued.runId : r.id,
+      result: rescued ? rescued.result : (result as WorkResult),
+      before: earlier ? earlier.before : pushed.before,
+      after: pushed.after,
+    };
+    run('UPDATE tickets SET handoff = ? WHERE id = ?', JSON.stringify(handoff), t.id);
+  }
   if (plan.addBlockers) {
     const source = sourceFor(ctx.repo);
     const open = [];
@@ -614,15 +652,17 @@ async function publishRun(ctx: Ctx) {
   if (plan.ui !== undefined) run('UPDATE tickets SET ui = ? WHERE id = ?', Number(plan.ui), t.id);
   if (plan.deleteMedia) deleteMedia(t.id);
   if (plan.openPr) {
-    // When reconciling, the PR describes the interrupted run's work, not the merge.
-    const rescued = plan.clearRescue ? rescueOf(t) : null;
-    await openOrUpdatePr(ctx, t, rescued ? rescued.result : (result as WorkResult), pushed, rescued ? rescued.runId : r.id);
+    // Without a handoff (the ticket was moved to code review by hand), the reviewer's summary describes the work.
+    await openOrUpdatePr(ctx, t, handoffOf(t) ?? { runId: r.id, result: result as WorkResult }, plan.reviewNotes, plan.flagged);
   }
+  // After the pull request opens: if opening it fails, the retried review must still know about this round's rework.
+  if ('rework' in plan) run('UPDATE tickets SET rework = ? WHERE id = ?', plan.rework ? JSON.stringify(plan.rework) : null, t.id);
   if (plan.deleteBranch) await vcs.deleteBranch(repo, plan.deleteBranch).catch((err) => warn(r.id, `Workshop couldn't delete ${plan.deleteBranch}: ${(err as Error).message}`));
   if (plan.clearRescue) run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
   await editLabels(t, plan.add, [...plan.remove, label.running]);
   if (plan.comment) await sourceFor(ctx.repo).comment(repo, t.number, plan.comment);
-  run('UPDATE tickets SET failures = 0 WHERE id = ?', t.id);
+  // The handoff goes last, so a retry after a partial failure still has the Implementation summary.
+  run(`UPDATE tickets SET failures = 0${plan.openPr ? ', handoff = NULL' : ''} WHERE id = ?`, t.id);
   setRun(r.id, { status: 'succeeded', step: null, container_id: null, ended_at: Date.now() });
   if (r.volume) await ctx.env.removeVolume(r.volume).then(() => setRun(r.id, { volume: null }), () => {});
   if (plan.merge) {

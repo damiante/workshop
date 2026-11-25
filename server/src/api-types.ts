@@ -94,7 +94,7 @@ export interface RepoView {
   mergeWarning: string | null;
 }
 
-export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'merge';
+export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'code-review' | 'merge';
 export type Billing = 'subscription' | 'api';
 
 export interface AgentClassView {
@@ -123,7 +123,7 @@ export interface ModelOption {
 }
 
 export type Size = 'xs' | 's' | 'm' | 'l' | 'xl';
-export type Stage = 'design' | 'design-review' | 'implement' | 'pr-review' | 'merge' | 'reclassify' | 'reconcile';
+export type Stage = 'design' | 'design-review' | 'implement' | 'code-review' | 'pr-review' | 'merge' | 'reclassify' | 'reconcile';
 
 /** Fields of a ticket's state to change by hand; fields left out stay as they are. */
 export interface TicketStatePatch {
