@@ -30,7 +30,7 @@ The alternative, a Workshop-orchestrated subagent inside the Implementation run,
 
 **The Implementation summary is kept for the PR.** The PR body is still the Implementation agent's summary. It's now written one run later, so `publishRun` stores what `openOrUpdatePr` needs on the ticket (`tickets.handoff`) when Implementation finishes. Run rows aren't used for this: retention deletes them. The "finished without committing any changes" check moves from PR opening to the Implementation publish, where `pushed.ahead` is known.
 
-**The loop counter and the findings to fix** live in `tickets.rework`. Design, Design adversary and Implementation get the findings as a prompt section while a rework is under way. Both columns are cleared when the PR is opened or updated, so each review round (first PR, or after changes are requested) gets one automatic rework.
+**The loop counter and the findings to fix** live in `tickets.rework`. Design, Design adversary, Implementation and the second Code review get the findings as a prompt section while a rework is under way (the reviewer so it checks they were fixed rather than starting blind). Both columns are cleared when the PR is opened or updated, and `rework` is also cleared by every accepted classification, so each review round (first PR, or after changes are requested) gets one automatic rework even if a ticket was moved by hand mid-rework.
 
 **Remove the L/XL self-review bullet** from the Implementation prompt. The new stage replaces it. Running both doubles the cost.
 
@@ -47,7 +47,7 @@ The alternative, a Workshop-orchestrated subagent inside the Implementation run,
   - the repository's tests or type-check fail because of the change;
   - it follows a design that can't work.
 
-  Only findings the reviewer has verified (by reading the code, or by running something) qualify.
+  Only findings the reviewer has verified (by reading the code, or by running something) qualify, and each finding says how in `evidence`.
 - **moderate**: a real bug on an edge path, a missing test for changed behaviour, or a clear deviation from the repository's conventions or the design that works but should be fixed.
 - **minor**: style, naming, small simplifications, comments and docs.
 - **cause**: `design` when fixing it means changing the design document's approach; `implementation` when the code doesn't do what the design (or ticket) says.
@@ -60,29 +60,29 @@ The alternative, a Workshop-orchestrated subagent inside the Implementation run,
 ### `server/src/workflow/labels.ts`
 - `STAGES`: insert `'code-review'` after `'implement'`. `STAGE_TEXT['code-review'] = 'code review next'`. `LABEL_DEFS` picks it up.
 - `nextStep`: `'code-review'` joins the `design | design-review | implement` case (agent = stage).
-- `AGENT_TEXT['code-review'] = 'Code review'`. `STAGE_OF_AGENT['code-review'] = 'code-review'`.
+- `AGENT_TEXT['code-review'] = 'Code review'`. Don't add it to `STAGE_OF_AGENT`: that map lists the agents whose runs publish (it's only used to replay a rescued push), and the reviewer never publishes.
 - `imageFor`: `code-review` gets the browser image under the same condition as `implement` (`needs:browser`).
-- New pure helper:
-  ```ts
-  /** Where severe findings send a ticket: design when the design is at fault and the ticket has one. */
-  export function stageForRework(size: Size | null, findings: Finding[]): 'design' | 'implement' | null
-  ```
-  It returns `null` when no finding is severe. It returns `'design'` when the size is m, l or xl and a severe finding has `cause: 'design'`, and `'implement'` otherwise.
-- `export const MAX_REWORKS = 1;`
 
 ### `server/src/workflow/schemas.ts`
 - Types:
   ```ts
-  export interface Finding { severity: 'severe' | 'moderate' | 'minor'; cause: 'design' | 'implementation'; title: string; detail: string; fix: string; file?: string; line?: number }
+  export interface Finding { severity: 'severe' | 'moderate' | 'minor'; cause: 'design' | 'implementation'; title: string; detail: string; evidence: string; fix: string; file?: string; line?: number }
   export interface ReviewResult extends WorkResult { findings?: Finding[] }
   export interface Rework { count: number; findings: Finding[] }   // tickets.rework
   export interface Handoff { runId: string; result: WorkResult; before?: string; after?: string }   // tickets.handoff
   ```
-- `REVIEW_SCHEMA` = `WORK_SCHEMA` plus a `findings` array property. Each item has the fields above, with `additionalProperties: false`, and a `description` that restates the severity rubric in one line each.
-- `schemaFor('code-review')` returns `REVIEW_SCHEMA`.
-- `parseResult('code-review', …)`: when the outcome is `done`, `findings` is required (it may be empty). Each item needs a known severity and cause, non-empty `title`, `detail` and `fix`, an optional string `file` and an optional positive integer `line`. The error messages follow the existing style, for example `findings must be a list of { severity, cause, title, detail, fix }.`
+- `REVIEW_SCHEMA` = `WORK_SCHEMA` plus a `findings` array property. Each item has the fields above (all required except `file` and `line`), with `additionalProperties: false`, and a `description` that restates the severity rubric in one line each. `evidence`'s description: "How you checked it: the command you ran and what it printed, or the code you read. A few words are enough for minor findings."
+- `schemaFor('code-review')` returns `REVIEW_SCHEMA` (today `schemaFor` is a classifier/else ternary; make it a lookup).
+- `parseResult('code-review', …)`: when the outcome is `done`, `findings` is required (it may be empty). Each item needs a known severity and cause, non-empty `title`, `detail`, `evidence` and `fix`, an optional string `file` and an optional positive integer `line`. The error messages follow the existing style, for example `findings must be a list of { severity, cause, title, detail, evidence, fix }.`
 
 ### `server/src/workflow/transitions.ts`
+- New pure helper and constant, here rather than in `labels.ts` (routing belongs with the plans, and `labels.ts` importing `Finding` from `schemas.ts` would make the two modules import each other):
+  ```ts
+  export const MAX_REWORKS = 1;
+  /** Where severe findings send a ticket: design when the design is at fault and the ticket has one. */
+  export function stageForRework(size: Size | null, findings: Finding[]): 'design' | 'implement' | null
+  ```
+  It returns `null` when no finding is severe. It returns `'design'` when the size is m, l or xl and a severe finding has `cause: 'design'`, and `'implement'` otherwise.
 - `PlanContext` gains:
   - `rework: Rework | null`;
   - `mergeWithoutReview: boolean`.
@@ -93,9 +93,8 @@ The alternative, a Workshop-orchestrated subagent inside the Implementation run,
 - `needs_info`: `publish` is `false` when `ctx.agent === 'code-review'`.
 - `implement` done becomes:
   - `moveTo(…, 'code-review')`, with `publish: true` and `handOff: true`;
-  - comment: ``Implementation pushed to `<branch>`. Next: code review.``
-
-  Pass the branch name through `PlanContext.branch`, or derive the sentence without it. The implementer picks either.
+  - comment: `Implementation finished and pushed. Next: code review.` (no branch name, so `PlanContext` needs no new field).
+- Classifier `accept` (normal and delta) also returns `rework: null`: a new classification starts a new review round.
 - New `code-review` case, from `findings = r.findings ?? []` and `target = stageForRework(size, findings)`:
   - **`target` set and `(ctx.rework?.count ?? 0) < MAX_REWORKS`:**
     - `moveTo(target)`, with no `publish` and no `openPr`;
@@ -114,6 +113,8 @@ The alternative, a Workshop-orchestrated subagent inside the Implementation run,
   - `### Code review` plus "No problems found." when there are no findings;
   - otherwise the findings, severe first, then moderate, then minor;
   - when exhausted, a leading line: **"The code review still found severe problems after one rework. Read them before approving."**
+  - the reviewer's `tests` line, when it gave one (`**Reviewer ran:** …`);
+  - at most `MAX_FINDINGS_SHOWN = 30` findings (severe first), then "N more findings left out; see the Code reviewer's run." GitHub rejects PR bodies and comments over 65,536 characters, and the findings come straight from an agent. Also cut each `detail` and `evidence` to 1,000 characters. The issue comment for a rework uses the same formatter, so the same caps apply.
 
 ### `server/src/workflow/prompts.ts`
 - `AGENT_INFO['code-review']`:
@@ -126,19 +127,20 @@ The alternative, a Workshop-orchestrated subagent inside the Implementation run,
   - read the ticket, any owner review feedback, the design file if there is one, and the full diff `git diff origin/<base>...HEAD`;
   - run the repository's tests and type-check;
   - look for correctness, gaps against the ticket and design, security and data-loss risks, and missing tests;
-  - report each problem once, with the severity rubric above (verbatim), `cause`, a concrete `fix`, and `file`/`line` where it applies;
+  - report each problem once, with the severity rubric above (verbatim), `cause`, `evidence`, a concrete `fix`, and `file`/`line` where it applies;
   - don't report something you haven't verified as severe; when in doubt it's moderate;
   - don't edit or commit anything: Workshop discards changes from this stage;
   - the summary is one or two sentences on the overall state.
 - `DEFAULT_PROMPTS.implement`:
   - remove the "For tickets sized l or xl: … subagent … adversarially review" bullet;
   - change the last bullet to say the summary becomes the pull request description after a Code reviewer has checked the work.
-- `TaskContext` gains `rework?: Rework`. `taskPrompt` renders `## Code review findings to fix` (the formatted findings) after the review feedback, for `design`, `design-review` and `implement` when it is set.
+- `protocolText` gains an optional `publishes = true`. For `code-review` (and in `agentViews`' preview of it) the "Commit your work locally; Workshop pushes it…" sentence becomes "Nothing you change or commit here is pushed: Workshop discards this container when you finish." Otherwise the fixed protocol contradicts the reviewer's prompt.
+- `TaskContext` gains `rework?: Rework`. `taskPrompt` renders `## Code review findings to fix` (the formatted findings) after the review feedback, for `design`, `design-review`, `implement` and `code-review` when it is set. For `code-review` the heading is `## Severe findings from the previous code review`.
 - `taskLine`:
-  - `code-review`: ``Review the work on branch `<branch>` against the ticket and the design at `<docPath>` if that file exists, and return your findings.`` Add "Check that the review feedback above was addressed." when `review` is non-empty.
-  - `design` with `rework`: ``The code review found that the design at `<docPath>` doesn't work (see the findings above). Revise it to fix them, and commit it.``
+  - `code-review`: ``Review the work on branch `<branch>` against the ticket and the design at `<docPath>` if that file exists, and return your findings.`` Add "Check that the review feedback above was addressed." when `review` is non-empty. With `rework`: add "Workshop sent the ticket back once to fix the findings above. Check each one again and report it only if it still holds."
+  - `design` with `rework`: ``The code review found that the design at `<docPath>` doesn't work (see the findings above). Revise it to fix them, and commit it.`` This replaces the "Revise the design to cover the review feedback" sentence only when there's no review feedback; with both, keep both sentences.
   - `design-review` with `rework`: add "Check that the revision fixes the code review findings above."
-  - `implement` with `rework`: add "Fix the severe code review findings above; the existing commits on the branch are your starting point."
+  - `implement` with `rework`: add "Fix the severe code review findings above; the existing commits on the branch are your starting point. Your summary replaces the earlier one as the pull request description, so describe the whole change, not only the fixes." (Without that sentence the PR body after a rework would describe only the fixes.)
 
 ### `server/src/scheduler/gates.ts`
 - `stepPriority`: `code-review` returns 1, like `implement`, because the work is already in flight.
@@ -149,9 +151,10 @@ The alternative, a Workshop-orchestrated subagent inside the Implementation run,
   - build `PlanContext` with `rework: reworkOf(t)` and `mergeWithoutReview: Boolean(ctx.repo.merge_without_review)`;
   - after a successful push, if `plan.handOff`:
     - `if (!t.pr_number && !pushed.ahead) throw new Error('The implementation agent finished without committing any changes.')`, which moves here from `openOrUpdatePr`;
-    - store `tickets.handoff = { runId, result, before, after }`. When reconciling, `runId` and `result` come from `rescueOf(t)`. Keep `before` from an existing handoff, so that a rework with no new commits still says "Updated after review".
-  - `if ('rework' in plan)`: write `tickets.rework` (JSON or NULL).
-  - `plan.openPr`: call `openOrUpdatePr(ctx, t, handoffOf(t), plan.reviewNotes)`. Without a stored handoff (for example, the owner moved the ticket to code review by hand), fall back to `{ runId: r.id, result: <the reviewer's result> }`. Then set `tickets.handoff = NULL`.
+    - store `tickets.handoff = { runId, result, before, after }`. When reconciling, `runId` and `result` come from `rescueOf(t)`, so write the handoff before `clearRescue` runs. Keep `before` from an existing handoff only while a rework is under way (`reworkOf(t)` is set), so that a rework with no new commits still says "Updated after review", but a later review round compares against its own starting point.
+  - `if ('rework' in plan)`: write `tickets.rework` (JSON or NULL) before the label edit, like the other ticket columns. If the label edit then fails, the retried review sees `count = 1` and opens the PR with the findings flagged instead of looping: the safe direction.
+  - `plan.openPr`: call `openOrUpdatePr(ctx, t, handoffOf(t), plan.reviewNotes)`. Without a stored handoff (for example, the owner moved the ticket to code review by hand), fall back to `{ runId: r.id, result: <the reviewer's result> }`. Remove today's `rescued` branch here: only the Code reviewer opens PRs now, and it is never rescued.
+  - Clear `tickets.handoff` at the end, in the same `UPDATE` that resets `failures`, after the labels and comment have been written. If anything after `openOrUpdatePr` fails, the retried review still has the Implementation summary (the PR is recorded by then, so the retry posts an update comment rather than a second PR).
 - `openOrUpdatePr(ctx, t, handoff, reviewNotes)`:
   - take `result` and the media run id from `handoff`, and decide "Reviewed again with no code changes" from `handoff.before === handoff.after`;
   - drop the `ahead` check;
@@ -250,7 +253,15 @@ On a fresh database the `INSERT` copies nothing. `seedAgents` then inserts the r
 - Implementation that commits nothing still fails at the implement stage.
 - After changes are requested (existing PR), implement then code-review comments on the existing PR, including the review notes. "Reviewed again with no code changes" still works.
 
-`server/test/api.test.ts`: the migration's copy of the Design adversary's model, if the harness supports seeding before migration. Otherwise test it in pipeline setup. The existing OpenAPI route test still passes.
+Also in `pipeline.test.ts`:
+- A review whose label edit fails after storing `rework` is retried and opens the PR flagged, rather than sending the ticket back twice.
+- After a rework, the second code-review run's `prompt.md` contains the previous severe findings.
+- A rework implement run whose summary differs replaces the PR body's summary; a rework with no new commits still opens the PR (the branch is ahead of base from the first push).
+- A delta classification clears a stale `rework`.
+
+`workflow.test.ts` also: `reviewSection` caps the list at `MAX_FINDINGS_SHOWN` and says how many were left out; `protocolText({ …, publishes: false })` doesn't say Workshop pushes.
+
+The migration: `MIGRATIONS` is exported, so the test opens an empty `DatabaseSync`, runs every migration but the new ones, inserts a `design-review` row with a model, connection and billing, runs the rest and checks the `code-review` row. Do it the way `spend.test.ts` builds an older database (`MIGRATIONS.slice(0, -n)`), in `api.test.ts`. The existing OpenAPI route test still passes.
 
 ## Risks and open questions
 
@@ -259,3 +270,29 @@ On a fresh database the `INSERT` copies nothing. `seedAgents` then inserts the r
 - **Customised Implementation prompts** keep their self-review bullet (the default only applies when `customised` is false). Mention this in the PR summary so the owner can remove it.
 - **Tickets in flight at upgrade.** One already at `pr-review` is unaffected. One at `implement` goes through code review. A ticket moved to `code-review` by hand with no `handoff` uses the reviewer's summary as the PR body.
 - **The reviewer can't be stopped from editing files**, only prevented from publishing. Anything it changes is discarded, which is the intent.
+- **A reviewer that keeps failing** leaves the ticket at `stage:code-review` with `workshop/failed` and no pull request. Removing `failed` retries it. Moving the ticket to `stage:pr-review` by hand doesn't open a PR (only a Code reviewer run does), so the ticket would sit there with nothing to review: document in `workflow.md` that the way past a broken reviewer is to fix its settings and retry. A "skip the review" control is a possible follow-up, not part of this ticket.
+- **"Run next stage" on an Implementation ticket** now stops at `stage:code-review`, before the PR exists. That follows from the push rule (a stage push ends when the stage changes) and needs only the README/workflow wording.
+- **Priority of a design rework.** A ticket sent back to design waits at design priority (3), behind design reviews and implementations. It's work in flight, but bumping it needs `stepPriority` to see ticket state, which it doesn't today. Left as is.
+
+## Review
+
+Design adversary's criticisms, checked against the code on `main` (`runner.ts`, `transitions.ts`, `labels.ts`, `prompts.ts`, `schemas.ts`, `sync.ts`, `merge.ts`, `agents.ts`, `db.ts`). The overall shape holds up: the reviewer can't push (`prepareSpec` uses read-only git access and `publish` never runs), `syncReviews` does skip `pr-review` tickets with `needs-info` (`sync.ts:102`), the migration's `INSERT … SELECT` works because `initDb` runs migrations before `seedAgents`, and routing from labelled findings keeps the decision pure and testable.
+
+1. **The second review starts blind.** After a rework, the reviewer didn't get the earlier severe findings, so it couldn't check they were fixed and might report something unrelated, or miss that a "fix" didn't fix anything. *Fix:* pass `rework` to `code-review` too, with its own heading and task sentence. **Adopted.**
+2. **After a rework, the PR body describes only the fixes.** The handoff is overwritten by the rework run's summary, and an agent asked to "fix these findings" summarises the fixes. *Fix:* the rework task line tells Implementation its summary replaces the earlier one and must describe the whole change. **Adopted.** (Concatenating both summaries was the alternative. It would repeat itself and read badly in the PR.)
+3. **Clearing `handoff` straight after `openOrUpdatePr` loses it on a partial failure.** If the label edit or comment fails after the PR opens, the retried review falls back to the reviewer's summary as the PR text. *Fix:* clear `handoff` last, with `failures = 0`. **Adopted.** The same question for `rework`: writing it before the label edit means a failed edit plus retry opens the PR flagged instead of looping. That's the safe direction, so the order stays and a test pins it.
+4. **"Keep `before` from an existing handoff" leaks across review rounds.** A handoff that was never cleared (a ticket moved by hand) would make a later round compare against an old commit. *Fix:* keep `before` only while `rework` is set. **Adopted.**
+5. **A stale `rework` survives manual moves.** If the owner moves a ticket mid-rework (on GitHub or with Change status), `rework` stays, so the next round's Implementation gets old findings and no automatic rework. *Fix:* every accepted classification returns `rework: null`. A ticket enters a new round only through the Classifier (`reclassify`), so this is pure and covers both kinds of manual move. **Adopted.**
+6. **The fixed protocol contradicts the reviewer.** `protocolText` tells every agent "Commit your work locally; Workshop pushes it". *Fix:* a `publishes` flag that swaps the sentence for the reviewer. **Adopted.**
+7. **"Verified" can't be checked.** The rubric says only verified findings are severe, but nothing in the result shows the reviewer verified anything, and over-reporting severity is the main calibration risk. *Fix:* a required `evidence` field on each finding, shown in the PR and in the rework comment, so the owner (and the next agent) can see what backs each claim. **Adopted.** Rejecting severe findings without evidence in `parseResult` was rejected: an invalid result fails the run and repeats an Opus review.
+8. **Unbounded findings can exceed GitHub's 65,536-character body limit,** which would fail the PR opening and the run with it. *Fix:* show at most 30 findings and cut long `detail`/`evidence`. **Adopted.**
+9. **`stageForRework` in `labels.ts` creates an import cycle** (`schemas.ts` already imports `CAPABILITIES` from `labels.ts`). A type-only import would survive type stripping, but routing belongs with the plans anyway. *Fix:* put it and `MAX_REWORKS` in `transitions.ts`. **Adopted.**
+10. **`STAGE_OF_AGENT['code-review']` is wrong.** The map's documented meaning is "agents whose runs publish", and its only use is replaying a rescued push, which the reviewer never has. *Fix:* leave it out. **Adopted.**
+11. **The body left a choice to the implementer** (whether to put the branch in the Implementation comment). *Fix:* decide: no branch name, so `PlanContext` doesn't grow. **Adopted.**
+12. **The migration test was vague** ("if the harness supports it"). `spend.test.ts` already builds an older database from `MIGRATIONS.slice(…)`. *Fix:* use that pattern. **Adopted.**
+13. **No way past a broken reviewer.** If the Code reviewer keeps failing, the ticket is stuck without a PR, and moving it to `pr-review` by hand doesn't open one. *Fix considered:* a "skip code review" control, or having a manual move to `pr-review` open the PR from the handoff. **Not adopted:** both add UI or sync behaviour beyond the ticket, and retrying after fixing the agent's settings works. It's documented as a risk and in `workflow.md`.
+14. **Simpler alternative: open the PR as a draft at Implementation, mark it ready after review.** A draft can't merge, so Merge without review would need no `needs-info` hold, and no `handoff` column would be needed. **Not adopted:** it needs new provider calls (creating drafts, and GitHub's GraphQL-only "ready for review"). The owner would also be notified about, and could review, work that might go back to design. And the after-review round (an existing, non-draft PR) would still need the handoff logic for its update comment.
+15. **New label on existing repos.** The design relies on GitHub creating `workshop/stage:code-review` on first use. That's GitHub's documented behaviour for adding labels to an issue, so it's acceptable. *Fix considered:* run `ensureLabels` for enabled repos at startup. **Not adopted:** it's an API call per repo on every restart for a one-off cosmetic gain (colour and description).
+16. **Design rework priority.** A ticket sent back to design waits behind design reviews and implementations (`stepPriority` 3). **Not adopted:** `stepPriority` only sees the step, and the delay is bounded by the queue. Noted in the risks.
+
+Owner decisions carried over from the Design comment (review every size, `MAX_REWORKS = 1`, customised prompts keep their self-review bullet) still have defaults that work. None of them blocks implementation.
