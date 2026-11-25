@@ -116,7 +116,7 @@ export async function tick() {
 
 export function hostLoads(): (HostLoad & { name: string; specs: string | null })[] {
   const busy = new Map(
-    all<{ environment_id: number; n: number }>(`SELECT environment_id, COUNT(*) AS n FROM runs WHERE ${RUNNING_SQL} GROUP BY environment_id`).map((r) => [r.environment_id, r.n]),
+    all<{ environment_id: number; n: number }>(`SELECT environment_id, COUNT(*) AS n FROM runs WHERE ${RUNNING_SQL} AND publish_retry_at IS NULL GROUP BY environment_id`).map((r) => [r.environment_id, r.n]),
   );
   return listConnections('environment').map((c) => {
     const cfg = c.config as { slots?: number; specs?: string; available?: boolean };
@@ -150,8 +150,9 @@ async function checkHosts() {
 }
 
 /** After a restart or a host outage, picks up runs that nothing is following any more. */
-function reattachRuns() {
-  for (const r of all<RunRow>(`SELECT * FROM runs WHERE ${RUNNING_SQL}`)) {
+export function reattachRuns() {
+  // A run waiting to publish again after a GitHub failure is picked up once it's due.
+  for (const r of all<RunRow>(`SELECT * FROM runs WHERE ${RUNNING_SQL} AND (publish_retry_at IS NULL OR publish_retry_at <= ?)`, Date.now())) {
     if (!isDriving(r.id) && getConnection(r.environment_id)?.status === 'ok') void drive(r.id);
   }
 }

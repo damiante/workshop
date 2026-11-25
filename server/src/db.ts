@@ -255,6 +255,13 @@ export const MIGRATIONS = [
   -- When an API token stops working; null: never expires (#96).
   ALTER TABLE api_tokens ADD COLUMN expires_at INTEGER;
   `,
+  `
+  -- Publishing that failed on a temporary GitHub error and is retried later (#97).
+  ALTER TABLE runs ADD COLUMN publish_state TEXT;            -- JSON: frozen plan, push report, finished steps
+  ALTER TABLE runs ADD COLUMN publish_retries INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN publish_retry_at INTEGER;      -- when the tick may publish again
+  ALTER TABLE runs ADD COLUMN publish_failing_since INTEGER; -- first temporary failure, for the 6-hour give-up
+  `,
 ];
 
 export let db: DatabaseSync;

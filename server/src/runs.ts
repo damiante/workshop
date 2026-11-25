@@ -42,6 +42,14 @@ export interface RunRow {
   timeout_min: number | null;
   /** When the current step's container started. */
   step_started_at: number | null;
+  /** JSON: the publish step's frozen plan, push report and finished steps, so a retry repeats nothing. */
+  publish_state: string | null;
+  /** How many times publishing was put off because GitHub failed. */
+  publish_retries: number;
+  /** While publishing waits for GitHub: when the tick may try again. */
+  publish_retry_at: number | null;
+  /** When publishing started failing on temporary GitHub errors, for the give-up. */
+  publish_failing_since: number | null;
 }
 
 export const ACTIVE_STATUSES: RunStatus[] = ['starting', 'running', 'publishing', 'paused'];

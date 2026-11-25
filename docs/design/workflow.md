@@ -145,6 +145,7 @@ Priority only changes the order. It doesn't lift the operation mode or hours, or
 ## Failures, pauses and stops
 
 - **A failed attempt** (error result, invalid result, timeout, out of memory, a lost container, a failed push) counts against the stage. After the second one: `workshop/failed`, a comment with the error, and an alert.
+- **GitHub failing while publishing** (5xx, rate limit, network) isn't a failed attempt. The run waits in publishing and Workshop retries only the publish step (after 1, 5 and 15 minutes, then every 30). After 6 hours it counts as a failure and raises an alert.
 - **A conflicting push** isn't a failed attempt. `publish` saves the work on a rescue branch, the run succeeds, and the ticket moves to `stage:reconcile` so the Merge agent can merge it. If the branch moves again during the reconcile run, that run fails and counts.
 - **A usage limit** pauses the run instead. It resumes in the same Claude session on the same host after the window resets.
 - **A paused subscription** moves its agents to the next subscription that offers the same model, at a turn boundary, in the same Claude session. If none offers the model, the run is cancelled without counting as a failure, and the stage starts again once a subscription is free.

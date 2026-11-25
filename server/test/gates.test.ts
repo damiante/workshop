@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Limits, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isUnclassified, modeBlock, priorityBlock, pickHost, pickSubscription, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
+import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, isUnclassified, modeBlock, priorityBlock, pickHost, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -223,5 +223,23 @@ describe('pickSubscription', () => {
   it("gives the first one's reason when none is free, and nothing for an empty pool", () => {
     expect(pickSubscription([c(1, 'Weekly allowance at 95%'), c(2, 'Checking allowance', true)])).toEqual({ id: 1, block: 'Weekly allowance at 95%' });
     expect(pickSubscription([])).toBeNull();
+  });
+});
+
+describe('publish retries', () => {
+  it('treats GitHub 5xx, 429 and network errors as temporary', () => {
+    for (const err of [{ status: 502 }, { status: 500 }, { status: 429 }, { code: 'ECONNRESET' }, { cause: { code: 'EAI_AGAIN' } }, Object.assign(new Error('timed out'), { name: 'TimeoutError' })]) {
+      expect(isTransient(err)).toBe(true);
+    }
+  });
+
+  it('treats everything else as a real failure', () => {
+    for (const err of [{ status: 422 }, { status: 403 }, new Error('The implementation agent finished without committing any changes.'), 'boom', null]) {
+      expect(isTransient(err)).toBe(false);
+    }
+  });
+
+  it('waits 1, 5 and 15 minutes, then every 30', () => {
+    expect([0, 1, 2, 3, 4, 5].map(publishRetryMinutes)).toEqual([1, 5, 15, 30, 30, 30]);
   });
 });

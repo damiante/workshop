@@ -25,8 +25,8 @@ const { createConnection, reorderConnections, setConnectionPaused, setConnection
 const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
-const { connectionPaused, drive, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
-const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
+const { connectionPaused, drive, isDriving, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
+const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
@@ -1156,6 +1156,30 @@ describe('runner', () => {
   });
 });
 
+/** Waits until a run has put off publishing after a GitHub failure and is no longer being driven. */
+async function deferred(id: string) {
+  await vi.waitFor(
+    () => {
+      expect(getRun(id)?.publish_retry_at).not.toBeNull();
+      expect(isDriving(id)).toBe(false);
+    },
+    { timeout: 2000 },
+  );
+  return getRun(id)!;
+}
+/** Makes a run waiting to publish due now. */
+const due = (id: string) => run('UPDATE runs SET publish_retry_at = ? WHERE id = ?', Date.now() - 1, id);
+/** Wraps a fake so the first call matching `when` rejects with `err`. */
+function failOnce(fn: any, err: unknown, when: (...args: any[]) => boolean = () => true) {
+  let failed = false;
+  fn.mockImplementation(async (...args: any[]) => {
+    if (!failed && when(...args)) {
+      failed = true;
+      throw err;
+    }
+  });
+}
+
 describe('code review', () => {
   const implement = async (summary: string, push: object = { before: 'aaa', after: 'bbb', ahead: 1 }) => {
     const env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary })], publish: [line(push)] });
@@ -1228,15 +1252,47 @@ describe('code review', () => {
     expect(fake.vcs.commentOnPullRequest.mock.calls[0][2]).toMatch(/^Updated after review\.\n\nRenamed it; nothing else needed\./);
   });
 
-  it('retries a review whose label edit failed after storing the rework by sending it back again, without using up the rework', async () => {
+  it('retries a review whose label edit GitHub failed on by publishing again, without running the agent or using up the rework', async () => {
     await implement('Added a dark theme.');
     // A GitHub 5xx with an empty body: Octokit's error has no message.
     const blip = Object.assign(new Error(''), { status: 502 });
     fake.tickets.setLabels.mockImplementation(async (_repo: unknown, _n: number, add: string[]) => {
       if (add.includes(label.stage('implement'))) throw blip;
     });
+    const env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Reviewed the change.', findings: [severe()] })] });
+    fake.env = env;
+    const id = go('code-review');
+    const first = await deferred(id);
+    expect(first).toMatchObject({ status: 'publishing', error: expect.stringContaining('GitHub answered HTTP 502 with no message.') });
+    expect(getTicket(1)!.failures).toBe(0);
+    expect(ticketLabels()).toContain(label.stage('code-review'));
+    expect(JSON.parse(getTicket(1)!.rework!)).toMatchObject({ count: 1 });
+    fake.tickets.setLabels.mockImplementation(async () => {});
+
+    due(id);
+    reattachRuns();
+    expect((await settle(id)).status).toBe('succeeded');
+    expect(steps(env)).toEqual(['prepare', 'run']);
+    expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+    expect(ticketLabels()).toContain(label.stage('implement'));
+    expect(JSON.parse(getTicket(1)!.rework!)).toMatchObject({ count: 1 });
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('rework 1 of 1'));
+
+    await implement('Added a dark theme, with a guarded toggle.', { before: 'bbb', after: 'ccc', ahead: 2 });
+    await review([severe()]);
+    expect(fake.vcs.openPullRequest.mock.calls[0][1].body).toMatch(/still found severe problems[\s\S]*with a guarded toggle\./);
+    expect(ticketLabels()).toContain(label.stage('pr-review'));
+  });
+
+  it('retries a review whose label edit failed after storing the rework by sending it back again, without using up the rework', async () => {
+    await implement('Added a dark theme.');
+    // A 4xx isn't temporary: the run fails, and the next review starts from the stored rework.
+    const refused = Object.assign(new Error(''), { status: 422 });
+    fake.tickets.setLabels.mockImplementation(async (_repo: unknown, _n: number, add: string[]) => {
+      if (add.includes(label.stage('implement'))) throw refused;
+    });
     const first = await review([severe()]);
-    expect(first.r).toMatchObject({ status: 'failed', error: 'GitHub answered HTTP 502 with no message.' });
+    expect(first.r).toMatchObject({ status: 'failed', error: 'GitHub answered HTTP 422 with no message.' });
     expect(ticketLabels()).toContain(label.stage('code-review'));
     expect(JSON.parse(getTicket(1)!.rework!)).toMatchObject({ count: 1 });
     fake.tickets.setLabels.mockImplementation(async () => {});
@@ -1313,6 +1369,129 @@ describe('code review', () => {
     fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'accept', size: 's', reason: 'Small change.' })] });
     expect((await settle(go('classifier', 'delta'))).status).toBe('succeeded');
     expect(getTicket(1)!.rework).toBeNull();
+  });
+});
+
+describe('publish retries', () => {
+  const steps = (env: FakeEnv) => env.started.map((s) => s.cmd[0]);
+  const work = () => new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Added a dark theme.' })], publish: [line({ before: 'aaa', after: 'bbb', ahead: 1 })] });
+  const publishes = (env: FakeEnv) => env.started.filter((s) => s.cmd[0] === 'publish').length;
+  const toCodeReview = (_repo: unknown, _n: number, add: string[]) => add.includes(label.stage('code-review'));
+  const gatewayError = () => Object.assign(new Error(''), { status: 502 });
+
+  beforeEach(() => {
+    setConnectionStatus(ids.env, 'ok');
+    run('DELETE FROM alerts');
+  });
+
+  it('publishes again after GitHub fails, without running the agent again or counting a failure', async () => {
+    failOnce(fake.tickets.setLabels, gatewayError(), toCodeReview);
+    const env = work();
+    fake.env = env;
+    const id = go();
+    const r = await deferred(id);
+    expect(r.status).toBe('publishing');
+    expect(r.error).toContain('GitHub answered HTTP 502');
+    expect(r.error).toContain('again in 1 minute.');
+    expect(r.publish_retry_at).toBeGreaterThan(Date.now());
+    expect(getTicket(1)!.failures).toBe(0);
+    expect(readLog(id).some((l) => l.text === r.error)).toBe(true);
+    expect(ticketLabels()).toContain(label.stage('implement'));
+    expect(hostLoads()[0].busy).toBe(0); // a waiting run doesn't hold a slot
+
+    // Not due yet: nothing happens.
+    reattachRuns();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(getRun(id)!.status).toBe('publishing');
+    expect(steps(env)).toEqual(['prepare', 'run', 'publish']);
+
+    due(id);
+    reattachRuns();
+    expect(await settle(id)).toMatchObject({ status: 'succeeded', error: null, publish_retry_at: null });
+    expect(ticketLabels()).toContain(label.stage('code-review'));
+    expect(fake.tickets.comment).toHaveBeenCalledTimes(1);
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('Next: code review.'));
+    expect(steps(env)).toEqual(['prepare', 'run', 'publish']);
+    expect(publishes(env)).toBe(1);
+  });
+
+  it('backs off for longer each time', async () => {
+    fake.tickets.setLabels.mockImplementation(async (...args: [unknown, number, string[]]) => {
+      if (toCodeReview(...args)) throw Object.assign(new Error('connect ECONNRESET'), { code: 'ECONNRESET' });
+    });
+    fake.env = work();
+    const id = go();
+    expect((await deferred(id)).error).toContain('again in 1 minute.');
+    due(id);
+    reattachRuns();
+    await vi.waitFor(() => expect(getRun(id)!.error).toContain('again in 5 minutes.'));
+    await deferred(id);
+    expect(getRun(id)).toMatchObject({ status: 'publishing', publish_retries: 2 });
+    expect(getTicket(1)!.failures).toBe(0);
+  });
+
+  it("doesn't open or update the pull request twice when requesting review failed", async () => {
+    fake.env = work();
+    expect((await settle(go())).status).toBe('succeeded');
+    failOnce(fake.vcs.requestReview, Object.assign(new Error('Service Unavailable'), { status: 503 }));
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Reviewed the change.', findings: [] })] });
+    const id = go('code-review');
+    await deferred(id);
+    expect(getTicket(1)!.pr_number).toBe(7);
+    due(id);
+    reattachRuns();
+    expect((await settle(id)).status).toBe('succeeded');
+    expect(fake.vcs.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(fake.vcs.commentOnPullRequest).not.toHaveBeenCalled();
+    expect(fake.vcs.requestReview).toHaveBeenCalledTimes(2);
+    expect(ticketLabels()).toContain(label.stage('pr-review'));
+    expect(getTicket(1)!.handoff).toBeNull();
+  });
+
+  it("doesn't push or move the labels again when only the comment failed", async () => {
+    failOnce(fake.tickets.comment, Object.assign(new Error('Service Unavailable'), { status: 503 }));
+    const env = work();
+    fake.env = env;
+    const id = go();
+    await deferred(id);
+    expect(ticketLabels()).toContain(label.stage('code-review'));
+    due(id);
+    reattachRuns();
+    expect((await settle(id)).status).toBe('succeeded');
+    expect(publishes(env)).toBe(1);
+    expect(fake.tickets.setLabels.mock.calls.filter((c: [unknown, number, string[]]) => toCodeReview(...c))).toHaveLength(1);
+    expect(fake.tickets.comment).toHaveBeenCalledTimes(2);
+  });
+
+  it('still fails the run on a 4xx', async () => {
+    failOnce(fake.tickets.setLabels, Object.assign(new Error('Validation Failed'), { status: 422 }), toCodeReview);
+    fake.env = work();
+    expect(await settle(go())).toMatchObject({ status: 'failed', error: 'Validation Failed', publish_retry_at: null });
+    expect(getTicket(1)!.failures).toBe(1);
+  });
+
+  it('gives up after GitHub has failed for 6 hours, counting one failure and raising an alert', async () => {
+    fake.tickets.setLabels.mockImplementation(async (...args: [unknown, number, string[]]) => {
+      if (toCodeReview(...args)) throw gatewayError();
+    });
+    fake.env = work();
+    const id = 'stuck-run';
+    run(
+      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, started_at, result, publish_retries, publish_failing_since)
+       VALUES (?, 1, 'implement', 'normal', 1, ?, ?, 'claude-sonnet-5-5', 'subscription', 'publishing', ?, ?, 8, ?)`,
+      id,
+      ids.env,
+      ids.model,
+      Date.now(),
+      JSON.stringify({ outcome: 'done', summary: 'Added a dark theme.' }),
+      Date.now() - 6 * 3600_000 - 1,
+    );
+    await drive(id);
+    const r = getRun(id)!;
+    expect(r.status).toBe('failed');
+    expect(r.error).toContain('6 hours');
+    expect(one<{ message: string }>("SELECT message FROM alerts WHERE kind = 'publish-failed' AND ref = ?", `run:${id}`)?.message).toContain('me/app#3');
+    expect(getTicket(1)!.failures).toBe(1);
   });
 });
 

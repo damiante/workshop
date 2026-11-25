@@ -40,9 +40,9 @@ import { imageFor, label, moveTo, parseLabels, REPO_IMAGE_DIR, repoImageTag } fr
 import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
 import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, protocolText, publishes, taskPrompt } from '../workflow/prompts.ts';
 import { parseResult, schemaFor, type AgentResult, type Handoff, type Rescue, type WorkResult } from '../workflow/schemas.ts';
-import { planTransition } from '../workflow/transitions.ts';
+import { planTransition, type Plan } from '../workflow/transitions.ts';
 import { check } from '../http/util.ts';
-import { ALLOWANCE_MAX_AGE_MS, joinRefs, thresholdBlock } from './gates.ts';
+import { ALLOWANCE_MAX_AGE_MS, isTransient, joinRefs, PUBLISH_GIVE_UP_MS, publishRetryMinutes, thresholdBlock } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 
 // A run moves starting (prepare) → running (claude) → publishing (push + ticket updates) → succeeded.
@@ -559,7 +559,19 @@ async function openOrUpdatePr(ctx: Ctx, t: TicketRow, handoff: Handoff, reviewNo
     url = pr.url;
   }
   run("UPDATE tickets SET pr_number = ?, pr_url = ?, pr_status = 'review' WHERE id = ?", number, url, t.id);
-  await vcs.requestReview(repo, number, t.author);
+}
+
+/**
+ * What a publish has decided and done so far, stored on the run. A retry after a temporary GitHub failure
+ * reuses the plan (the labels, rework and rescue it was made from may have changed since) and skips the
+ * steps that finished, so nothing is posted twice.
+ */
+interface PublishState {
+  plan: Plan;
+  /** The ticket's labels the plan was made from. */
+  labels: string[];
+  pushed?: Pushed;
+  done: string[];
 }
 
 async function publishRun(ctx: Ctx) {
@@ -568,53 +580,86 @@ async function publishRun(ctx: Ctx) {
   ctx.ticket = t;
   const repo = repoRef(ctx.repo);
   const vcs = vcsFor(ctx.repo);
-  const labels = labelsOf(t);
   const branch = branchOf(t);
   const docPath = docPathOf(t);
   const result = JSON.parse(r.result!) as AgentResult;
   const rework = reworkOf(t);
-  const plan = planTransition(
-    {
-      agent: r.agent,
-      mode: r.mode,
-      labels,
-      state: parseLabels(labels),
-      author: t.author,
-      docPath,
-      docUrl: vcs.fileUrl(repo, branch, docPath),
-      rescue: rescueOf(t) ?? undefined,
-      rework,
-      handoffRunId: handoffOf(t)?.runId,
-      mergeWithoutReview: Boolean(ctx.repo.merge_without_review),
-    },
-    result,
-  );
-  if (plan.failure) throw new Error(plan.failure);
+  let saved = r.publish_state ? (JSON.parse(r.publish_state) as PublishState) : null;
+  if (!saved) {
+    const current = labelsOf(t);
+    const planned = planTransition(
+      {
+        agent: r.agent,
+        mode: r.mode,
+        labels: current,
+        state: parseLabels(current),
+        author: t.author,
+        docPath,
+        docUrl: vcs.fileUrl(repo, branch, docPath),
+        rescue: rescueOf(t) ?? undefined,
+        rework,
+        handoffRunId: handoffOf(t)?.runId,
+        mergeWithoutReview: Boolean(ctx.repo.merge_without_review),
+      },
+      result,
+    );
+    if (planned.failure) throw new Error(planned.failure);
+    saved = { plan: planned, labels: current, done: [] };
+    setRun(r.id, { publish_state: JSON.stringify(saved) });
+  }
+  const state = saved;
+  const { plan, labels } = state;
+  /** Runs one side effect unless an earlier attempt of this publish finished it. */
+  const step = async (name: string, fn: () => Promise<unknown>) => {
+    if (state.done.includes(name)) return;
+    await fn();
+    state.done.push(name);
+    setRun(r.id, { publish_state: JSON.stringify(state) });
+  };
 
-  let pushed: Pushed = {};
+  let pushed: Pushed = state.pushed ?? {};
   if (plan.publish) {
-    const state = await runContainer(ctx, 'publish', () => publishSpec(ctx), (text) => {
-      try {
-        pushed = JSON.parse(text);
-      } catch {
-        // git's own output
+    // A retry after a GitHub failure doesn't push again: the exit code is then the one stored with the report.
+    let exitCode = pushed.rescued ? 3 : 0;
+    if (!state.pushed) {
+      const container = await runContainer(ctx, 'publish', () => publishSpec(ctx), (text) => {
+        try {
+          pushed = JSON.parse(text);
+        } catch {
+          // git's own output
+        }
+      });
+      exitCode = container.exitCode;
+      if (exitCode === 0 || pushed.rescued) {
+        state.pushed = pushed;
+        setRun(r.id, { publish_state: JSON.stringify(state) });
       }
-    });
-    if (state.exitCode !== 0 && pushed.rescued) {
+    }
+    if (exitCode !== 0 && pushed.rescued) {
       const reconciling = parseLabels(labels).stage === 'reconcile';
       const stored = rescueOf(t);
       if (!reconciling) {
         // The work is safe: hand it to the Merge agent instead of failing the run.
-        const saved: Rescue = { branch: pushed.rescued, runId: r.id, agent: r.agent, mode: r.mode, result: result as WorkResult };
-        run('UPDATE tickets SET rescue = ? WHERE id = ?', JSON.stringify(saved), t.id);
+        const rescue: Rescue = { branch: pushed.rescued, runId: r.id, agent: r.agent, mode: r.mode, result: result as WorkResult };
+        run('UPDATE tickets SET rescue = ? WHERE id = ?', JSON.stringify(rescue), t.id);
         const move = moveTo(labels, 'reconcile');
-        await editLabels(t, move.add, [...move.remove, label.running]);
-        await sourceFor(ctx.repo).comment(
-          repo,
-          t.number,
-          `\`${branch}\` changed on GitHub while the ${AGENT_INFO[r.agent].label} agent was working, and its commits conflict with the new ones. Workshop saved the agent's work on \`${pushed.rescued}\`. The Merge agent will merge it into \`${branch}\` next.`,
+        await step('labels', () => editLabels(t, move.add, [...move.remove, label.running]));
+        await step('comment', () =>
+          sourceFor(ctx.repo).comment(
+            repo,
+            t.number,
+            `\`${branch}\` changed on GitHub while the ${AGENT_INFO[r.agent].label} agent was working, and its commits conflict with the new ones. Workshop saved the agent's work on \`${pushed.rescued}\`. The Merge agent will merge it into \`${branch}\` next.`,
+          ),
         );
-        setRun(r.id, { status: 'succeeded', step: null, container_id: null, ended_at: Date.now(), summary: `Work saved on ${pushed.rescued}; the Merge agent reconciles it next.` });
+        setRun(r.id, {
+          status: 'succeeded',
+          step: null,
+          container_id: null,
+          ended_at: Date.now(),
+          error: null,
+          publish_retry_at: null,
+          summary: `Work saved on ${pushed.rescued}; the Merge agent reconciles it next.`,
+        });
         if (r.volume) await ctx.env.removeVolume(r.volume).then(() => setRun(r.id, { volume: null }), () => {});
         return;
       }
@@ -626,46 +671,54 @@ async function publishRun(ctx: Ctx) {
       );
       throw new Error(`Couldn't push ${branch}: it changed on GitHub and the agent's commits conflict with it. The work is saved on ${pushed.rescued}.`);
     }
-    if (state.exitCode !== 0) throw new Error(`Pushing ${branch} failed (exit ${state.exitCode}). See the run log.`);
+    if (exitCode !== 0) throw new Error(`Pushing ${branch} failed (exit ${exitCode}). See the run log.`);
   }
   if (plan.handOff) {
-    // A new pull request needs commits on the branch. (Judging it by "ahead" also covers a restart between
-    // pushing and recording the handoff, when nothing is new.)
-    if (!t.pr_number && !pushed.ahead) throw new Error('The implementation agent finished without committing any changes.');
-    // When reconciling, the pull request describes the interrupted run's work, not the merge.
-    const rescued = plan.clearRescue ? rescueOf(t) : null;
-    // A rework compares against where its review round started, so one with no new commits still counts as an update.
-    const earlier = rework ? handoffOf(t) : null;
-    const handoff: Handoff = {
-      runId: rescued ? rescued.runId : r.id,
-      result: rescued ? rescued.result : (result as WorkResult),
-      before: earlier ? earlier.before : pushed.before,
-      after: pushed.after,
-    };
-    run('UPDATE tickets SET handoff = ? WHERE id = ?', JSON.stringify(handoff), t.id);
+    await step('handoff', async () => {
+      // A new pull request needs commits on the branch. (Judging it by "ahead" also covers a restart between
+      // pushing and recording the handoff, when nothing is new.)
+      if (!t.pr_number && !pushed.ahead) throw new Error('The implementation agent finished without committing any changes.');
+      // When reconciling, the pull request describes the interrupted run's work, not the merge.
+      const rescued = plan.clearRescue ? rescueOf(t) : null;
+      // A rework compares against where its review round started, so one with no new commits still counts as an update.
+      const earlier = rework ? handoffOf(t) : null;
+      const handoff: Handoff = {
+        runId: rescued ? rescued.runId : r.id,
+        result: rescued ? rescued.result : (result as WorkResult),
+        before: earlier ? earlier.before : pushed.before,
+        after: pushed.after,
+      };
+      run('UPDATE tickets SET handoff = ? WHERE id = ?', JSON.stringify(handoff), t.id);
+    });
   }
   if (plan.addBlockers) {
-    const source = sourceFor(ctx.repo);
-    const open = [];
-    for (const n of plan.addBlockers.filter((n) => n !== t.number)) {
-      const link = await source.addBlocker(repo, t.number, n);
-      if (link.state === 'open') open.push(link);
-    }
-    // Nothing open would hold nothing, and the Classifier would run again straight away.
-    if (!open.length) {
-      throw new Error(`The Classifier said this ticket waits for ${joinRefs(plan.addBlockers.map((n) => `#${n}`))}, but none of those is an open issue in ${ctx.repo.full_name}.`);
-    }
-    setBlockers(t, open.map((l) => linkRef(l, ctx.repo)));
+    const addBlockers = plan.addBlockers;
+    await step('blockers', async () => {
+      const source = sourceFor(ctx.repo);
+      const open = [];
+      for (const n of addBlockers.filter((n) => n !== t.number)) {
+        const link = await source.addBlocker(repo, t.number, n);
+        if (link.state === 'open') open.push(link);
+      }
+      // Nothing open would hold nothing, and the Classifier would run again straight away.
+      if (!open.length) {
+        throw new Error(`The Classifier said this ticket waits for ${joinRefs(addBlockers.map((n) => `#${n}`))}, but none of those is an open issue in ${ctx.repo.full_name}.`);
+      }
+      setBlockers(t, open.map((l) => linkRef(l, ctx.repo)));
+    });
   }
   if (plan.createBranch) {
-    await vcs.createBranch(repo, branch, { number: t.number, nodeId: t.node_id ?? undefined });
-    run('UPDATE tickets SET branch = ? WHERE id = ?', branch, t.id);
+    await step('branch', async () => {
+      await vcs.createBranch(repo, branch, { number: t.number, nodeId: t.node_id ?? undefined });
+      run('UPDATE tickets SET branch = ? WHERE id = ?', branch, t.id);
+    });
   }
   if (plan.ui !== undefined) run('UPDATE tickets SET ui = ? WHERE id = ?', Number(plan.ui), t.id);
   if (plan.deleteMedia) deleteMedia(t.id);
   if (plan.openPr) {
     // Without a handoff (the ticket was moved to code review by hand), the reviewer's summary describes the work.
-    await openOrUpdatePr(ctx, t, handoffOf(t) ?? { runId: r.id, result: result as WorkResult }, plan.reviewNotes, plan.flagged);
+    await step('pr', () => openOrUpdatePr(ctx, t, handoffOf(t) ?? { runId: r.id, result: result as WorkResult }, plan.reviewNotes, plan.flagged));
+    await step('review', () => vcs.requestReview(repo, getTicket(t.id)!.pr_number!, t.author));
   }
   // A rework is stored before the label edit, and cleared only once everything else is done. A retry after a
   // partial failure sends the ticket back again (planReview doesn't count a rework with no new handoff), and
@@ -673,11 +726,12 @@ async function publishRun(ctx: Ctx) {
   if (plan.rework) run('UPDATE tickets SET rework = ? WHERE id = ?', JSON.stringify(plan.rework), t.id);
   if (plan.deleteBranch) await vcs.deleteBranch(repo, plan.deleteBranch).catch((err) => warn(r.id, `Workshop couldn't delete ${plan.deleteBranch}: ${(err as Error).message}`));
   if (plan.clearRescue) run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
-  await editLabels(t, plan.add, [...plan.remove, label.running]);
-  if (plan.comment) await sourceFor(ctx.repo).comment(repo, t.number, plan.comment);
+  await step('labels', () => editLabels(t, plan.add, [...plan.remove, label.running]));
+  const comment = plan.comment;
+  if (comment) await step('comment', () => sourceFor(ctx.repo).comment(repo, t.number, comment));
   // The handoff goes last too, so a retry after a partial failure still has the Implementation summary.
   run(`UPDATE tickets SET failures = 0${plan.rework === null ? ', rework = NULL' : ''}${plan.openPr ? ', handoff = NULL' : ''} WHERE id = ?`, t.id);
-  setRun(r.id, { status: 'succeeded', step: null, container_id: null, ended_at: Date.now() });
+  setRun(r.id, { status: 'succeeded', step: null, container_id: null, ended_at: Date.now(), error: null, publish_retry_at: null });
   if (r.volume) await ctx.env.removeVolume(r.volume).then(() => setRun(r.id, { volume: null }), () => {});
   if (plan.merge) {
     // The scheduler retries merges every tick, so a failure here isn't a failed run.
@@ -714,7 +768,12 @@ export async function drive(runId: string) {
     const latest = getRun(runId)!;
     if (latest.status === 'publishing') {
       ctx.run = latest;
-      await publishRun(ctx);
+      try {
+        await publishRun(ctx);
+      } catch (err) {
+        if (err instanceof HostUnreachable || !isTransient(err)) throw err;
+        await deferPublish(getRun(runId)!, err);
+      }
     }
   } catch (err) {
     if (err instanceof HostUnreachable) {
@@ -722,13 +781,43 @@ export async function drive(runId: string) {
       return;
     }
     console.error(`[run ${runId}]`, err);
-    // Octokit uses the response body as the message, so a 5xx with an empty body has none.
-    const { message, status } = err as Error & { status?: number };
-    await fail(runId, message || (status ? `GitHub answered HTTP ${status} with no message.` : String(err)));
+    await fail(runId, errorText(err));
   } finally {
     driving.delete(runId);
     settled();
   }
+}
+
+function errorText(err: unknown): string {
+  // Octokit uses the response body as the message, so a 5xx with an empty body has none.
+  const { message, status } = err as Error & { status?: number };
+  return message || (status ? `GitHub answered HTTP ${status} with no message.` : String(err));
+}
+
+/**
+ * GitHub failed temporarily while publishing: keeps the run publishing and lets the tick try again later,
+ * without counting a failure or running the agent again. After `PUBLISH_GIVE_UP_MS` it fails the run.
+ */
+async function deferPublish(r: RunRow, err: unknown) {
+  const now = Date.now();
+  const since = r.publish_failing_since ?? now;
+  const detail = errorText(err);
+  if (now - since >= PUBLISH_GIVE_UP_MS) {
+    const t = getTicket(r.ticket_id)!;
+    const repo = getRepo(t.repo_id)!;
+    raiseAlert(
+      'error',
+      'publish-failed',
+      `${repo.full_name}#${t.number}: Workshop couldn't publish the ${AGENT_INFO[r.agent].label} agent's work because GitHub kept failing for 6 hours. Last error: ${detail}`,
+      `run:${r.id}`,
+    );
+    await fail(r.id, `GitHub kept failing for 6 hours, so Workshop stopped trying to publish. Last error: ${detail}`);
+    return;
+  }
+  const minutes = publishRetryMinutes(r.publish_retries);
+  const text = `GitHub didn't answer (${detail}). Workshop tries publishing again in ${minutes} minute${minutes === 1 ? '' : 's'}.`;
+  setRun(r.id, { error: text, step: null, container_id: null, publish_retries: r.publish_retries + 1, publish_retry_at: now + minutes * 60_000, publish_failing_since: since });
+  appendLog(r.id, { step: 'workshop', stream: 'stdout', text });
 }
 
 export function launch(p: {

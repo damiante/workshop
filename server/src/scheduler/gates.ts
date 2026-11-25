@@ -175,3 +175,19 @@ export function clockTopics(prev: ClockState | null, next: ClockState): Topic[] 
   if (prev.queue !== next.queue) out.push('tickets');
   return out;
 }
+
+/** Minutes between publish retries: 1, 5, 15, then every 30. */
+const PUBLISH_RETRY_MIN = [1, 5, 15, 30];
+export const publishRetryMinutes = (retries: number) => PUBLISH_RETRY_MIN[Math.min(retries, PUBLISH_RETRY_MIN.length - 1)];
+/** How long publishing may keep failing on temporary errors before the run fails. */
+export const PUBLISH_GIVE_UP_MS = 6 * 3600_000;
+const NETWORK_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT']);
+
+/** A GitHub 5xx or 429, or a network error: worth retrying later rather than failing the run. */
+export function isTransient(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { status?: unknown; code?: unknown; name?: unknown; cause?: unknown };
+  if (typeof e.status === 'number') return e.status >= 500 || e.status === 429;
+  const cause = typeof e.cause === 'object' && e.cause !== null ? (e.cause as { code?: unknown }).code : undefined;
+  return NETWORK_CODES.has(String(e.code)) || NETWORK_CODES.has(String(cause)) || e.name === 'TimeoutError';
+}
