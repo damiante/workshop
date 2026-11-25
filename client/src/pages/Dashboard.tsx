@@ -96,13 +96,23 @@ export function Dashboard() {
   const { data: settings } = useApi<Settings>('/settings', ['settings']);
   const now = useNow();
   const [showDismissed, setShowDismissed] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   if (!data) return <ErrorNote error={error} />;
 
   const steps = setupSteps(connections ?? [], repos ?? [], settings, data);
   const waiting = data.queue.find((q) => q.blockedBy);
+  const refresh = () => {
+    setRefreshing(true);
+    api('/refresh', { body: {} }).finally(() => setTimeout(() => setRefreshing(false), 1500));
+  };
   return (
     <div className="stack">
-      <h1>Dashboard</h1>
+      <div className="spread">
+        <h1>Dashboard</h1>
+        <button onClick={refresh} disabled={refreshing} title="Sync tickets, check Claude usage and start or resume what's ready, without waiting for the next check">
+          {refreshing ? 'Checking…' : 'Refresh'}
+        </button>
+      </div>
       {steps.length > 0 && (
         <Panel title="Finish setting up">
           <ul className="list">

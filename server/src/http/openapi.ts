@@ -316,6 +316,14 @@ const paths: Record<string, Record<string, Op>> = {
     },
   },
   '/sync': { post: { summary: 'Asks Workshop to sync tickets from GitHub soon.', status: '202', errors: [403] } },
+  '/refresh': {
+    post: {
+      summary:
+        "Runs the checks Workshop's timer runs, now: syncs tickets from GitHub, re-reads the Claude usage of subscriptions that are over your limits or haven't been checked recently, then starts or resumes whatever is ready. Answers at once; the checks finish in the background.",
+      status: '202',
+      errors: [403],
+    },
+  },
   '/runs': { get: { summary: 'Agent runs, newest first.', query: { ticket: 'Only runs for this ticket id.' }, ok: array(ref('RunView')) } },
   '/runs/{id}': { get: { summary: 'One run.', params: ['id'], ok: ref('RunView'), errors: [404] } },
   '/runs/{id}/stop': { post: { summary: 'Stops a run.', params: ['id'], ok: ref('RunView'), errors: [403, 404] } },

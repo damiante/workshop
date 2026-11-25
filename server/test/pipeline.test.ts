@@ -15,7 +15,7 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
 }));
 
 const { seedAgents, updateAgent } = await import('../src/agents.ts');
-const { allowanceOf, recordProbe } = await import('../src/allowance.ts');
+const { allowanceOf, recordLimit, recordProbe } = await import('../src/allowance.ts');
 const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
@@ -24,7 +24,7 @@ const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
-const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
+const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
@@ -944,6 +944,34 @@ describe('runner', () => {
       expect(allowanceOf(other)).toMatchObject({ unknown: false, sampledAt: null });
       run('DELETE FROM connections WHERE id = ?', other);
       forgetProbe(other);
+    });
+
+    describe('refresh', () => {
+      const probes = () => fake.env.started.filter((spec: StepSpec) => spec.labels?.['workshop.probe'] === String(ids.model)).length;
+
+      it('re-reads usage over the thresholds, even right after a failed check', async () => {
+        fake.env = new FakeEnv({ usage: [line({ type: 'result', subtype: 'success', is_error: true, result: 'Overloaded', usage: {} })] });
+        await expect(probeAllowance(ids.model, true)).rejects.toThrow('Overloaded');
+        recordProbe(ids.model, { pct: 95, resetsAt: null }, { pct: 10, resetsAt: null });
+        fake.env = new FakeEnv({ usage: [RATE, result({})] });
+        await probeAllowance(ids.model); // the timer's check waits after a failure
+        expect(probes()).toBe(0);
+        await refreshNow();
+        expect(probes()).toBe(1);
+        expect(allowanceOf(ids.model).fiveHour).toMatchObject({ pct: 44 });
+      });
+
+      it('leaves a fresh reading under the thresholds and a limit Claude reported alone', async () => {
+        fake.env = new FakeEnv({ usage: [RATE, result({})] });
+        recordProbe(ids.model, { pct: 10, resetsAt: null }, { pct: 10, resetsAt: null });
+        await refreshNow();
+        expect(probes()).toBe(0);
+        recordProbe(ids.model, { pct: 95, resetsAt: null }, { pct: 10, resetsAt: null });
+        recordLimit(ids.model, Date.now() + 3600_000);
+        await refreshNow();
+        expect(probes()).toBe(0);
+        run("DELETE FROM allowance_samples WHERE source = 'limit'");
+      });
     });
 
     it('reports known usage as known', async () => {

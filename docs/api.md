@@ -62,6 +62,10 @@ curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 
 `POST /api/tickets/:id/launch` starts whatever agent the ticket is due next and answers 202 with the run. It ignores the operation mode and operating hours, so it works while Workshop is paused. Every other check still applies: dependencies, a chosen model, the Claude allowance, the API cap and a free agent host. If one blocks the launch you get 409 with the reason.
 
+## Checking now
+
+`POST /api/refresh` runs the checks Workshop's timer runs, without waiting for the next poll: it syncs tickets from GitHub, re-reads the usage of every Claude subscription that is over your limits or hasn't been checked in the last 10 minutes (even one whose last check failed), then starts or resumes whatever is now ready. A usage limit Claude reported mid-run still waits for its reset time. It answers 202 at once; the checks finish in the background, and the dashboard updates when they do.
+
 ## Pausing a run
 
 `POST /api/runs/:id/pause` asks a starting or running agent to stop at its next turn boundary, once every tool call it started has returned (or after 10 minutes, if one stays open). It then waits as `paused` with `pauseReason: "manual"`, and its host slot goes to the next ticket in the queue. Until it stops, the run shows `pauseRequested: true`. A manual pause never resumes by itself. On a run already paused for usage it makes the pause manual, so the run stays paused after the limit resets. It answers with the run; 409 for a run that is publishing or has ended.
