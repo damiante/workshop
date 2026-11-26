@@ -59,6 +59,7 @@ export const money = (usd: number | null) => (usd === null ? null : `$${usd.toFi
 
 export function tokens(n: number | null) {
   if (n === null) return null;
+  if (n >= 1e9) return `${(n / 1e9).toFixed(2)}B tokens`;
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M tokens`;
   if (n >= 1e3) return `${Math.round(n / 1e3)}k tokens`;
   return `${n} tokens`;
