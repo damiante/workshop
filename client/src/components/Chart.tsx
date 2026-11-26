@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import { niceTicks, spreadLabels } from '../chart.ts';
 import { clock } from '../format.ts';
 
@@ -18,6 +18,26 @@ function useWidth() {
     return () => observer.disconnect();
   }, []);
   return [ref, width] as const;
+}
+
+/**
+ * The hovered or tapped item. A mouse leaving the chart clears it; touch fires a leave as soon as the tap ends,
+ * so a tapped tooltip stays until you tap outside the chart.
+ */
+function useActive<T>(ref: RefObject<HTMLDivElement | null>) {
+  const [active, setActive] = useState<T | null>(null);
+  useEffect(() => {
+    if (active === null) return;
+    const outside = (e: globalThis.PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setActive(null);
+    };
+    document.addEventListener('pointerdown', outside);
+    return () => document.removeEventListener('pointerdown', outside);
+  }, [active, ref]);
+  const leave = (e: PointerEvent) => {
+    if (e.pointerType === 'mouse') setActive(null);
+  };
+  return [active, setActive, leave] as const;
 }
 
 /** A tooltip beside `x`, flipped to the left in the right half so it stays inside the chart. */
@@ -56,7 +76,7 @@ export interface ColumnSeries {
 /** Stacked columns, one per bucket, bottom-up in series order. */
 export function StackedColumns({ labels, series, format, label }: { labels: string[]; series: ColumnSeries[]; format: (n: number) => string; label: string }) {
   const [ref, width] = useWidth();
-  const [active, setActive] = useState<number | null>(null);
+  const [active, setActive, leave] = useActive<number>(ref);
   const totals = labels.map((_, i) => series.reduce((n, s) => n + s.values[i], 0));
   const ticks = niceTicks(Math.max(0, ...totals));
   const top = ticks[ticks.length - 1];
@@ -80,7 +100,7 @@ export function StackedColumns({ labels, series, format, label }: { labels: stri
   return (
     <div className="chart" ref={ref} style={{ height: HEIGHT }}>
       {width > 0 && (
-        <svg width={width} height={HEIGHT} role="img" aria-label={label} onPointerMove={pick} onPointerDown={pick} onPointerLeave={() => setActive(null)}>
+        <svg width={width} height={HEIGHT} role="img" aria-label={label} onPointerMove={pick} onPointerDown={pick} onPointerLeave={leave}>
           {ticks.map((t) => (
             <g key={t}>
               <line x1={left} x2={width - right} y1={y(t) + 0.5} y2={y(t) + 0.5} className="chart-grid" />
@@ -115,9 +135,10 @@ export function StackedColumns({ labels, series, format, label }: { labels: stri
           {labels.map((l, i) => {
             if (i % every !== 0) return null;
             const x = left + i * band + band / 2;
-            const anchor = x + 28 > width ? 'end' : x - 28 < left ? 'start' : 'middle';
+            // A label that would run off the right edge is dropped rather than shifted into its neighbour.
+            if (x + 24 > width) return null;
             return (
-              <text key={l} x={anchor === 'start' ? left + i * band : x} y={HEIGHT - 6} textAnchor={anchor} className="chart-axis">
+              <text key={l} x={x} y={HEIGHT - 6} textAnchor="middle" className="chart-axis">
                 {l}
               </text>
             );
@@ -159,7 +180,7 @@ const MAX_GAP = 2 * 3600_000;
 /** Percentages over time on a fixed 0–100% axis, with dashed reference lines at `marks`. */
 export function LineChart({ start, end, series, marks, label }: { start: number; end: number; series: LineSeries[]; marks: { label: string; value: number }[]; label: string }) {
   const [ref, width] = useWidth();
-  const [active, setActive] = useState<number | null>(null);
+  const [active, setActive, leave] = useActive<number>(ref);
   const left = 44;
   const right = 8;
   const plotW = Math.max(0, width - left - right);
@@ -203,7 +224,7 @@ export function LineChart({ start, end, series, marks, label }: { start: number;
   return (
     <div className="chart" ref={ref} style={{ height: HEIGHT }}>
       {width > 0 && (
-        <svg width={width} height={HEIGHT} role="img" aria-label={label} onPointerMove={pick} onPointerDown={pick} onPointerLeave={() => setActive(null)}>
+        <svg width={width} height={HEIGHT} role="img" aria-label={label} onPointerMove={pick} onPointerDown={pick} onPointerLeave={leave}>
           {[0, 25, 50, 75, 100].map((t) => (
             <g key={t}>
               <line x1={left} x2={width - right} y1={y(t) + 0.5} y2={y(t) + 0.5} className="chart-grid" />
@@ -222,7 +243,7 @@ export function LineChart({ start, end, series, marks, label }: { start: number;
           {marks.map((m, i) => (
             <g key={m.label}>
               <line x1={left} x2={width - right} y1={y(m.value) + 0.5} y2={y(m.value) + 0.5} className="chart-mark" />
-              <text x={width - right} y={markYs[i]} textAnchor="end" className="chart-axis">
+              <text x={width - right} y={markYs[i]} textAnchor="end" className="chart-axis chart-label">
                 {m.label}
               </text>
             </g>

@@ -1012,6 +1012,13 @@ a.turn-no:hover {
   font-size: 12px;
   fill: var(--muted);
 }
+/* A halo in the panel colour keeps labels readable over the lines. */
+.chart-label {
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
 .chart-grid {
   stroke: var(--line);
   stroke-width: 1;
