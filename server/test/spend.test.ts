@@ -3,6 +3,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { all, initDb, MIGRATIONS, one, run } from '../src/db.ts';
+import { initCrypto } from '../src/crypto.ts';
+import { createConnection } from '../src/providers/index.ts';
 import { saveSettings } from '../src/settings.ts';
 import { backfillSpend, lifetimeSpend, usageHistory } from '../src/spend.ts';
 
@@ -172,8 +174,48 @@ describe('usageHistory', () => {
     expect(h.projection.api).toMatchObject({ perDayUsd: 0, monthToDateUsd: 0, monthEndUsd: 0, dailyCapUsd: 20 });
 
     const later = usageHistory('7d', 'UTC', Date.parse('2026-11-26T12:00:00Z'));
-    expect(later.projection.api.perDayUsd).toBeCloseTo(2);
+    expect(later.projection.api.perDayUsd).toBeCloseTo(14 / 1.5); // API first used 1.5 days before
     expect(later.projection.api.monthToDateUsd).toBe(14);
     expect(later.projection.subscription.perDayUsd).toBe(0);
+  });
+
+  it("divides each billing's pace by the days since that billing was first used", () => {
+    run('DELETE FROM spend');
+    ins('s1', '2026-10-01T00:00:00Z', { cost: 1 });
+    ins('s2', '2026-11-25T00:00:00Z', { cost: 7 });
+    ins('a1', '2026-11-24T12:00:00Z', { billing: 'api', cost: 4 });
+    const h = usageHistory('7d', 'UTC', Date.parse('2026-11-26T12:00:00Z'));
+    expect(h.projection.subscription.perDayUsd).toBeCloseTo(1);
+    expect(h.projection.api.perDayUsd).toBeCloseTo(2);
+  });
+
+  it("carries each subscription's probe readings from the last 7 days and projects its windows", () => {
+    initCrypto('test-secret-key');
+    const now = Date.parse('2026-11-26T12:00:00Z');
+    const H = 3600_000;
+    const conn = createConnection('model', 'anthropic', 'Claude-9', {}, { oauthToken: 't' });
+    const sample = (ts: number, source: string, five: number | null, week: number | null) =>
+      run(
+        'INSERT INTO allowance_samples (connection_id, ts, source, five_hour, five_hour_resets, seven_day, seven_day_resets) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        conn,
+        ts,
+        source,
+        five,
+        now + 3 * H,
+        week,
+        now + 84 * H,
+      );
+    sample(now - 8 * 24 * H, 'probe', 10, 10); // too old for the chart
+    sample(now - H, 'probe', 10, 40);
+    sample(now - 30 * 60_000, 'limit', null, null);
+    sample(now, 'probe', 20, 50);
+    const a = usageHistory('7d', 'UTC', now).allowance.find((x) => x.connectionId === conn)!;
+    expect(a.samples).toEqual([
+      { ts: now - H, fiveHour: 10, sevenDay: 40 },
+      { ts: now, fiveHour: 20, sevenDay: 50 },
+    ]);
+    expect(a).toMatchObject({ connectionName: 'Claude-9', sampledAt: now, unknown: false, limits: { fiveHour: 70, weekly: 80 } });
+    expect(a.fiveHour).toMatchObject({ pct: 20, ratePerHour: 10, limitAt: null, over: false });
+    expect(a.sevenDay).toMatchObject({ pct: 50, limitAt: now + Math.round(50.4 * H) });
   });
 });

@@ -50,11 +50,11 @@ function Tip({ x, width, children }: { x: number; width: number; children: React
   );
 }
 
-export function Legend({ items }: { items: { name: string; color: string }[] }) {
+export function Legend({ items }: { items: { key?: string; name: string; color: string }[] }) {
   return (
     <ul className="legend small">
       {items.map((i) => (
-        <li key={i.name}>
+        <li key={i.key ?? i.name}>
           <span className="swatch" style={{ background: i.color }} aria-hidden="true" />
           {i.name}
         </li>
@@ -68,17 +68,20 @@ const roundedTop = (x: number, y: number, w: number, h: number, r: number) =>
   `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
 
 export interface ColumnSeries {
+  key: string;
   name: string;
   color: string;
   values: number[];
 }
 
 /** Stacked columns, one per bucket, bottom-up in series order. */
-export function StackedColumns({ labels, series, format, label }: { labels: string[]; series: ColumnSeries[]; format: (n: number) => string; label: string }) {
+export function StackedColumns({ labels, series, format, label, minStep }: { labels: string[]; series: ColumnSeries[]; format: (n: number) => string; label: string; minStep?: number }) {
   const [ref, width] = useWidth();
-  const [active, setActive, leave] = useActive<number>(ref);
+  const [hovered, setActive, leave] = useActive<number>(ref);
+  // A tapped column stays active, so it can outlive a refetch with fewer buckets.
+  const active = hovered !== null && hovered < labels.length ? hovered : null;
   const totals = labels.map((_, i) => series.reduce((n, s) => n + s.values[i], 0));
-  const ticks = niceTicks(Math.max(0, ...totals));
+  const ticks = niceTicks(Math.max(0, ...totals), 4, minStep);
   const top = ticks[ticks.length - 1];
   const left = Math.max(...ticks.map((t) => format(t).length)) * 7 + 12;
   const right = 8;
@@ -151,7 +154,7 @@ export function StackedColumns({ labels, series, format, label }: { labels: stri
           {series
             .filter((s) => s.values[active] > 0)
             .map((s) => (
-              <div key={s.name} className="tip-row">
+              <div key={s.key} className="tip-row">
                 <span className="swatch" style={{ background: s.color }} aria-hidden="true" />
                 <span className="grow">{s.name}</span>
                 <span>{format(s.values[active])}</span>
@@ -180,7 +183,7 @@ const MAX_GAP = 2 * 3600_000;
 /** Percentages over time on a fixed 0–100% axis, with dashed reference lines at `marks`. */
 export function LineChart({ start, end, series, marks, label }: { start: number; end: number; series: LineSeries[]; marks: { label: string; value: number }[]; label: string }) {
   const [ref, width] = useWidth();
-  const [active, setActive, leave] = useActive<number>(ref);
+  const [hovered, setActive, leave] = useActive<number>(ref);
   const left = 44;
   const right = 8;
   const plotW = Math.max(0, width - left - right);
@@ -188,6 +191,7 @@ export function LineChart({ start, end, series, marks, label }: { start: number;
   const x = (t: number) => left + ((t - start) / (end - start)) * plotW;
   const y = (v: number) => TOP + plotH - (Math.min(100, Math.max(0, v)) / 100) * plotH;
   const times = [...new Set(series.flatMap((s) => s.points.map((p) => p[0])))].sort((a, b) => a - b);
+  const active = hovered !== null && times.includes(hovered) ? hovered : null;
 
   // Local midnights inside the range, labelled by weekday.
   const days: number[] = [];
@@ -197,7 +201,8 @@ export function LineChart({ start, end, series, marks, label }: { start: number;
   const dayW = days.length > 1 ? x(days[1]) - x(days[0]) : plotW;
   const everyDay = Math.max(1, Math.ceil(36 / Math.max(dayW, 1)));
 
-  const markYs = spreadLabels(marks.map((m) => y(m.value) - 4));
+  // Above each line, kept inside the plot: a 100% limit would otherwise be cut off at the top.
+  const markYs = spreadLabels(marks.map((m) => Math.max(TOP + 10, y(m.value) - 4))).map((v) => Math.min(TOP + plotH - 2, v));
 
   const paths = (points: [number, number][]) => {
     const out: string[] = [];
@@ -234,7 +239,7 @@ export function LineChart({ start, end, series, marks, label }: { start: number;
             </g>
           ))}
           {days.map((t, i) =>
-            i % everyDay === 0 ? (
+            i % everyDay === 0 && x(t) + 16 <= width ? (
               <text key={t} x={x(t)} y={HEIGHT - 6} textAnchor="middle" className="chart-axis">
                 {new Date(t).toLocaleDateString([], { weekday: 'short' })}
               </text>

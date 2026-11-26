@@ -195,10 +195,12 @@ export function usageHistory(range: UsageRange, timeZone: string, now = Date.now
   const dayStart = startOfDay(now, timeZone);
   const dayFraction = Math.min(1, (now - dayStart) / DAY);
   const recent = all<SpendRow>('SELECT * FROM spend WHERE ts >= ? AND ts <= ?', now - 32 * DAY, now);
-  const firstTs = one<{ ts: number | null }>('SELECT MIN(ts) AS ts FROM spend')?.ts ?? now;
-  const paceDays = Math.min(7, Math.max(1, (now - firstTs) / DAY));
+  const firstApi = one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE billing = 'api'")?.ts ?? now;
+  const firstSubscription = one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE billing != 'api'")?.ts ?? now;
   const sum = (subset: SpendRow[], f: (r: SpendRow) => number) => subset.reduce((n, r) => n + f(r), 0);
   const pace = (billing: string) => {
+    // A billing used for under 7 days averages over the days since its first use (at least 1).
+    const paceDays = Math.min(7, Math.max(1, (now - (billing === 'api' ? firstApi : firstSubscription)) / DAY));
     const mine = recent.filter((r) => billingOf(r) === billing);
     const week = mine.filter((r) => r.ts >= now - SEVEN_DAYS);
     const perDayUsd = sum(week, (r) => r.cost_usd) / paceDays;

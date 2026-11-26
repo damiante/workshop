@@ -24,12 +24,12 @@ export const METRICS: { value: Metric; label: string }[] = [
 
 export const value = (t: SpendTotals, metric: Metric) => (metric === 'cost' ? t.costUsd : t.inputTokens + t.outputTokens);
 
-/** Round tick values from 0 that cover `max`, in steps of 1, 2 or 5 × 10ⁿ. */
-export function niceTicks(max: number, count = 4): number[] {
+/** Round tick values from 0 that cover `max`, in steps of 1, 2 or 5 × 10ⁿ, and at least `minStep` (a cent, for money). */
+export function niceTicks(max: number, count = 4, minStep = 0): number[] {
   if (!(max > 0)) return [0, 1];
-  const raw = max / count;
+  const raw = Math.max(max / count, minStep);
   const mag = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw)!;
+  const step = [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw * (1 - 1e-9))!;
   const n = Math.ceil(max / step - 1e-9);
   return Array.from({ length: n + 1 }, (_, i) => Number((i * step).toPrecision(12)));
 }

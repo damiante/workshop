@@ -4,7 +4,7 @@ import type { ApiTokenView, Limits, NewApiToken, Settings, TicketOrder, Usage } 
 import { TOKEN_LIFETIMES } from '../access.ts';
 import { api, useApi, useNow } from '../api.ts';
 import { ErrorNote, Panel } from '../components/ui.tsx';
-import { ago, clock, money, tokens } from '../format.ts';
+import { ago, clock } from '../format.ts';
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const ORDERS: { value: TicketOrder; label: string }[] = [

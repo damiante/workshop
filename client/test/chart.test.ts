@@ -67,3 +67,10 @@ describe('spreadLabels', () => {
     expect(spreadLabels([20, 20, 20], 10)).toEqual([20, 30, 40]);
   });
 });
+
+describe('niceTicks with a minimum step', () => {
+  it("doesn't go below a cent for money", () => {
+    expect(niceTicks(0.013, 4, 0.01)).toEqual([0, 0.01, 0.02]);
+    expect(niceTicks(1234, 4, 0.01)).toEqual([0, 500, 1000, 1500]);
+  });
+});

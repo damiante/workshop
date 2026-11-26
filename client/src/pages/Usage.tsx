@@ -1,15 +1,14 @@
 import { useSearchParams } from 'react-router';
-import type { AllowanceHistory, LifetimeSpend, SpendTotals, UsageHistory, WindowProjection } from '../../../server/src/api-types.ts';
+import type { AllowanceHistory, LifetimeSpend, SpendTotals, UsageHistory } from '../../../server/src/api-types.ts';
 import { bucketLabel, foldSeries, GROUPINGS, METRICS, RANGES, readFilters, value, type Grouping } from '../chart.ts';
 import { useApi, useNow } from '../api.ts';
 import { Legend, LineChart, StackedColumns } from '../components/Chart.tsx';
 import { ErrorNote, Panel } from '../components/ui.tsx';
-import { clock, money, tokens } from '../format.ts';
+import { money, tokens } from '../format.ts';
+import { projectionLines } from '../projections.ts';
 
 const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 const OTHER_COLOR = 'var(--series-other)';
-/** Matches the launch gate: an older reading gets re-checked before a launch. */
-const ALLOWANCE_MAX_AGE_MS = 10 * 60_000;
 const SEVEN_DAYS = 7 * 86400_000;
 
 const SERIES_OF: Record<Grouping, keyof Pick<UsageHistory, 'byBilling' | 'byModel' | 'byProject' | 'byConnection'>> = {
@@ -95,47 +94,8 @@ function LifetimeUsage() {
   );
 }
 
-/** One sentence about where a subscription window is heading. */
-function windowLine(name: string, a: AllowanceHistory, p: WindowProjection | null, limit: number, now: number): string {
-  if (!p) return `${name}: ${a.sampledAt === null ? 'No current reading.' : 'The window has reset since the last reading.'}`;
-  const old = a.sampledAt !== null && now - a.sampledAt > ALLOWANCE_MAX_AGE_MS;
-  const head = old ? `${name}, as of ${clock(a.sampledAt!)}:` : `${name}:`;
-  const resets = clock(p.resetsAt);
-  if (p.over) return `${head} ${Math.round(p.pct)}% used. Over your ${limit}% limit until it resets at ${resets}.`;
-  let line = `${head} ${Math.round(p.pct)}% used, ${p.ratePerHour.toFixed(1)}% an hour.`;
-  if (p.limitAt === null) line += p.ratePerHour > 0 ? ` Resets at ${resets} before reaching your ${limit}% limit.` : ` Resets at ${resets}.`;
-  else if (p.limitAt === a.sampledAt) line += ` At your ${limit}% limit; resets at ${resets}.`;
-  else if (p.limitAt <= now) line += ` At that pace it may already be at your ${limit}% limit.`;
-  else line += ` Reaches your ${limit}% limit at ${clock(p.limitAt)} and resets at ${resets}.`;
-  if (p.fullAt !== null && p.fullAt !== p.limitAt && p.fullAt > now) line += ` Reaches 100% at ${clock(p.fullAt)}.`;
-  return line;
-}
-
-function subscriptionLines(a: AllowanceHistory, now: number): string[] {
-  if (a.blockedUntil) return [`${a.connectionName}: Claude reported a usage limit; resumes at ${clock(a.blockedUntil)}.`];
-  if (a.unknown) return [`${a.connectionName}: Claude doesn't report this subscription's usage.`];
-  return [
-    windowLine(`${a.connectionName}, 5-hour window`, a, a.fiveHour, a.limits.fiveHour, now),
-    windowLine(`${a.connectionName}, weekly window`, a, a.sevenDay, a.limits.weekly, now),
-  ];
-}
-
 function Projections({ data, now }: { data: UsageHistory; now: number }) {
-  const { api, subscription } = data.projection;
-  const lines = data.allowance.flatMap((a) => subscriptionLines(a, now));
-  if (api.monthToDateUsd > 0 || api.todayUsd > 0) {
-    const today = `API: ${money(api.todayUsd)} today.`;
-    if (api.dailyCapUsd <= 0) lines.push('API agents are off: the daily limit is $0.');
-    else if (api.todayUsd >= api.dailyCapUsd) lines.push(`${today} API daily limit reached; new API agents start again tomorrow.`);
-    else if (api.capAt !== null) lines.push(`${today} At today's pace new API agents stop starting at about ${clock(api.capAt)}, when the ${money(api.dailyCapUsd)} daily limit is reached.`);
-    else lines.push(`${today} At today's pace it stays under the ${money(api.dailyCapUsd)} daily limit today.`);
-    lines.push(`API this month: ${money(api.monthToDateUsd)} so far, about ${money(api.monthEndUsd)} by the end of the month at ${money(api.perDayUsd)} a day (last 7 days).`);
-  }
-  if (data.allowance.length > 0 || subscription.monthToDateUsd > 0) {
-    lines.push(
-      `Subscriptions this month: ${money(subscription.monthToDateUsd)} token-equivalent so far, about ${money(subscription.monthEndUsd)} by the end of the month (${tokens(Math.round(subscription.perDayTokens))} a day).`,
-    );
-  }
+  const lines = projectionLines(data, now);
   return (
     <Panel title="Projections">
       <div className="panel-body stack">
@@ -144,7 +104,7 @@ function Projections({ data, now }: { data: UsageHistory; now: number }) {
         ) : (
           <ul className="projections">
             {lines.map((l) => (
-              <li key={l}>{l}</li>
+              <li key={l.key}>{l.text}</li>
             ))}
           </ul>
         )}
@@ -157,7 +117,7 @@ function Projections({ data, now }: { data: UsageHistory; now: number }) {
 function SpendOverTime({ data, group, metric }: { data: UsageHistory; group: Grouping; metric: 'cost' | 'tokens' }) {
   const all = data[SERIES_OF[group]];
   const folded = foldSeries(all, metric);
-  const series = folded.map((s, i) => ({ name: s.name, color: s.key === 'other' ? OTHER_COLOR : SERIES_COLORS[i], values: s.points.map((p) => value(p, metric)) }));
+  const series = folded.map((s, i) => ({ name: s.name, key: s.key, color: SERIES_COLORS[i] ?? OTHER_COLOR, values: s.points.map((p) => value(p, metric)) }));
   const format = metric === 'cost' ? (n: number) => money(n)! : (n: number) => tokens(n)!.replace(' tokens', '');
   const unit = data.bucket === 'day' ? 'day' : 'month';
   const groupLabel = GROUPINGS.find((g) => g.value === group)!.label;
@@ -180,6 +140,7 @@ function SpendOverTime({ data, group, metric }: { data: UsageHistory; group: Gro
               labels={data.buckets.map((b) => bucketLabel(b, data.bucket))}
               series={series}
               format={format}
+              minStep={metric === 'cost' ? 0.01 : 1}
               label={`${metric === 'cost' ? 'Cost' : 'Tokens'} per ${unit} by ${groupLabel.toLowerCase()}, ${metric === 'cost' ? money(total) : tokens(total)} in total.`}
             />
             <SpendTable title={`By ${groupLabel.toLowerCase()}`} label={group} rows={rows.map((s) => ({ key: s.key, name: s.name, t: s.totals }))} />
