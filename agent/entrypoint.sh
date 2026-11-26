@@ -49,6 +49,10 @@ case "${1:-}" in
       git add -A
       git commit -q -m "Commit changes the agent left uncommitted"
     fi
+    # Tasks set SKIP_EMPTY: with no commits ahead of base there's nothing to push.
+    if [ -n "${SKIP_EMPTY:-}" ] && [ "$(git rev-list --count "origin/$BASE_BRANCH..HEAD")" = 0 ]; then
+      printf '{"ahead":0}\n'; exit 0
+    fi
     # Only report success once a push has gone through. If the branch moved on the remote since
     # prepare, merge its commits in and try again rather than lose the agent's work.
     pushed=

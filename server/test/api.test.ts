@@ -521,7 +521,7 @@ describe('ticket lifecycle', () => {
     const conn = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('vcs', 'github', 'GH life', '{}', '', 'ok', 0, 0)").lastInsertRowid);
     const repo = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (?, 'me/life', 'main', 'u', 1)", conn).lastInsertRowid);
     ticketId = Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 9, 'Lifecycle', '', 'u', 'Damiante', 'closed', '[]', '2026-10-13T00:00:00Z')", repo).lastInsertRowid);
-    const ins = "INSERT INTO runs (id, ticket_id, agent, mode, attempt, model, billing, status, summary, started_at) VALUES (?, ?, ?, ?, 1, 'm', 'subscription', 'succeeded', ?, ?)";
+    const ins = "INSERT INTO runs (id, ticket_id, repo_id, agent, mode, attempt, model, billing, status, summary, started_at) VALUES (?, ?, (SELECT repo_id FROM tickets WHERE id = ?2), ?, ?, 1, 'm', 'subscription', 'succeeded', ?, ?)";
     run(ins, 'l-3', ticketId, 'classifier', 'delta', 'Sized S', 30);
     run(ins, 'l-1', ticketId, 'classifier', 'normal', 'Sized M', 10);
     run(ins, 'l-2', ticketId, 'implement', 'normal', 'Built it', 20);
@@ -572,6 +572,7 @@ describe('OpenAPI', () => {
     ['/settings', 'Settings'],
     ['/usage', 'Usage'],
     ['/usage/lifetime', 'LifetimeSpend'],
+    ['/tasks', 'TasksView'],
   ])('%s matches its schema fields', async (path, name) => {
     const res = await request(app).get(`/api${path}`).set('cookie', cookie);
     const props = Object.keys((OPENAPI.components.schemas[name] as { properties: object }).properties);
@@ -590,6 +591,139 @@ describe('OpenAPI', () => {
     const res = await request(app).get('/api/agents').set('cookie', cookie);
     const props = Object.keys((OPENAPI.components.schemas.AgentClassView as { properties: object }).properties);
     expect(Object.keys(res.body[0]).sort()).toEqual(props.sort());
+  });
+});
+
+describe('tasks', () => {
+  let repo = 0;
+  let task = 0;
+  let closedTask = 0;
+  const post = (body: object) => request(app).post('/api/tasks').set('cookie', cookie).send(body);
+  const follow = (id: number, body: object) => request(app).post(`/api/tasks/${id}/runs`).set('cookie', cookie).send(body);
+  const close = (id: number, body: object) => request(app).put(`/api/tasks/${id}/closed`).set('cookie', cookie).send(body);
+
+  beforeAll(() => {
+    const conn = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('vcs', 'github', 'GH tasks', '{}', '', 'ok', 0, 0)").lastInsertRowid);
+    repo = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (?, 'me/tasks', 'main', 'https://github.com/me/tasks', 0)", conn).lastInsertRowid);
+    task = Number(
+      run("INSERT INTO tasks (repo_id, title, body, branch, pushed, created_at, updated_at) VALUES (?, 'Look into the slow sync', 'It takes minutes.', 'workshop/task-x-look', 1, 1, 10)", repo).lastInsertRowid,
+    );
+    closedTask = Number(run("INSERT INTO tasks (repo_id, title, body, branch, closed_at, created_at, updated_at) VALUES (?, 'Old', 'Done.', 'workshop/task-y-old', 5, 1, 20)", repo).lastInsertRowid);
+    const ins = `INSERT INTO runs (id, task_id, repo_id, prompt, agent, attempt, model, billing, status, result, summary, started_at, ended_at) VALUES (?, ?, ?, ?, ?, 1, 'm', 'subscription', ?, ?, ?, ?, ?)`;
+    run(ins, 'task-run-2', task, repo, 'Fix it.', 'implement', 'running', null, null, 7, null);
+    run(ins, 'task-run-1', task, repo, null, 'task', 'succeeded', JSON.stringify({ outcome: 'needs_info', summary: 'It polls.', questions: ['Webhooks?'] }), 'It polls.', 5, 6);
+  });
+
+  it('lists repositories, agents and tasks, open ones first', async () => {
+    const res = await request(app).get('/api/tasks').set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.repos).toContainEqual({ id: repo, fullName: 'me/tasks' });
+    expect(res.body.agents).toEqual(['task', 'design', 'design-review', 'implement', 'code-review']);
+    expect(res.body.tasks.map((t: { id: number }) => t.id)).toEqual([task, closedTask]);
+    expect(res.body.tasks[0]).toMatchObject({
+      id: task,
+      repo: 'me/tasks',
+      title: 'Look into the slow sync',
+      closed: false,
+      branch: 'workshop/task-x-look',
+      branchUrl: 'https://github.com/me/tasks/tree/workshop/task-x-look',
+      runs: 2,
+      latest: { id: 'task-run-2', agent: 'implement', prompt: 'Fix it.', result: null },
+    });
+    expect(res.body.tasks[1]).toMatchObject({ closed: true, branchUrl: null, runs: 0, latest: null });
+    expect(Object.keys(res.body.tasks[0]).sort()).toEqual(Object.keys((OPENAPI.components.schemas.TaskSummary as { properties: object }).properties).sort());
+  });
+
+  it('shows one task with its runs oldest first, each with its outcome and no ticket fields', async () => {
+    const res = await request(app).get(`/api/tasks/${task}`).set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: task, body: 'It takes minutes.', latest: { id: 'task-run-2' } });
+    expect(Object.keys(res.body).sort()).toEqual(Object.keys((OPENAPI.components.schemas.TaskView as { properties: object }).properties).sort());
+    expect(res.body.runs.map((r: { id: string }) => r.id)).toEqual(['task-run-1', 'task-run-2']);
+    expect(res.body.runs[0]).toMatchObject({
+      ticketId: null,
+      ticket: null,
+      ticketTitle: null,
+      ticketUrl: null,
+      repo: 'me/tasks',
+      task: { id: task, title: 'Look into the slow sync' },
+      prompt: null,
+      result: { outcome: 'needs_info', summary: 'It polls.', questions: ['Webhooks?'], tests: null, findings: [] },
+    });
+    expect(Object.keys(res.body.runs[0]).sort()).toEqual(Object.keys((OPENAPI.components.schemas.RunView as { properties: object }).properties).sort());
+    // Task runs show among the runs too.
+    expect((await request(app).get('/api/runs').set('cookie', cookie)).body.map((r: { id: string }) => r.id)).toContain('task-run-1');
+    const missing = await request(app).get('/api/tasks/99999').set('cookie', cookie);
+    expect([missing.status, missing.body.error]).toEqual([404, 'Task not found.']);
+  });
+
+  it.each([
+    [{ body: 'Do it' }, 'Repository id must be a whole number'],
+    [{ repoId: 'x', body: 'Do it' }, 'Repository id must be a whole number'],
+    [{ repoId: 1 }, 'Describe the task for the agent.'],
+    [{ repoId: 1, body: '   ' }, 'Describe the task for the agent.'],
+    [{ repoId: 1, body: 'x'.repeat(20_001) }, 'Describe the task in under 20,000 characters.'],
+    [{ repoId: 1, body: 7 }, 'Describe the task for the agent.'],
+    [{ repoId: 1, body: 'Do it', title: 'x'.repeat(201) }, 'Keep the title under 200 characters.'],
+    [{ repoId: 1, body: 'Do it', title: 3 }, 'title must be text.'],
+    [{ repoId: 1, body: 'Do it', browser: 'yes' }, 'browser must be true or false.'],
+    [{ repoId: 1, body: 'Do it', agent: 'nobody' }, 'Choose one of these agents: Task, Design, Design adversary, Implementation, Code reviewer.'],
+    [{ repoId: 1, body: 'Do it', agent: 'classifier' }, 'Choose one of these agents'],
+  ])('refuses to create %j', async (body, message) => {
+    const res = await post(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(message);
+  });
+
+  it('refuses an unknown repository, and says why it cannot start one now, storing nothing', async () => {
+    const before = one<{ n: number }>('SELECT COUNT(*) AS n FROM tasks')!.n;
+    const unknown = await post({ repoId: 99_999, body: 'Do it' });
+    expect([unknown.status, unknown.body.error]).toEqual([404, 'Repository not found.']);
+    const refused = await post({ repoId: repo, body: 'Do it', browser: true });
+    expect([refused.status, refused.body.error]).toEqual([409, "Can't start the agent yet: Choose a model for Task on the Agents page."]);
+    expect(one<{ n: number }>('SELECT COUNT(*) AS n FROM tasks')!.n).toBe(before);
+  });
+
+  it.each([
+    [{}, 'Choose one of these agents'],
+    [{ agent: 'merge' }, 'Choose one of these agents'],
+    [{ agent: 'task', prompt: 5 }, 'prompt must be text.'],
+    [{ agent: 'task', prompt: 'x'.repeat(20_001) }, 'Keep the instructions under 20,000 characters.'],
+    [{ agent: 'task', browser: 1 }, 'browser must be true or false.'],
+  ])('refuses to start a run with %j', async (body, message) => {
+    const res = await follow(task, body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain(message);
+  });
+
+  it('refuses a run on an unknown, busy or closed task', async () => {
+    expect((await follow(99_999, { agent: 'task' })).status).toBe(404);
+    const busy = await follow(task, { agent: 'implement', prompt: 'Again' });
+    expect([busy.status, busy.body.error]).toEqual([409, 'An agent is already working on this task.']);
+    const closed = await follow(closedTask, { agent: 'task' });
+    expect([closed.status, closed.body.error]).toEqual([409, 'Reopen this task to start another agent.']);
+  });
+
+  it('closes and reopens a task, but not while an agent works on it', async () => {
+    expect((await close(closedTask, { closed: 'yes' })).status).toBe(400);
+    expect((await close(99_999, { closed: true })).status).toBe(404);
+    const busy = await close(task, { closed: true });
+    expect([busy.status, busy.body.error]).toEqual([409, 'Stop the running agent before closing this task.']);
+    const reopened = await close(closedTask, { closed: false });
+    expect(reopened.status).toBe(200);
+    expect(reopened.body).toMatchObject({ id: closedTask, closed: false });
+    const again = await close(closedTask, { closed: true });
+    expect(again.body.closed).toBe(true);
+  });
+
+  it('keeps a read-only token to reading', async () => {
+    const token = (await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'tasks', scope: 'read' })).body.token;
+    const auth = { authorization: `Bearer ${token}` };
+    expect((await request(app).post('/api/tasks').set(auth).send({ repoId: repo, body: 'Do it' })).status).toBe(403);
+    expect((await request(app).post(`/api/tasks/${task}/runs`).set(auth).send({ agent: 'task' })).status).toBe(403);
+    expect((await request(app).put(`/api/tasks/${task}/closed`).set(auth).send({ closed: true })).status).toBe(403);
+    expect((await request(app).get('/api/tasks').set(auth)).status).toBe(200);
+    expect((await request(app).get(`/api/tasks/${task}`).set(auth)).status).toBe(200);
   });
 });
 
@@ -724,7 +858,7 @@ describe("changing a ticket's status", () => {
 
   it('refuses while an agent works on the ticket', async () => {
     fakeTickets.setLabels = vi.fn();
-    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-state', ?, 'design', 1, 'm', 'subscription', 'running', 0)", id);
+    run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at) VALUES ('r-state', ?, (SELECT repo_id FROM tickets WHERE id = ?1), 'design', 1, 'm', 'subscription', 'running', 0)", id);
     const res = await put(id, { skip: true });
     expect(res.status).toBe(409);
     expect(res.body.error).toMatch(/Stop it in the run view first/);
@@ -805,7 +939,7 @@ describe('dismissing Needs you items', () => {
       return { needs: has(o.needsYou), dismissed: has(o.dismissed) };
     };
     const addRun = (rid: string, at: number) =>
-      run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, 'design', 1, 'm', 'subscription', 'failed', ?)", rid, id, at);
+      run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, (SELECT repo_id FROM tickets WHERE id = ?2), 'design', 1, 'm', 'subscription', 'failed', ?)", rid, id, at);
 
     setLabels(['workshop/stage:implement']);
     expect((await dismiss({ dismissed: true })).status).toBe(409);
@@ -888,8 +1022,8 @@ describe('prioritising a ticket', () => {
 describe('alert links', () => {
   it('points run and ticket alerts at a run, and leaves other alerts unlinked', async () => {
     const tid = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
-    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-old', ?, 'design', 1, 'm', 'subscription', 'failed', 1)", tid);
-    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-new', ?, 'design', 2, 'm', 'subscription', 'failed', 2)", tid);
+    run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at) VALUES ('r-old', ?, (SELECT repo_id FROM tickets WHERE id = ?1), 'design', 1, 'm', 'subscription', 'failed', 1)", tid);
+    run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at) VALUES ('r-new', ?, (SELECT repo_id FROM tickets WHERE id = ?1), 'design', 2, 'm', 'subscription', 'failed', 2)", tid);
     for (const [kind, ref] of [['run-detached', 'run:r-old'], ['ticket-failed', `ticket:${tid}`], ['host-offline', 'host:1'], ['gone', 'run:missing']]) {
       run("INSERT INTO alerts (level, kind, message, ref, created_at) VALUES ('error', ?, 'm', ?, 0)", kind, ref);
     }
@@ -917,7 +1051,7 @@ describe('live streams', () => {
   });
 
   const addRun = (id: string, status: string, lines: number) => {
-    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, 'design', 1, 'm', 'subscription', ?, 0)", id, ticket, status);
+    run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, (SELECT repo_id FROM tickets WHERE id = ?2), 'design', 1, 'm', 'subscription', ?, 0)", id, ticket, status);
     for (let i = 0; i < lines; i++) appendLog(id, { step: 'run', stream: 'stdout', text: `line ${i}` });
   };
   const open = async (path: string) => {
@@ -984,7 +1118,7 @@ describe('live streams', () => {
   });
 
   it('drops image data from over-long log lines so they stay readable', async () => {
-    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('live-image', ?, 'design', 1, 'm', 'subscription', 'done', 0)", ticket);
+    run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at) VALUES ('live-image', ?, (SELECT repo_id FROM tickets WHERE id = ?1), 'design', 1, 'm', 'subscription', 'done', 0)", ticket);
     const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'A'.repeat(100_000) } };
     const event = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: [image] }] }, tool_use_result: { file: { base64: 'B'.repeat(100_000) } } };
     appendLog('live-image', { step: 'run', stream: 'stdout', text: JSON.stringify(event) });
@@ -1116,7 +1250,7 @@ describe('pausing and resuming a run', () => {
   });
 
   const add = (id: string, status: string) =>
-    run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, 'implement', 1, 'm', 'subscription', ?, 0)", id, ticket, status);
+    run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at) VALUES (?, ?, (SELECT repo_id FROM tickets WHERE id = ?2), 'implement', 1, 'm', 'subscription', ?, 0)", id, ticket, status);
 
   it('answers 404 for an unknown run', async () => {
     expect((await post('nope', 'pause')).status).toBe(404);

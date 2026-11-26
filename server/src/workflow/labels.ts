@@ -94,6 +94,7 @@ const AGENT_TEXT: Record<AgentName, string> = {
   implement: 'Implement',
   'code-review': 'Code review',
   merge: 'Resolve merge conflicts',
+  task: 'Task',
 };
 
 /** The agents whose runs publish, and the stage each one works in. */
@@ -149,11 +150,12 @@ export function addNeeds(labels: string[], needs: Capability[]) {
 
 /**
  * The image for a run: a repository's own image always wins; Implementation and the Code reviewer on a
- * ticket that needs a browser get the browser image, and so do Design and Design adversary when the Classifier set `ui`.
+ * ticket that needs a browser get the browser image, and so do Design and Design adversary when the Classifier set `ui`,
+ * and a task that asked for a browser (`ui` is the task's browser flag).
  */
 export function imageFor(agent: AgentName, state: TicketState, images: { repo: string | null; base: string; browser: string }, ui = false): string {
   if (images.repo) return images.repo;
-  const browser = ((agent === 'implement' || agent === 'code-review') && state.needs.includes('browser')) || ((agent === 'design' || agent === 'design-review') && ui);
+  const browser = ((agent === 'implement' || agent === 'code-review') && state.needs.includes('browser')) || ((agent === 'design' || agent === 'design-review' || agent === 'task') && ui);
   return browser ? images.browser : images.base;
 }
 

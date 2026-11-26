@@ -2,7 +2,7 @@ import { Link } from 'react-router';
 import type { RunView } from '../../../server/src/api-types.ts';
 import { useApi, useNow } from '../api.ts';
 import { ErrorNote, Status } from '../components/ui.tsx';
-import { AGENT_LABEL, clock, duration, money, runStatus, tokens } from '../format.ts';
+import { AGENT_LABEL, clock, duration, money, runStatus, runSubject, runTitle, tokens } from '../format.ts';
 
 export function Runs() {
   const { data, error } = useApi<RunView[]>('/runs', ['runs']);
@@ -18,7 +18,7 @@ export function Runs() {
             <thead>
               <tr>
                 <th>Started</th>
-                <th>Ticket</th>
+                <th>Ticket or task</th>
                 <th>Agent</th>
                 <th>Model</th>
                 <th>Host</th>
@@ -34,8 +34,8 @@ export function Runs() {
                     <Link to={`/runs/${r.id}`}>{clock(r.startedAt)}</Link>
                   </td>
                   <td>
-                    <Link to={`/tickets/${r.ticketId}`}>{r.ticket}</Link>
-                    <div className="small muted">{r.ticketTitle}</div>
+                    <Link to={runSubject(r).to}>{runSubject(r).text}</Link>
+                    <div className="small muted">{runTitle(r)}</div>
                   </td>
                   <td>
                     {AGENT_LABEL[r.agent]}

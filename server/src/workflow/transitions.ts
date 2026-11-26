@@ -150,6 +150,8 @@ export function planTransition(ctx: PlanContext, result: AgentResult): Plan {
     case 'merge':
       if (ctx.state.stage === 'reconcile') return planReconcile(ctx, r);
       return { add: [], remove: [], publish: true, merge: true };
+    case 'task':
+      return { add: [], remove: [], failure: 'Tasks have no ticket to update.' }; // publishTask handles them
   }
 }
 

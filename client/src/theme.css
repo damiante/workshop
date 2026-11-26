@@ -295,6 +295,33 @@ pre,
   color: var(--muted);
 }
 
+/* A task's description or a run's instructions, as the owner wrote them: plain text, never Markdown. */
+.prompt {
+  margin: 0;
+  max-width: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--raised);
+}
+
+.lifecycle .prompt {
+  padding: 8px 10px;
+  border-radius: 4px;
+}
+
+/* The Code reviewer's findings on a task. */
+.findings {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.findings li {
+  overflow-wrap: anywhere;
+}
+
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));

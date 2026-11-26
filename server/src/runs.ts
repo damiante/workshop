@@ -1,13 +1,21 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AgentName, Billing, LogEntry, PauseReason, RunStatus, RunView } from './api-types.ts';
+import type { AgentName, Billing, LogEntry, PauseReason, RunStatus, RunView, TaskResult } from './api-types.ts';
 import { config } from './config.ts';
 import { all, one } from './db.ts';
 
 export interface RunRow {
   id: string;
-  ticket_id: number;
+  /** Null for a task run. */
+  ticket_id: number | null;
+  /** Null for a ticket run. Exactly one of ticket_id and task_id is set. */
+  task_id: number | null;
+  repo_id: number;
+  /** A task run's instructions; null for ticket runs. */
+  prompt: string | null;
+  /** A task run that asked for the browser image (0 or 1). */
+  browser: number;
   agent: AgentName;
   mode: 'normal' | 'delta';
   attempt: number;
@@ -57,25 +65,50 @@ export const RUNNING_SQL = "status IN ('starting', 'running', 'publishing')";
 
 export const getRun = (id: string) => one<RunRow>('SELECT * FROM runs WHERE id = ?', id);
 
-const VIEW_SQL = `
-  SELECT runs.*, (SELECT COUNT(*) FROM media m WHERE m.run_id = runs.id) AS media_count, t.number, t.title, t.url AS ticket_url, r.full_name, c.name AS env_name
+export const VIEW_SQL = `
+  SELECT runs.*, (SELECT COUNT(*) FROM media m WHERE m.run_id = runs.id) AS media_count, t.number, t.title, t.url AS ticket_url, k.title AS task_title, r.full_name, c.name AS env_name
   FROM runs
-  JOIN tickets t ON t.id = runs.ticket_id
-  JOIN repos r ON r.id = t.repo_id
+  LEFT JOIN tickets t ON t.id = runs.ticket_id
+  LEFT JOIN tasks k ON k.id = runs.task_id
+  JOIN repos r ON r.id = runs.repo_id
   LEFT JOIN connections c ON c.id = runs.environment_id`;
 
-type ViewRow = RunRow & { media_count: number; number: number; title: string; ticket_url: string; full_name: string; env_name: string | null };
+export type ViewRow = RunRow & {
+  media_count: number;
+  number: number | null;
+  title: string | null;
+  ticket_url: string | null;
+  task_title: string | null;
+  full_name: string;
+  env_name: string | null;
+};
+
+/** A task run's stored result, with the optional lists filled in. Null for ticket runs and runs without one. */
+export function taskResultOf(r: Pick<RunRow, 'task_id' | 'result'>): TaskResult | null {
+  if (r.task_id === null || !r.result) return null;
+  try {
+    const v = JSON.parse(r.result) as Partial<TaskResult> & { tests?: string };
+    return { outcome: v.outcome ?? 'done', summary: v.summary ?? '', questions: v.questions ?? [], tests: v.tests ?? null, findings: v.findings ?? [] };
+  } catch {
+    return null;
+  }
+}
 
 /** Latest activity of running agents; in memory only, as it changes every few seconds. */
 export const activity = new Map<string, string>();
 
-function toView(r: ViewRow): RunView {
+export function toView(r: ViewRow): RunView {
   return {
     id: r.id,
     ticketId: r.ticket_id,
-    ticket: `${r.full_name}#${r.number}`,
-    ticketTitle: r.title,
-    ticketUrl: r.ticket_url,
+    ticket: r.ticket_id === null ? null : `${r.full_name}#${r.number}`,
+    ticketTitle: r.ticket_id === null ? null : r.title,
+    ticketUrl: r.ticket_id === null ? null : r.ticket_url,
+    repo: r.full_name,
+    environmentId: r.environment_id,
+    task: r.task_id === null ? null : { id: r.task_id, title: r.task_title ?? '' },
+    prompt: r.task_id === null ? null : r.prompt,
+    result: taskResultOf(r),
     agent: r.agent,
     mode: r.mode,
     attempt: r.attempt,

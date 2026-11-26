@@ -1,4 +1,6 @@
-import type { AgentName, Size } from '../api-types.ts';
+import type { AgentName, Finding, Size } from '../api-types.ts';
+
+export type { Finding };
 import { CAPABILITIES, SIZES, type Capability } from './labels.ts';
 
 export interface ClassifierResult {
@@ -23,19 +25,6 @@ export interface WorkResult {
 
 export const SEVERITIES = ['severe', 'moderate', 'minor'] as const;
 export const CAUSES = ['design', 'implementation'] as const;
-
-/** One problem the Code reviewer found. */
-export interface Finding {
-  severity: (typeof SEVERITIES)[number];
-  cause: (typeof CAUSES)[number];
-  title: string;
-  detail: string;
-  /** How the reviewer checked it. */
-  evidence: string;
-  fix: string;
-  file?: string;
-  line?: number;
-}
 
 export interface ReviewResult extends WorkResult {
   findings?: Finding[];
@@ -136,7 +125,28 @@ const REVIEW_SCHEMA = {
   required: [...WORK_SCHEMA.required, 'findings'],
 };
 
-const SCHEMAS: Partial<Record<AgentName, object>> = { classifier: CLASSIFIER_SCHEMA, 'code-review': REVIEW_SCHEMA };
+/** A task run's result: the work result without media (tasks have no media store), and with nothing about tickets. */
+const TASK_SCHEMA = {
+  ...WORK_SCHEMA,
+  properties: {
+    outcome: WORK_SCHEMA.properties.outcome,
+    summary: { type: 'string', description: 'Your report for the owner, in Markdown: what you did or found. When the task asks a question, the full answer.' },
+    questions: { ...questions, description: 'Specific questions for the owner, who answers them when starting the next agent (needs_info only).' },
+    tests: WORK_SCHEMA.properties.tests,
+  },
+};
+
+/** The Code reviewer's result on a task: its findings, with the task's wording for the rest. */
+const TASK_REVIEW_SCHEMA = {
+  ...TASK_SCHEMA,
+  properties: { ...TASK_SCHEMA.properties, findings: REVIEW_SCHEMA.properties.findings },
+  required: [...TASK_SCHEMA.required, 'findings'],
+};
+
+/** The result schema for an agent working on a task. */
+export const taskSchemaFor = (agent: AgentName) => (agent === 'code-review' ? TASK_REVIEW_SCHEMA : TASK_SCHEMA);
+
+const SCHEMAS: Partial<Record<AgentName, object>> = { classifier: CLASSIFIER_SCHEMA, 'code-review': REVIEW_SCHEMA, task: TASK_SCHEMA };
 
 export const schemaFor = (agent: AgentName) => SCHEMAS[agent] ?? WORK_SCHEMA;
 

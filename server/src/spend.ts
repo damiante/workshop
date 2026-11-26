@@ -7,7 +7,11 @@ export function recordSpend(r: RunRow, res: { inputTokens?: number; outputTokens
   const input = res.inputTokens ?? 0;
   const output = res.outputTokens ?? 0;
   const cost = res.costUsd ?? 0;
-  const where = one<{ full_name: string; number: number }>('SELECT repos.full_name, tickets.number FROM tickets JOIN repos ON repos.id = tickets.repo_id WHERE tickets.id = ?', r.ticket_id);
+  // A task has no ticket: its repository comes from the run.
+  const where = one<{ full_name: string; number: number | null }>(
+    'SELECT repos.full_name, tickets.number FROM runs JOIN repos ON repos.id = runs.repo_id LEFT JOIN tickets ON tickets.id = runs.ticket_id WHERE runs.id = ?',
+    r.id,
+  );
   const conn = r.model_connection_id === null ? undefined : one<{ name: string }>('SELECT name FROM connections WHERE id = ?', r.model_connection_id);
   run(
     'INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd, repo, agent, ticket, connection_id, connection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -132,7 +136,7 @@ export function backfillSpend(schema: 'main' | 'src' = 'main'): { filled: number
                 repos.full_name, runs.agent, tickets.number, connections.id, connections.name
          FROM ${schema}.runs
          LEFT JOIN ${schema}.tickets ON tickets.id = runs.ticket_id
-         LEFT JOIN ${schema}.repos ON repos.id = tickets.repo_id
+         LEFT JOIN ${schema}.repos ON repos.id = ${schema === 'main' ? 'COALESCE(runs.repo_id, tickets.repo_id)' : 'tickets.repo_id'}
          LEFT JOIN ${schema}.connections ON connections.id = runs.model_connection_id
          WHERE (runs.input_tokens IS NOT NULL OR runs.output_tokens IS NOT NULL OR runs.cost_usd IS NOT NULL)
            AND runs.id NOT IN (SELECT run_id FROM main.spend)`,

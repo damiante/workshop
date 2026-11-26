@@ -14,7 +14,7 @@ The Workshop UI: React 19, React Router 8, Vite. Plain CSS with custom propertie
 | `src/access.ts` | Pure: API token lifetimes and the brief the run view's Give Claude access button shows. Tested in `test/` |
 | `src/markdown.ts` | Pure parser: the Markdown subset agents write → block and inline tree. Tested in `test/` |
 | `src/components/` | `Markdown` (renders that tree as React elements, never raw HTML), `Layout` (sidebar, mode switch, allowance meters), `ui.tsx` (`Status`, `Meter`, `Modal`, `Panel`, `ErrorNote`), `ThemeToggle` |
-| `src/pages/` | Login, Dashboard, Tickets, Runs, RunView, Connections, Agents, Settings, Alerts, Ticket (a ticket's lifecycle, `tickets/:id`), Media (a ticket's screenshots, `tickets/:id/media`) |
+| `src/pages/` | Login, Dashboard, Tickets, Tasks (virtual tickets outside the workflow: create one and list them), Task (one task: its runs and outcomes, start another agent, close or reopen, `tasks/:id`), Runs, RunView, Connections, Agents, Settings, Alerts, Ticket (a ticket's lifecycle, `tickets/:id`), Media (a ticket's screenshots, `tickets/:id/media`) |
 | `src/theme.css` | Every colour, size and component style |
 
 ## Data flow

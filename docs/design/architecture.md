@@ -55,9 +55,9 @@ The agent returns a result validated against a JSON schema (`--json-schema`). Wo
 
 ### Run state lives in Docker as well as the database
 
-The requirements asked agents to report back when they finish. Workshop instead follows each container's log stream and waits on it. Containers carry the labels `workshop.run`, `workshop.ticket`, `workshop.agent`, `workshop.step` and `workshop.instance`. A run's status, step and container id are stored. If Workshop restarts or loses contact with a host, the agent keeps working; Workshop re-attaches later and skips the log lines it already has. Hosts never need to reach Workshop.
+The requirements asked agents to report back when they finish. Workshop instead follows each container's log stream and waits on it. Containers carry the labels `workshop.run`, `workshop.ticket` (or `workshop.task`, `owner/repo task <id>`, for a task run), `workshop.agent`, `workshop.step` and `workshop.instance`. A run's status, step and container id are stored. If Workshop restarts or loses contact with a host, the agent keeps working; Workshop re-attaches later and skips the log lines it already has. Hosts never need to reach Workshop.
 
-One agent per ticket is enforced by a unique index over active runs (`runs_one_active_per_ticket`).
+One agent per ticket, and per task, is enforced by unique indexes over active runs (`runs_one_active_per_ticket`, `runs_one_active_per_task`).
 
 ### Reading the 5-hour and weekly allowance
 
@@ -83,6 +83,12 @@ The plan originally used the status-line JSON from an interactive session driven
 ### Merges usually need no LLM
 
 An approved, cleanly mergeable pull request is squash-merged through the API, and the ticket is closed. If GitHub reports the branch behind the base, Workshop uses GitHub's "update branch" (also no LLM). Only real conflicts launch the Merge agent. If new commits dismiss your approval, the ticket goes back to waiting for your review.
+
+### Tasks are virtual tickets
+
+You sometimes want an agent for something that isn't a ticket, the way you'd use Claude Code in a terminal: say, an error in Workshop itself while you're away from your desk, or a question about how something works. A task is a row in `tasks` (repository, title, description, branch, closed time) that you work through by hand: you pick the agent for each run (a general Task agent, Design, Design adversary, Implementation or the Code reviewer) and add instructions. Its runs are rows in `runs` with `task_id` instead of `ticket_id`, so host slots, the allowance, pause and resume, re-attaching after a restart, the run view and spend tracking all work unchanged. One agent works on a task at a time.
+
+Every run is a fresh Claude session. Its prompt holds the task, then each earlier run's instructions and stored result (the report, questions, tests and findings), so a different agent can follow up on an answer. All runs share the task's branch, and the publish step pushes it only when it has commits. A task run never opens a pull request, edits labels, comments or counts failures, and the `run` container still gets no git credentials. Runs start at once or not at all (there's no queue). Task runs outlive the run cleanup, which only removes their logs, so a task's history stays.
 
 ### Host capacity is slots, not LLM-chosen sizes
 
@@ -126,7 +132,8 @@ SQLite at `DATA_DIR/workshop.db` (WAL mode). Migrations are an append-only list 
 | `agent_classes` | Model, billing, effort, prompt override, limits per agent |
 | `repos` | Repositories from the code host; which are enabled; per-repo image |
 | `tickets` | Cached ticket state (labels are the source of truth on GitHub), branch, PR, failure count |
-| `runs` | One row per agent run: status, step, container, volume, result, usage |
+| `runs` | One row per agent run: status, step, container, volume, result, usage; a run belongs to a ticket or a task, and a task run holds its instructions |
+| `tasks` | Virtual tickets you work through by hand: repository, title, description, shared branch, closed time |
 | `alerts` | Alerts and when they were acknowledged |
 | `allowance_samples` | Usage readings and limit blocks |
 

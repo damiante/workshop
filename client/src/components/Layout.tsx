@@ -93,6 +93,7 @@ export function Layout({ version }: { version: string }) {
             Dashboard
           </NavLink>
           <NavLink to="/tickets">Tickets</NavLink>
+          <NavLink to="/tasks">Tasks</NavLink>
           <NavLink to="/runs">Runs</NavLink>
           <NavLink to="/connections">Connections</NavLink>
           <NavLink to="/agents">Agents</NavLink>

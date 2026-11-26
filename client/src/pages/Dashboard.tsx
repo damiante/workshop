@@ -3,19 +3,20 @@ import { Link } from 'react-router';
 import type { ConnectionView, Overview, RepoView, RunView, Settings, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi, useNow } from '../api.ts';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
-import { AGENT_LABEL, clock, duration, runStatus } from '../format.ts';
+import { AGENT_LABEL, clock, duration, runStatus, runSubject, runTitle } from '../format.ts';
 
 function RunLine({ run, now }: { run: RunView; now: number }) {
   const status = runStatus(run);
+  const subject = runSubject(run);
   return (
     <div className="stack" style={{ gap: 4 }}>
       <div className="spread">
         <span>
-          <Link to={`/runs/${run.id}`}>{AGENT_LABEL[run.agent]}</Link> on <Link to={`/tickets/${run.ticketId}`}>{run.ticket}</Link>
+          <Link to={`/runs/${run.id}`}>{AGENT_LABEL[run.agent]}</Link> on <Link to={subject.to}>{run.task ? `Task ${run.task.id}` : subject.text}</Link>
         </span>
         <Status tone={status.tone}>{status.label}</Status>
       </div>
-      <span>{run.ticketTitle}</span>
+      <span>{runTitle(run)}</span>
       {run.activity && <span className="mono muted">{run.activity}</span>}
       <div className="row small muted">
         <span>{run.model}</span>
@@ -202,6 +203,13 @@ export function Dashboard() {
                   </div>
                   {!h.available && <span className="small muted">Switched off for new agents</span>}
                   {h.specs && <span className="small muted">{h.specs}</span>}
+                  {data.running
+                    .filter((r) => r.environmentId === h.id && r.status !== 'paused')
+                    .map((r) => (
+                      <Link key={r.id} className="small" to={`/runs/${r.id}`}>
+                        {AGENT_LABEL[r.agent]}: {r.task ? `Task ${r.task.id}` : r.ticket}
+                      </Link>
+                    ))}
                 </li>
               ))}
             </ul>

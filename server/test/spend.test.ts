@@ -7,7 +7,7 @@ import { backfillSpend, lifetimeSpend } from '../src/spend.ts';
 
 const spendOf = (id: string) => one<{ repo: string | null; agent: string | null; ticket: number | null }>('SELECT repo, agent, ticket FROM spend WHERE run_id = ?', id)!;
 const addRun = (id: string, ticket: number, usage: number | null) =>
-  run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, input_tokens, started_at) VALUES (?, ?, 'design', 1, 'm', 'subscription', 'succeeded', ?, 5)", id, ticket, usage);
+  run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, input_tokens, started_at) VALUES (?, ?, (SELECT repo_id FROM tickets WHERE id = ?2), 'design', 1, 'm', 'subscription', 'succeeded', ?, 5)", id, ticket, usage);
 
 let ticket: number;
 
@@ -34,6 +34,14 @@ describe('backfillSpend', () => {
     expect(spendOf('missing')).toEqual({ repo: 'me/app', agent: 'design', ticket: 7 });
     expect(all('SELECT id FROM spend WHERE run_id = ?', 'nousage')).toHaveLength(0);
     expect(backfillSpend('main')).toEqual({ filled: 0, added: 0 });
+  });
+
+  it("adds a task's missing row with its repository and no ticket", () => {
+    const repo = one<{ id: number }>('SELECT id FROM repos')!.id;
+    const task = run("INSERT INTO tasks (repo_id, title, body, branch, created_at, updated_at) VALUES (?, 'Do it', 'Do it', 'workshop/task-1-do-it', 0, 0)", repo).lastInsertRowid;
+    run("INSERT INTO runs (id, task_id, repo_id, agent, attempt, model, billing, status, input_tokens, started_at) VALUES ('task', ?, ?, 'task', 1, 'm', 'api', 'succeeded', 3, 5)", task, repo);
+    expect(backfillSpend('main')).toEqual({ filled: 0, added: 1 });
+    expect(spendOf('task')).toEqual({ repo: 'me/app', agent: 'task', ticket: null });
   });
 
   it('recovers deleted runs from an attached older database', () => {

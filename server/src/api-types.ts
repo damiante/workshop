@@ -1,6 +1,6 @@
 // Types shared with the client (imported type-only). Keep this file free of runtime imports.
 
-export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media';
+export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media' | 'tasks';
 
 export type Mode = 'paused' | 'scheduled' | 'always';
 
@@ -94,7 +94,7 @@ export interface RepoView {
   mergeWarning: string | null;
 }
 
-export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'code-review' | 'merge';
+export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'code-review' | 'merge' | 'task';
 export type Billing = 'subscription' | 'api';
 
 export interface AgentClassView {
@@ -177,10 +177,22 @@ export type RunStatus = 'starting' | 'running' | 'publishing' | 'paused' | 'succ
 
 export interface RunView {
   id: string;
-  ticketId: number;
-  ticket: string;
-  ticketTitle: string;
-  ticketUrl: string;
+  /** The ticket fields are null for a task run (an agent you started on a task, outside the ticket workflow). */
+  ticketId: number | null;
+  /** owner/repo#12 */
+  ticket: string | null;
+  ticketTitle: string | null;
+  ticketUrl: string | null;
+  /** The repository's full name, owner/repo. */
+  repo: string;
+  /** The agent host's connection id. */
+  environmentId: number | null;
+  /** The task a task run belongs to; null for ticket runs. */
+  task: TaskRef | null;
+  /** A task run's instructions, as you wrote them; null for ticket runs and task runs without any. */
+  prompt: string | null;
+  /** A task run's reported outcome, once the agent returned one; null for ticket runs. */
+  result: TaskResult | null;
   agent: AgentName;
   mode: 'normal' | 'delta';
   attempt: number;
@@ -211,6 +223,77 @@ export interface RunView {
   timeoutMin: number | null;
   /** When the current step's container started: the time limit counts from here. */
   stepStartedAt: number | null;
+}
+
+export interface TaskRef {
+  id: number;
+  title: string;
+}
+
+/** One problem the Code reviewer found. */
+export interface Finding {
+  severity: 'severe' | 'moderate' | 'minor';
+  cause: 'design' | 'implementation';
+  title: string;
+  detail: string;
+  /** How the reviewer checked it. */
+  evidence: string;
+  fix: string;
+  file?: string;
+  line?: number;
+}
+
+/** What an agent on a task reported when it finished. */
+export interface TaskResult {
+  outcome: 'done' | 'needs_info' | 'failed';
+  /** The agent's report, in Markdown. When the task asked a question, it holds the answer. */
+  summary: string;
+  /** Questions for you (needs_info); answer them when you start the next agent. */
+  questions: string[];
+  tests: string | null;
+  /** The Code reviewer's findings; empty for other agents. */
+  findings: Finding[];
+}
+
+export interface TaskSummary {
+  id: number;
+  /** owner/repo */
+  repo: string;
+  title: string;
+  closed: boolean;
+  /** The branch every agent on the task shares, workshop/task-<id>-<title>. */
+  branch: string;
+  /** Set once Workshop pushed the branch with commits on it. */
+  branchUrl: string | null;
+  createdAt: number;
+  updatedAt: number;
+  /** How many agents have run on the task. */
+  runs: number;
+  /** The newest run, if any. */
+  latest: RunView | null;
+}
+
+export interface TaskView extends Omit<TaskSummary, 'runs'> {
+  /** The description, as you wrote it. */
+  body: string;
+  /** Every run on the task, oldest first. */
+  runs: RunView[];
+  /** The agents you can start on a task. */
+  agents: AgentName[];
+}
+
+export interface TaskRepo {
+  id: number;
+  fullName: string;
+}
+
+export interface TasksView {
+  /** Every repository Workshop can see, enabled ones first. */
+  repos: TaskRepo[];
+  /** The agents you can start on a task. */
+  agents: AgentName[];
+  /** Open tasks first, then by when they last changed, newest first. */
+  tasks: TaskSummary[];
 }
 
 export type PauseReason = 'limit' | 'threshold' | 'manual' | 'connection';

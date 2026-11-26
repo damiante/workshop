@@ -1,7 +1,7 @@
 import type { AgentClassView, AgentName, Billing } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import { publish } from './events.ts';
-import { AGENT_INFO, AGENT_NAMES, DEFAULT_PROMPTS, protocolText, publishes } from './workflow/prompts.ts';
+import { AGENT_INFO, AGENT_NAMES, DEFAULT_PROMPTS, protocolText, publishes, taskProtocolText } from './workflow/prompts.ts';
 
 export interface AgentRow {
   name: AgentName;
@@ -22,6 +22,7 @@ const SUGGESTED_MODELS: Record<AgentName, string> = {
   implement: 'claude-sonnet-5-5',
   'code-review': 'claude-opus-5-5',
   merge: 'claude-sonnet-5-5',
+  task: 'claude-opus-5-5',
 };
 
 export function seedAgents() {
@@ -49,7 +50,10 @@ export function agentViews(): AgentClassView[] {
       prompt: promptFor(row),
       defaultPrompt: DEFAULT_PROMPTS[name],
       customised: row.prompt !== null,
-      protocol: protocolText({ branch: 'workshop/<number>-<title>', base: '<default branch>', publishes: publishes(name) }),
+      protocol:
+        name === 'task'
+          ? taskProtocolText({ branch: 'workshop/task-<id>-<title>', base: '<default branch>', publishes: true })
+          : protocolText({ branch: 'workshop/<number>-<title>', base: '<default branch>', publishes: publishes(name) }),
       maxTurns: row.max_turns,
       timeoutMin: row.timeout_min,
     };

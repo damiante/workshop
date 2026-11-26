@@ -9,12 +9,13 @@ import { publish } from '../events.ts';
 import { readClaudeLine, type ClaudeRun } from '../providers/anthropic/index.ts';
 import { environmentOf, getConnection, listConnections, modelsOf, setConnectionStatus } from '../providers/index.ts';
 import { appendLog, deleteLog, getRun, RUNNING_SQL, type RunRow } from '../runs.ts';
-import { check } from '../http/util.ts';
+import { check, HttpError } from '../http/util.ts';
 import { sweepExpiredTokens } from '../http/tokens.ts';
 import { getSettings } from '../settings.ts';
+import { activeTaskRunId, createTask, deleteTask, getTask, type TaskRow } from '../tasks.ts';
 import { activeRunId, blockersOf, getRepo, getTicket, isAllowedAuthor, labelsOf, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
-import { AGENT_INFO } from '../workflow/prompts.ts';
+import { AGENT_INFO, TASK_AGENTS } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, pickSubscription, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 import { abortRun, cancelPause, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
@@ -30,6 +31,8 @@ let clock: ClockState | null = null;
 const lastSync = new Map<number, number>();
 const hostFailures = new Map<number, number>();
 const probing = new Set<number>();
+/** Allowance checks in flight, so a task can wait for one that's already running. */
+const probes = new Map<number, Promise<unknown>>();
 const probeFailedAt = new Map<number, number>();
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -232,13 +235,20 @@ export function resumePaused(s: Settings, now: number) {
       } else if (r.pause_reason !== 'manual') {
         // Nothing can take it over: start the stage again once a subscription can.
         const name = getConnection(r.model_connection_id)!.name;
-        void abortRun(r.id, `${name} was paused and no other Claude subscription offers ${r.model}, so Workshop stopped this agent. A new one starts this stage again when a subscription is free.`);
+        const why = `${name} was paused and no other Claude subscription offers ${r.model}`;
+        void abortRun(
+          r.id,
+          r.ticket_id === null
+            ? `${why}, so Workshop stopped this agent. Start another agent from the task's page.`
+            : `${why}, so Workshop stopped this agent. A new one starts this stage again when a subscription is free.`,
+        );
         continue;
       }
     }
     if (r.pause_reason === 'manual') continue; // waits for you to resume it (Resume explains a paused subscription)
     // A run moving off a paused subscription was already working, so the operation mode and hours don't hold it.
-    if (modeReason && r.pause_reason !== 'connection' && !getTicket(r.ticket_id)?.push) continue;
+    // Neither do they hold a task or a ticket you pushed: you asked for those.
+    if (modeReason && r.pause_reason !== 'connection' && r.ticket_id !== null && !getTicket(r.ticket_id)?.push) continue;
     // A threshold pause also ends early when you raise that subscription's limits: allowanceBlock below decides.
     if (r.pause_reason !== 'threshold' && r.resets_at && r.resets_at > now) continue;
     if (r.billing === 'subscription' && r.model_connection_id) {
@@ -271,6 +281,7 @@ export interface Candidate {
 function startCandidate(c: Candidate): string | null {
   return launch({
     ticketId: c.ticket.id,
+    repoId: c.repo.id,
     agent: c.agent,
     mode: c.mode,
     attempt: c.ticket.failures + 1,
@@ -343,6 +354,124 @@ const ORDER_SQL: Record<TicketOrder, string> = {
   'created-desc': 'COALESCE(t.created_at, t.updated_at) DESC',
 };
 
+interface Gate {
+  blockedBy: string | null;
+  modelConnectionId: number | null;
+  model: string | null;
+  billing: Billing;
+}
+
+/**
+ * The gates every agent launch passes, ticket or task: a model is chosen, its connection offers the billing,
+ * the API cap or a subscription's allowance, and a free host. Returns the first reason it waits, if any.
+ */
+function agentGate(agent: AgentName, pool: ReturnType<typeof subscriptions>, spentToday: number, s: Settings, hostId: number | null, hosts: HostLoad[]): Gate {
+  const cls = getAgent(agent);
+  const conn = getConnection(cls.model_connection_id);
+  const name = AGENT_INFO[agent].label;
+  const gate = (blockedBy: string | null, connectionId = conn?.id ?? null): Gate => ({ blockedBy, modelConnectionId: connectionId, model: cls.model, billing: cls.billing });
+  if (!cls.model || !conn) return gate(`Choose a model for ${name} on the Agents page`);
+  if (!modelsOf(conn).billing().includes(cls.billing)) return gate(`${conn.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`);
+  let useConnection = conn.id;
+  let blockedBy: string | null;
+  // API-billed agents use their connection's key, paused or not: pausing only manages subscriptions.
+  if (cls.billing === 'api') blockedBy = apiCapBlock(spentToday, s);
+  else {
+    const pick = pickSubscription(offering(pool, conn.provider, cls.model, conn.id));
+    if (pick) {
+      useConnection = pick.id;
+      blockedBy = pick.block;
+    } else if (pool.some((c) => c.provider === conn.provider)) blockedBy = `No Claude subscription that isn't paused offers ${cls.model}. Resume one on the Connections page`;
+    else blockedBy = 'Every Claude subscription is paused. Resume one on the Connections page';
+  }
+  if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
+  return gate(blockedBy, useConnection);
+}
+
+/** The gates for an agent on a task now. The operation mode and hours never hold a task run: you started it. */
+function taskGate(agent: AgentName): Gate & { hostId: number | null } {
+  const s = getSettings();
+  const now = Date.now();
+  const hosts = hostLoads();
+  const hostId = pickHost(hosts);
+  return { ...agentGate(agent, subscriptions(s, now), apiSpendSince(startOfDay(now, s.timezone)), s, hostId, hosts), hostId };
+}
+
+/** The most characters a task's description, or a run's instructions, may have. */
+export const MAX_TASK_PROMPT = 20_000;
+
+/**
+ * The gates for an agent on a task, now. There's no queue, so a closed gate refuses it (409). A stale allowance
+ * reading is read again first, so an idle instance doesn't refuse with "Checking allowance".
+ */
+async function openTaskGate(agent: AgentName) {
+  let gate = taskGate(agent);
+  if (gate.blockedBy === 'Checking allowance' && gate.modelConnectionId) {
+    try {
+      // Wait for a check that's already running (the tick's, or Refresh) rather than refusing meanwhile.
+      const running = probes.get(gate.modelConnectionId);
+      await (running ?? probeAllowance(gate.modelConnectionId, true));
+    } catch (err) {
+      throw new HttpError(409, `Can't start the agent yet: Workshop couldn't read your Claude usage (${(err as Error).message.replace(/\.+$/, '')}).`);
+    }
+    gate = taskGate(agent);
+  }
+  check(!gate.blockedBy, `Can't start the agent yet: ${gate.blockedBy}.`, 409);
+  return gate;
+}
+
+/**
+ * Starts an agent on a task now, with your instructions: the same gates as Start now on a ticket, and one agent
+ * at a time per task. Returns the run id.
+ */
+export async function startTaskRun(p: { task: TaskRow; agent: AgentName; prompt: string | null; browser: boolean }): Promise<string> {
+  check(TASK_AGENTS.includes(p.agent), TASK_AGENT_ERROR);
+  check(!p.task.closed_at, 'Reopen this task to start another agent.', 409);
+  check(!activeTaskRunId(p.task.id), 'An agent is already working on this task.', 409);
+  const gate = await openTaskGate(p.agent);
+  // The gate may have waited, and the task may have been closed meanwhile. No await from here to the insert,
+  // so closing the task can't miss the new run.
+  const task = getTask(p.task.id);
+  check(task && !task.closed_at, 'Reopen this task to start another agent.', 409);
+  const id = launch({
+    ticketId: null,
+    taskId: task.id,
+    repoId: task.repo_id,
+    prompt: p.prompt,
+    browser: p.browser,
+    agent: p.agent,
+    mode: 'normal',
+    attempt: 1,
+    environmentId: gate.hostId!,
+    modelConnectionId: gate.modelConnectionId!,
+    model: gate.model!,
+    billing: gate.billing,
+  });
+  check(id, 'An agent is already working on this task.', 409);
+  return id;
+}
+
+export const TASK_AGENT_ERROR = `Choose one of these agents: ${TASK_AGENTS.map((a) => AGENT_INFO[a].label).join(', ')}.`;
+
+/**
+ * Creates a task on a repository and starts its first agent. The gate is checked before anything is stored,
+ * so a refusal leaves no task behind. Returns the task id.
+ */
+export async function newTask(p: { repoId: number; title: string; body: string; agent: AgentName; browser: boolean }): Promise<number> {
+  const repo = getRepo(p.repoId);
+  check(repo, 'Repository not found.', 404);
+  check(TASK_AGENTS.includes(p.agent), TASK_AGENT_ERROR);
+  await openTaskGate(p.agent);
+  const task = createTask({ repoId: repo.id, title: p.title, body: p.body });
+  try {
+    await startTaskRun({ task, agent: p.agent, prompt: null, browser: p.browser });
+  } catch (err) {
+    deleteTask(task.id);
+    throw err;
+  }
+  return task.id;
+}
+
 /** Every ticket Workshop could work on next, in order, each with the reason it's waiting (if any). */
 export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: { ignoreMode?: boolean } = {}): Candidate[] {
   const hosts = hostLoads();
@@ -366,27 +495,10 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const agent: AgentName = step.kind === 'merge' ? 'merge' : step.agent;
     const mode = step.kind === 'merge' ? 'normal' : step.mode;
     const priorityReason = opts.ignoreMode ? null : priorityBlock(repo.priority, waiting);
-    const cls = getAgent(agent);
-    const conn = getConnection(cls.model_connection_id);
-    const name = AGENT_INFO[agent].label;
-    let blockedBy = dependencyBlock(blockersOf(t)) ?? (t.push ? null : modeReason ?? (t.prioritised ? null : priorityReason));
-    if (!blockedBy && (!cls.model || !conn)) blockedBy = `Choose a model for ${name} on the Agents page`;
-    if (!blockedBy && !modelsOf(conn!).billing().includes(cls.billing)) {
-      blockedBy = `${conn!.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`;
-    }
-    let useConnection = conn;
-    // API-billed agents use their connection's key, paused or not: pausing only manages subscriptions.
-    if (!blockedBy && cls.billing === 'api') blockedBy = apiCapBlock(spentToday, s);
-    else if (!blockedBy) {
-      const pick = pickSubscription(offering(pool, conn!.provider, cls.model!, conn!.id));
-      if (pick) {
-        useConnection = getConnection(pick.id);
-        blockedBy = pick.block;
-      } else if (pool.some((c) => c.provider === conn!.provider)) blockedBy = `No Claude subscription that isn't paused offers ${cls.model}. Resume one on the Connections page`;
-      else blockedBy = 'Every Claude subscription is paused. Resume one on the Connections page';
-    }
-    if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), priority: stepPriority(step), repoPriority: repo.priority });
+    const ticketReason = dependencyBlock(blockersOf(t)) ?? (t.push ? null : modeReason ?? (t.prioritised ? null : priorityReason));
+    const gate = agentGate(agent, pool, spentToday, s, hostId, hosts);
+    const blockedBy = ticketReason ?? gate.blockedBy;
+    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: gate.modelConnectionId, model: gate.model, billing: gate.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), priority: stepPriority(step), repoPriority: repo.priority });
   }
   // The sort is stable, so the ticket order setting (from the query) decides ties.
   return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.prioritised) - Number(a.prioritised) || b.repoPriority - a.repoPriority || a.priority - b.priority);
@@ -415,8 +527,14 @@ export const forgetProbe = (connectionId: number) => probeFailedAt.delete(connec
 /** The last allowance check of this connection failed less than 10 minutes ago. */
 const probeFailing = (connectionId: number, now: number) => now - (probeFailedAt.get(connectionId) ?? 0) < 10 * 60_000;
 
-export async function probeAllowance(connectionId: number, force = false) {
-  if (probing.has(connectionId)) return;
+export function probeAllowance(connectionId: number, force = false) {
+  if (probing.has(connectionId)) return Promise.resolve(undefined);
+  const probe = readAllowance(connectionId, force);
+  probes.set(connectionId, probe);
+  return probe.finally(() => probes.delete(connectionId));
+}
+
+async function readAllowance(connectionId: number, force: boolean) {
   if (!force && probeFailing(connectionId, Date.now())) return;
   const conn = getConnection(connectionId);
   if (!conn?.secret.oauthToken) throw new Error('This Claude connection has no subscription token.');
@@ -464,11 +582,13 @@ export async function probeAllowance(connectionId: number, force = false) {
   }
 }
 
-async function cleanup(s: Settings) {
+export async function cleanup(s: Settings) {
   const cutoff = Date.now() - s.retentionDays * 86400_000;
   let deleted = false;
   for (const r of all<RunRow>("SELECT * FROM runs WHERE status IN ('succeeded', 'failed', 'cancelled', 'lost') AND ended_at < ?", cutoff)) {
     deleteLog(r.id);
+    // A task's runs are its history: their outcomes stay on the task page and in later runs' prompts.
+    if (r.task_id !== null) continue;
     run('DELETE FROM runs WHERE id = ?', r.id);
     deleted = true;
   }

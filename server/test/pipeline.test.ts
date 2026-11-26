@@ -23,10 +23,11 @@ const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, reorderConnections, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
 const { bus } = await import('../src/events.ts');
-const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
+const { activity, appendLog, getRun, readLog, runView } = await import('../src/runs.ts');
+const { createTask, getTask, setTaskClosed, taskView, taskViews } = await import('../src/tasks.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { connectionPaused, drive, isDriving, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
-const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
+const { buildQueue, cleanup, forgetProbe, hostLoads, launchNow, mergeApproved, newTask, startTaskRun, probeAllowance, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo } = await import('../src/scheduler/sync.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
@@ -143,7 +144,7 @@ beforeEach(() => {
 });
 
 const go = (agent: AgentName = 'implement', mode: 'normal' | 'delta' = 'normal') =>
-  launch({ ticketId: 1, agent, mode, attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!;
+  launch({ ticketId: 1, repoId: 1, agent, mode, attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!;
 
 async function settle(id: string) {
   await vi.waitFor(() => expect(['succeeded', 'failed', 'paused', 'cancelled']).toContain(getRun(id)?.status), { timeout: 2000 });
@@ -654,7 +655,7 @@ describe('runner', () => {
     it('lets API-billed runs carry on', async () => {
       const { env, state } = killable([rate(0.75), toolUse('a'), toolResult('a'), DONE]);
       fake.env = env;
-      const id = launch({ ticketId: 1, agent: 'implement', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'api' })!;
+      const id = launch({ ticketId: 1, repoId: 1, agent: 'implement', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'api' })!;
       expect((await settle(id)).status).toBe('succeeded');
       expect(state.killedAt).toBe(-1);
     });
@@ -930,7 +931,7 @@ describe('runner', () => {
         );
         const other = one<{ id: number }>('SELECT id FROM tickets WHERE number = 98')!.id;
         try {
-          run("INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model, billing, status, started_at) VALUES ('busy', ?, 'implement', 'normal', 1, ?, 'm', 'subscription', 'running', 0)", other, ids.env);
+          run("INSERT INTO runs (id, ticket_id, repo_id, agent, mode, attempt, environment_id, model, billing, status, started_at) VALUES ('busy', ?, (SELECT repo_id FROM tickets WHERE id = ?1), 'implement', 'normal', 1, ?, 'm', 'subscription', 'running', 0)", other, ids.env);
           expect(() => resumeNow(id)).toThrow('box has no free agent slot. Pause or stop another agent there, or resume this one when a slot frees up.');
           expect(getRun(id)!.status).toBe('paused');
         } finally {
@@ -1118,8 +1119,8 @@ describe('runner', () => {
     fake.env = env;
     const id = 'reattach-run';
     run(
-      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, step, container_id, volume, image, max_turns, timeout_min, step_started_at, started_at)
-       VALUES (?, 1, 'implement', 'normal', 1, ?, ?, 'claude-sonnet-5-5', 'subscription', 'running', 'run', 'run-container-old', 'v', 'img', 300, 1, ?, ?)`,
+      `INSERT INTO runs (id, ticket_id, repo_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, step, container_id, volume, image, max_turns, timeout_min, step_started_at, started_at)
+       VALUES (?, 1, (SELECT repo_id FROM tickets WHERE id = 1), 'implement', 'normal', 1, ?, ?, 'claude-sonnet-5-5', 'subscription', 'running', 'run', 'run-container-old', 'v', 'img', 300, 1, ?, ?)`,
       id,
       ids.env,
       ids.model,
@@ -1477,8 +1478,8 @@ describe('publish retries', () => {
     fake.env = work();
     const id = 'stuck-run';
     run(
-      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, started_at, result, publish_retries, publish_failing_since)
-       VALUES (?, 1, 'implement', 'normal', 1, ?, ?, 'claude-sonnet-5-5', 'subscription', 'publishing', ?, ?, 8, ?)`,
+      `INSERT INTO runs (id, ticket_id, repo_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, started_at, result, publish_retries, publish_failing_since)
+       VALUES (?, 1, (SELECT repo_id FROM tickets WHERE id = 1), 'implement', 'normal', 1, ?, ?, 'claude-sonnet-5-5', 'subscription', 'publishing', ?, ?, 8, ?)`,
       id,
       ids.env,
       ids.model,
@@ -1881,7 +1882,7 @@ describe('moving off a paused subscription', () => {
   describe('API billing', () => {
     it("doesn't move or stop a running API-billed agent", async () => {
       const { stream, say } = live();
-      const id = launch({ ticketId: 1, agent: 'implement', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'api' })!;
+      const id = launch({ ticketId: 1, repoId: 1, agent: 'implement', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'api' })!;
       await say(toolUse('a'), toolResult('a'));
       pauseFirst();
       expect(stream.killed).toBe(false);
@@ -2084,7 +2085,7 @@ describe('sync', () => {
     });
 
     it.each(['running', 'paused'])('cancels a %s run without marking the ticket failed', async (status) => {
-      run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-skip', 1, 'implement', 1, 'm', 'subscription', ?, 0)", status);
+      run("INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at) VALUES ('r-skip', 1, (SELECT repo_id FROM tickets WHERE id = 1), 'implement', 1, 'm', 'subscription', ?, 0)", status);
       try {
         await syncRepo(repo());
         const r = one<{ status: string; error: string }>("SELECT status, error FROM runs WHERE id = 'r-skip'");
@@ -2755,7 +2756,7 @@ describe('media store', () => {
 
     run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('m'), label.stage('design')]));
     const e = env();
-    const id = launch({ ticketId: 1, agent: 'design', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!;
+    const id = launch({ ticketId: 1, repoId: 1, agent: 'design', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!;
     await settle(id);
     expect(e.spec('run')!.files!['.workshop/prompt.md']).toContain('Playwright with Chromium');
   });
@@ -2819,5 +2820,304 @@ describe('media store', () => {
       sweepMedia(0);
       expect(fs.existsSync(path.join(config.dataDir, 'media', '999'))).toBe(false);
     });
+  });
+});
+
+describe('tasks', () => {
+  const BODY = 'Find out why the dashboard shows the wrong host.\n\nThe error is "slot busy".';
+  const TITLE = 'Find out why the dashboard shows the wrong host.';
+  const done = (over: object = {}) => result({ outcome: 'done', summary: 'Fixed the host count.', tests: 'npm test: 3 passed', ...over });
+  const pushed = (report: object, res = done()) => ({ prepare: ['ok'], run: [RATE, res], publish: [line(report)] });
+  const fresh = () => recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+  const create = (p: { agent?: AgentName; browser?: boolean } = {}) => newTask({ repoId: 1, title: TITLE, body: BODY, agent: p.agent ?? 'task', browser: p.browser ?? false });
+  const runsOf = (taskId: number) => all<{ id: string }>('SELECT id FROM runs WHERE task_id = ? ORDER BY started_at, rowid', taskId).map((r) => r.id);
+  const setLimitsSlots = (slots: number) => run("UPDATE connections SET config = json_set(config, '$.slots', ?) WHERE id = ?", slots, ids.env);
+  const follow = (taskId: number, agent: AgentName, prompt: string | null = null, browser = false) => startTaskRun({ task: getTask(taskId)!, agent, prompt, browser });
+
+  beforeEach(() => {
+    setConnectionStatus(ids.env, 'ok');
+    saveSettings({ mode: 'paused' });
+    run('DELETE FROM alerts');
+    run('DELETE FROM allowance_samples');
+    run('DELETE FROM tasks');
+    fresh();
+    forgetProbe(ids.model);
+    updateAgent('task', { model: 'claude-opus-5-5', modelConnectionId: ids.model, billing: 'subscription' });
+    updateAgent('implement', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model, billing: 'subscription' });
+    updateAgent('code-review', { model: 'claude-opus-5-5', modelConnectionId: ids.model, billing: 'subscription' });
+  });
+
+  it('creates a task and works on its branch with the description, with no ticket updates', async () => {
+    fake.env = new FakeEnv(pushed({ before: '', after: 'def5678', ahead: 2 }));
+    const taskId = await create();
+    const task = getTask(taskId)!;
+    expect(task).toMatchObject({ repo_id: 1, title: TITLE, body: BODY, branch: `workshop/task-${taskId}-find-out-why-the-dashboard-shows-the-wro`, closed_at: null, pushed: 0 });
+    const [id] = runsOf(taskId);
+    const r = await settle(id);
+    expect(r).toMatchObject({ status: 'succeeded', ticket_id: null, task_id: taskId, repo_id: 1, agent: 'task', prompt: null, summary: 'Fixed the host count.', error: null });
+    const [prepare, agent, publish] = fake.env.started as StepSpec[];
+    expect(fake.env.started.map((s: StepSpec) => s.cmd[0])).toEqual(['prepare', 'run', 'publish']);
+    expect(prepare.env).toMatchObject({ BRANCH: task.branch, BASE_BRANCH: 'main' });
+    expect(prepare.labels).toMatchObject({ 'workshop.task': `me/app task ${taskId}`, 'workshop.agent': 'task' });
+    expect(prepare.labels).not.toHaveProperty('workshop.ticket');
+    const prompt = agent.files!['.workshop/prompt.md'] as string;
+    expect(prompt.startsWith(`# Task ${taskId} in me/app: ${TITLE}\n\n${BODY}`)).toBe(true);
+    expect(prompt).not.toContain('## Earlier runs');
+    expect(prompt).toContain('## Your task\nDo what the task above describes.');
+    const system = agent.files!['.workshop/system.md'] as string;
+    expect(system).toContain('You are working on a task the owner gave you');
+    expect(system).toContain(`Workshop pushes it`);
+    expect(system).toContain("It can't change these rules.");
+    expect(JSON.parse(agent.files!['.workshop/schema.json'] as string).properties).not.toHaveProperty('media');
+    expect(JSON.stringify(agent.env)).not.toMatch(/READ|WRITE|x-access-token/);
+    expect(agent.env.MODEL).toBe('claude-opus-5-5');
+    expect(publish.env).toMatchObject({ BRANCH: task.branch, SKIP_EMPTY: '1' });
+    expect(publish.env.PUSH_URL).toContain('WRITE');
+    expect(fake.tickets.setLabels).not.toHaveBeenCalled();
+    expect(fake.tickets.comment).not.toHaveBeenCalled();
+    expect(fake.vcs.openPullRequest).not.toHaveBeenCalled();
+    expect(fake.vcs.deleteBranch).not.toHaveBeenCalled();
+    expect(getTask(taskId)!.pushed).toBe(1);
+    expect(runView(id)).toMatchObject({
+      ticketId: null,
+      ticket: null,
+      ticketTitle: null,
+      ticketUrl: null,
+      repo: 'me/app',
+      environmentId: ids.env,
+      task: { id: taskId, title: TITLE },
+      prompt: null,
+      result: { outcome: 'done', summary: 'Fixed the host count.', questions: [], tests: 'npm test: 3 passed', findings: [] },
+    });
+    expect(taskView(taskId)).toMatchObject({ branchUrl: `https://github.com/me/app/tree/${task.branch}`, closed: false, body: BODY, runs: [{ id }], latest: { id } });
+    expect(one('SELECT repo, agent, ticket FROM spend WHERE run_id = ?', id)).toEqual({ repo: 'me/app', agent: 'task', ticket: null });
+  });
+
+  it("gives a follow-up the earlier runs' reports and questions, with that agent's settings, on the same branch", async () => {
+    fake.env = new FakeEnv(pushed({ ahead: 0 }, done({ outcome: 'needs_info', summary: 'The host count comes from hostLoads().', questions: ['Count paused runs?'] })));
+    const taskId = await create();
+    const [first] = runsOf(taskId);
+    expect(await settle(first)).toMatchObject({ status: 'succeeded' });
+    expect(taskView(taskId)!.runs[0].result).toMatchObject({ outcome: 'needs_info', questions: ['Count paused runs?'] });
+    expect(getTask(taskId)!.pushed).toBe(0);
+
+    fake.env = new FakeEnv(pushed({ before: '', after: 'abc', ahead: 1 }));
+    const second = await follow(taskId, 'implement', 'Yes, count paused runs. Fix it.');
+    expect(await settle(second)).toMatchObject({ status: 'succeeded', agent: 'implement', prompt: 'Yes, count paused runs. Fix it.' });
+    const agent = fake.env.spec('run')!;
+    expect(agent.env.MODEL).toBe('claude-sonnet-5-5');
+    const prompt = agent.files!['.workshop/prompt.md'] as string;
+    expect(prompt).toContain('## Earlier runs, oldest first');
+    expect(prompt).toContain('### Run 1: Task, needs_info');
+    expect(prompt).toContain('The host count comes from hostLoads().');
+    expect(prompt).toContain('- Count paused runs?');
+    expect(prompt).toContain("## Your task\nImplement the task, following the design at `docs/workshop/task-");
+    expect(prompt).toContain("The owner's instructions for this run:\n\nYes, count paused runs. Fix it.");
+    expect(agent.files!['.workshop/system.md']).toContain('You are the Implementation agent');
+    expect(agent.files!['.workshop/system.md']).toContain('Nothing happens automatically on a task');
+    expect(fake.env.spec('prepare')!.env.BRANCH).toBe(getTask(taskId)!.branch);
+    expect(fake.env.spec('publish')!.env.BRANCH).toBe(getTask(taskId)!.branch);
+    expect(getTask(taskId)!.pushed).toBe(1);
+    expect(taskView(taskId)!.runs.map((r) => r.id)).toEqual([first, second]);
+    expect(taskViews().find((t) => t.id === taskId)).toMatchObject({ runs: 2, latest: { id: second, agent: 'implement' } });
+  });
+
+  it("runs the Code reviewer with no publish container and keeps its findings", async () => {
+    fake.env = new FakeEnv(pushed({ ahead: 0 }));
+    const taskId = await create();
+    await settle(runsOf(taskId)[0]);
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'One problem.', findings: [severe({ file: 'src/a.ts', line: 3 })] })] });
+    const id = await follow(taskId, 'code-review');
+    expect((await settle(id)).status).toBe('succeeded');
+    expect(fake.env.started.map((s: StepSpec) => s.cmd[0])).toEqual(['prepare', 'run']);
+    const agent = fake.env.spec('run')!;
+    expect(JSON.parse(agent.files!['.workshop/schema.json'] as string).required).toContain('findings');
+    expect(agent.files!['.workshop/system.md']).toContain('Nothing you change or commit here is pushed');
+    expect(agent.files!['.workshop/prompt.md']).toContain(`## Your task\nReview the work on \`${getTask(taskId)!.branch}\``);
+    expect(runView(id)!.result!.findings).toEqual([expect.objectContaining({ severity: 'severe', title: 'Toggle crashes', fix: 'Guard the null.', file: 'src/a.ts', line: 3 })]);
+    expect(fake.tickets.setLabels).not.toHaveBeenCalled();
+  });
+
+  it('has no branch link when nothing was committed, and deletes the empty branch an older image pushed', async () => {
+    fake.env = new FakeEnv(pushed({ ahead: 0 }));
+    const a = await create();
+    expect((await settle(runsOf(a)[0])).status).toBe('succeeded');
+    expect(taskView(a)!.branchUrl).toBeNull();
+    expect(fake.vcs.deleteBranch).not.toHaveBeenCalled();
+    fake.env = new FakeEnv(pushed({ before: '', after: 'abc1234', ahead: 0 }));
+    const b = await create();
+    expect((await settle(runsOf(b)[0])).status).toBe('succeeded');
+    expect(fake.vcs.deleteBranch).toHaveBeenCalledWith(expect.objectContaining({ fullName: 'me/app' }), getTask(b)!.branch);
+    expect(taskView(b)!.branchUrl).toBeNull();
+  });
+
+  it('picks the browser image from the flag alone, whatever the agent', async () => {
+    fake.env = new FakeEnv(pushed({ ahead: 0 }));
+    const taskId = await create({ browser: true });
+    expect((await settle(runsOf(taskId)[0])).image).toBe(config.agentBrowserImage);
+    fake.env = new FakeEnv(pushed({ ahead: 0 }));
+    expect((await settle(await follow(taskId, 'implement'))).image).toBe(config.agentImage);
+    fake.env = new FakeEnv(pushed({ ahead: 0 }));
+    expect((await settle(await follow(taskId, 'implement', null, true))).image).toBe(config.agentBrowserImage);
+  });
+
+  it("pushes a failed agent's commits, then ends failed without touching any ticket", async () => {
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'failed', summary: 'The tests need a database.' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+    const taskId = await create();
+    expect(await settle(runsOf(taskId)[0])).toMatchObject({ status: 'failed', error: 'The tests need a database.' });
+    expect(fake.env.spec('publish')).toBeDefined();
+    expect(taskView(taskId)!.branchUrl).not.toBeNull();
+    expect(fake.tickets.setLabels).not.toHaveBeenCalled();
+    expect(fake.tickets.comment).not.toHaveBeenCalled();
+    expect(all("SELECT id FROM alerts WHERE kind = 'ticket-failed'")).toHaveLength(0);
+    expect(getTicket(1)!.failures).toBe(0);
+  });
+
+  it("shows a run that ended without a result by its error in the next run's prompt", async () => {
+    fake.env = new FakeEnv({ prepare: ['ok'], run: ['not json'] });
+    const taskId = await create();
+    const first = await settle(runsOf(taskId)[0]);
+    expect(first.status).toBe('failed');
+    expect(fake.tickets.setLabels).not.toHaveBeenCalled();
+    expect(all("SELECT id FROM alerts WHERE kind = 'ticket-failed'")).toHaveLength(0);
+    fake.env = new FakeEnv(pushed({ ahead: 0 }));
+    await settle(await follow(taskId, 'task', 'Try again.'));
+    expect(fake.env.spec('run')!.files!['.workshop/prompt.md']).toContain(`It ended without a report: ${first.error}`);
+  });
+
+  it("keeps the summary as the agent wrote it, with the questions in the result", async () => {
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'needs_info', summary: 'Two ways to fix it.', questions: ['Keep the old API?', 'Add a migration?'] })], publish: [line({ ahead: 0 })] });
+    const taskId = await create();
+    const r = await settle(runsOf(taskId)[0]);
+    expect(r).toMatchObject({ status: 'succeeded', summary: 'Two ways to fix it.' });
+    expect(runView(r.id)!.result!.questions).toEqual(['Keep the old API?', 'Add a migration?']);
+  });
+
+  describe('starting', () => {
+    const hang = () => {
+      fake.env = new FakeEnv(pushed({ ahead: 0 }));
+      fake.env.wait = async () => new Promise(() => {}); // keeps the agent running
+    };
+
+    it('ignores the operation mode, and takes a host slot ticket runs then wait for', async () => {
+      hang();
+      const taskId = await create();
+      const [id] = runsOf(taskId);
+      expect(getRun(id)).toMatchObject({ status: 'starting', prompt: null, browser: 0 });
+      expect(hostLoads().find((h) => h.id === ids.env)!.busy).toBe(1);
+      expect(buildQueue(getSettings(), Date.now(), { ignoreMode: true }).find((c) => c.ticket.id === 1)!.blockedBy).toBe('Every agent host is busy or offline');
+      const before = all('SELECT id FROM tasks').length;
+      await expect(create()).rejects.toThrow("Can't start the agent yet: Every agent host is busy or offline.");
+      expect(all('SELECT id FROM tasks')).toHaveLength(before);
+      run("UPDATE runs SET status = 'cancelled' WHERE id = ?", id);
+    });
+
+    it('allows one agent at a time, and refuses to close a task while one works', async () => {
+      hang();
+      setLimitsSlots(2);
+      try {
+        const taskId = await create();
+        await expect(follow(taskId, 'task')).rejects.toThrow('An agent is already working on this task.');
+        expect(() => setTaskClosed(taskId, true)).toThrow('Stop the running agent before closing this task.');
+        // Another task can run beside it.
+        const other = await create();
+        expect(runsOf(other)).toHaveLength(1);
+        run("UPDATE runs SET status = 'cancelled' WHERE task_id IN (?, ?)", taskId, other);
+        setTaskClosed(taskId, true);
+        expect(taskView(taskId)!.closed).toBe(true);
+        await expect(follow(taskId, 'task')).rejects.toThrow('Reopen this task to start another agent.');
+        setTaskClosed(taskId, false);
+        expect(taskView(taskId)!.closed).toBe(false);
+      } finally {
+        setLimitsSlots(1);
+      }
+    });
+
+    it('refuses a run when the task is closed while the allowance is read', async () => {
+      fake.env = new FakeEnv({ ...pushed({ ahead: 0 }), usage: [RATE, result({})] });
+      const taskId = await create();
+      await settle(runsOf(taskId)[0]);
+      run('DELETE FROM allowance_samples');
+      const starting = follow(taskId, 'task', 'Carry on.');
+      setTaskClosed(taskId, true);
+      await expect(starting).rejects.toThrow('Reopen this task to start another agent.');
+      expect(runsOf(taskId)).toHaveLength(1);
+      expect(fake.env.started.filter((s: StepSpec) => s.cmd[0] === 'usage-probe')).toHaveLength(1); // it did wait on the probe
+    });
+
+    it('refuses without a model for the chosen agent', async () => {
+      updateAgent('task', { model: null, modelConnectionId: null });
+      await expect(create()).rejects.toThrow("Can't start the agent yet: Choose a model for Task on the Agents page.");
+      expect(all('SELECT id FROM runs')).toHaveLength(0);
+      expect(all('SELECT id FROM tasks')).toHaveLength(0);
+    });
+
+    it('refuses when the subscription is over its limits', async () => {
+      recordProbe(ids.model, { pct: 95, resetsAt: null }, { pct: 10, resetsAt: null });
+      await expect(create()).rejects.toThrow("Can't start the agent yet: 5-hour allowance at 95%.");
+    });
+
+    it('refuses an unknown repository and agents that are not for tasks', async () => {
+      await expect(newTask({ repoId: 99, title: TITLE, body: BODY, agent: 'task', browser: false })).rejects.toThrow('Repository not found.');
+      await expect(create({ agent: 'classifier' })).rejects.toThrow('Choose one of these agents: Task, Design, Design adversary, Implementation, Code reviewer.');
+    });
+
+    it('reads a stale allowance first, then starts', async () => {
+      run('DELETE FROM allowance_samples');
+      fake.env = new FakeEnv({ ...pushed({ ahead: 0 }), usage: [RATE, result({})] });
+      const taskId = await create();
+      expect(fake.env.started[0].cmd).toEqual(['usage-probe']);
+      expect((await settle(runsOf(taskId)[0])).status).toBe('succeeded');
+    });
+
+    it('waits for an allowance check that is already running', async () => {
+      run('DELETE FROM allowance_samples');
+      fake.env = new FakeEnv({ ...pushed({ ahead: 0 }), usage: [RATE, result({})] });
+      const tick = probeAllowance(ids.model);
+      const taskId = await create();
+      await tick;
+      expect(fake.env.started.filter((s: StepSpec) => s.cmd[0] === 'usage-probe')).toHaveLength(1);
+      expect((await settle(runsOf(taskId)[0])).status).toBe('succeeded');
+    });
+
+    it("refuses with the probe's reason when the allowance can't be read", async () => {
+      run('DELETE FROM allowance_samples');
+      fake.env = new FakeEnv({ usage: [line({ type: 'result', subtype: 'success', is_error: true, result: 'Invalid bearer token', usage: {} })] });
+      await expect(create()).rejects.toThrow("Can't start the agent yet: Workshop couldn't read your Claude usage (Invalid bearer token).");
+      expect(all('SELECT id FROM runs')).toHaveLength(0);
+      expect(all('SELECT id FROM tasks')).toHaveLength(0);
+      forgetProbe(ids.model);
+    });
+  });
+
+  it('resumes after a usage limit while Workshop is paused', async () => {
+    saveSettings({ mode: 'paused' });
+    const task = createTask({ repoId: 1, title: TITLE, body: BODY });
+    run(
+      `INSERT INTO runs (id, ticket_id, task_id, repo_id, agent, attempt, environment_id, model_connection_id, model, billing, status, step, volume, resets_at, pause_reason, started_at)
+       VALUES ('task-paused', NULL, ?, 1, 'task', 1, ?, ?, 'claude-opus-5-5', 'subscription', 'paused', 'run', 'v', ?, 'limit', 0)`,
+      task.id,
+      ids.env,
+      ids.model,
+      Date.now() - 1000,
+    );
+    fake.env = new FakeEnv(pushed({ ahead: 0 }));
+    resumePaused(getSettings(), Date.now());
+    expect((await settle('task-paused')).status).toBe('succeeded');
+    expect(fake.env.spec('run')!.env.RESUME).toBe('1');
+  });
+
+  it('cleanup past retention deletes a ticket run but keeps a task run without its log', async () => {
+    const task = createTask({ repoId: 1, title: TITLE, body: BODY });
+    const old = Date.now() - 400 * 86400_000;
+    run(`INSERT INTO runs (id, ticket_id, repo_id, agent, attempt, model, billing, status, started_at, ended_at) VALUES ('old-ticket', 1, 1, 'implement', 1, 'm', 'subscription', 'succeeded', ?, ?)`, old, old);
+    run(`INSERT INTO runs (id, task_id, repo_id, agent, attempt, model, billing, status, started_at, ended_at, result) VALUES ('old-task', ?, 1, 'task', 1, 'm', 'subscription', 'succeeded', ?, ?, ?)`, task.id, old, old, JSON.stringify({ outcome: 'done', summary: 'Answer.' }));
+    appendLog('old-task', { step: 'workshop', stream: 'stdout', text: 'hello' });
+    appendLog('old-ticket', { step: 'workshop', stream: 'stdout', text: 'hello' });
+    await cleanup(getSettings());
+    expect(getRun('old-ticket')).toBeUndefined();
+    expect(getRun('old-task')).toBeDefined();
+    expect(readLog('old-task')).toEqual([]);
+    expect(taskView(task.id)!.runs[0].result!.summary).toBe('Answer.');
   });
 });

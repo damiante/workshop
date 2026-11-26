@@ -44,6 +44,18 @@ curl $WORKSHOP/api/usage/lifetime -H "Authorization: Bearer $TOKEN"
 # Start an agent on a ticket now (ticket id from GET /api/tickets)
 curl -X POST $WORKSHOP/api/tickets/12/launch -H "Authorization: Bearer $TOKEN"
 
+# Create a task and start its first agent (repo id from GET /api/tasks)
+curl -X POST $WORKSHOP/api/tasks -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"repoId": 3, "body": "How does the sync decide which tickets to fetch?"}'
+
+# Read what the agent reported, then start a follow-up with another agent
+curl $WORKSHOP/api/tasks/7 -H "Authorization: Bearer $TOKEN"
+curl -X POST $WORKSHOP/api/tasks/7/runs -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"agent": "implement", "prompt": "Make it fetch only changed tickets, as you described."}'
+
+# Close a task when it's done
+curl -X PUT $WORKSHOP/api/tasks/7/closed -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"closed": true}'
+
 # Push a ticket along while Workshop is paused (scope: stage or lifecycle)
 curl -X POST $WORKSHOP/api/tickets/12/push -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"scope":"lifecycle"}'
@@ -71,6 +83,27 @@ Usage limits are set per subscription. `PUT /api/settings` with the old global `
 ## Launching
 
 `POST /api/tickets/:id/launch` starts whatever agent the ticket is due next and answers 202 with the run. It ignores the operation mode and operating hours, so it works while Workshop is paused. Every other check still applies: dependencies, a chosen model, the Claude allowance, the API cap and a free agent host. If one blocks the launch you get 409 with the reason.
+
+## Tasks
+
+A task is a virtual ticket outside the label workflow: a repository, a title and a description, with agents you start on it by hand, one at a time. Nothing happens automatically on a task: no labels, comments, pull requests or next stage. It stays open until you close it.
+
+- `GET /api/tasks` lists the repositories (`repos`), the agents you can start on a task (`agents`: `task`, `design`, `design-review`, `implement`, `code-review`) and every task (`tasks`: open ones first, then the most recently changed), each with its run count and `latest` run.
+- `POST /api/tasks` with `{"repoId": 3, "body": "…", "title": "…", "agent": "task", "browser": false}` creates a task and starts its first agent, and answers 202 with the task. Only `repoId` and `body` are needed: `title` defaults to the description's first line and `agent` to `task`, a general agent. `browser: true` gives the agent the browser image (Playwright with Chromium).
+- `GET /api/tasks/:id` returns the task with every run on it, oldest first.
+- `POST /api/tasks/:id/runs` with `{"agent": "implement", "prompt": "…", "browser": false}` starts another agent on the task and answers 202 with the run. `prompt` is optional: use it to answer the last agent's questions or say what to do next.
+- `PUT /api/tasks/:id/closed` with `{"closed": true}` closes the task, and `false` reopens it. A closed task can't start agents. Closing is refused with 409 while an agent is working on it.
+
+How it works:
+
+- **Agents start now or not at all.** Like launching a ticket, a task run ignores the operation mode and hours. The chosen agent's model and limits (Agents page), the Claude allowance, the API cap and a free agent host still apply. There's no queue: if one of them blocks the start you get 409 with the reason, for example `Can't start the agent yet: Every agent host is busy or offline.`, and `POST /api/tasks` then stores nothing. When the subscription's usage reading is stale, Workshop reads it first, so the request may take a few seconds longer (up to two minutes if Claude is slow to answer). Disabled repositories can be used too.
+- **Each run sees what came before.** Every run is a new Claude session. Its prompt holds the task's description, then each earlier run's instructions and report (oldest first, up to about 60,000 characters, keeping the newest), then this run's instructions.
+- **Agents share one branch**, `workshop/task-<id>-<title>`, made from the default branch for the first run. Workshop pushes it after a run when it has commits ahead of the base, and never opens a pull request. The Code reviewer pushes nothing. The task's `branchUrl` links to the branch once it's been pushed. Closing a task keeps the branch: merge or delete it on GitHub.
+- **Every run's outcome is kept** in its `result`: `outcome` (`done`, `needs_info` or `failed`), `summary` (the agent's report in Markdown, with the answer when the task asked a question), `questions`, `tests` and the Code reviewer's `findings`. A `failed` outcome pushes any commits, then ends the run `failed`. Task runs are kept past the retention period in Settings; only their logs are removed.
+- **Tasks have no media store**, so screenshots an agent takes on a task are not kept.
+- **The description and instructions are stored** and readable with read-only tokens. Don't put long-lived secrets in them. If the agent needs to look at this instance, paste the read-only, 8-hour token from **Give Claude access**.
+
+Task runs also appear in `GET /api/runs` and under `running` in `/api/overview`. On a task run's `RunView`, `ticketId`, `ticket`, `ticketTitle` and `ticketUrl` are null; `repo` names the repository, `task` holds the task's id and title, and `prompt` and `result` hold the run's instructions and outcome. All three are null for ticket runs.
 
 ## Checking now
 
