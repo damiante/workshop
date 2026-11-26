@@ -249,3 +249,7 @@ Design review against the code at a5a9cf2. Each item gives the criticism, the fi
 17. **The endpoint scans the ledger on every `runs` event, and `spend` has no `ts` index.** `/usage/lifetime` already does the same on Settings, and the ledger has one row per invocation. **Not adopted.** Add an index only if it shows up as slow.
 18. **The ticket doesn't ask to move Lifetime usage off Settings.** Moving it puts all usage in one place, and Settings keeps a link. **Kept as designed.**
 19. **Security:** the endpoint shows the same project and connection names as `/usage/lifetime`, to the same read tokens, and takes only a validated enum. No new risk. **No change.**
+
+## Follow-up from review: usage by project
+
+The owner asked for charts of usage by project. A "Usage by project" panel sits under Spend over time and follows the range and the Cost/Tokens select (not Group by). It has horizontal bars ranking every project with its value and share of the range, then one column chart per project for the six biggest, all on one shared scale so the heights compare. The data is the existing `byProject` series; the server is unchanged.

@@ -88,3 +88,13 @@ export function spreadLabels(ys: number[], minGap = 14): number[] {
   }
   return out;
 }
+
+/** Each series' total by the metric and its share of the sum, biggest first, without the empty ones. */
+export function shares(series: SpendSeries[], metric: Metric): { key: string; name: string; value: number; share: number }[] {
+  const rows = series.map((s) => ({ key: s.key, name: s.name, value: value(s.totals, metric) })).filter((r) => r.value > 0);
+  const sum = rows.reduce((n, r) => n + r.value, 0);
+  return rows.map((r) => ({ ...r, share: r.value / sum })).sort((a, b) => b.value - a.value);
+}
+
+/** '42%', or '<1%' for a share that would round to nothing. */
+export const percent = (share: number) => (share > 0 && share < 0.005 ? '<1%' : `${Math.round(share * 100)}%`);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { SpendSeries, SpendTotals } from '../../server/src/api-types.ts';
-import { bucketLabel, foldSeries, niceTicks, readFilters, spreadLabels } from '../src/chart.ts';
+import { bucketLabel, foldSeries, niceTicks, percent, readFilters, shares, spreadLabels } from '../src/chart.ts';
 
 const t = (costUsd: number, tokens = 0, runs = 1): SpendTotals => ({ runs, inputTokens: tokens, outputTokens: 0, costUsd });
 const s = (key: string, cost: number, tokens = 0): SpendSeries => ({ key, name: key, points: [t(cost / 2, tokens / 2), t(cost / 2, tokens / 2)], totals: t(cost, tokens) });
@@ -72,5 +72,28 @@ describe('niceTicks with a minimum step', () => {
   it("doesn't go below a cent for money", () => {
     expect(niceTicks(0.013, 4, 0.01)).toEqual([0, 0.01, 0.02]);
     expect(niceTicks(1234, 4, 0.01)).toEqual([0, 500, 1000, 1500]);
+  });
+});
+
+describe('shares', () => {
+  it('ranks series by the metric, drops empty ones and gives each its share', () => {
+    const out = shares([s('a', 1, 300), s('b', 3, 100), s('c', 0, 0)], 'cost');
+    expect(out.map((r) => [r.key, r.value, r.share])).toEqual([
+      ['b', 3, 0.75],
+      ['a', 1, 0.25],
+    ]);
+    expect(shares([s('a', 1, 300), s('b', 3, 100)], 'tokens').map((r) => r.key)).toEqual(['a', 'b']);
+  });
+
+  it('is empty when nothing was spent', () => {
+    expect(shares([s('a', 0)], 'cost')).toEqual([]);
+  });
+});
+
+describe('percent', () => {
+  it('rounds, and shows a tiny share as under 1%', () => {
+    expect(percent(0.426)).toBe('43%');
+    expect(percent(0.004)).toBe('<1%');
+    expect(percent(0)).toBe('0%');
   });
 });

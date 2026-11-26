@@ -1082,3 +1082,58 @@ a.turn-no:hover {
   border-radius: 2px;
   flex: none;
 }
+.bars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(60px, 1fr) max-content;
+  gap: 6px 12px;
+  align-items: center;
+}
+.bars li {
+  display: contents;
+}
+.bar-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 280px;
+}
+.bar-track {
+  height: 12px;
+}
+.bar-fill {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: 0 4px 4px 0;
+  background: var(--series-1);
+}
+.bar-value {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.project-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 16px 24px;
+}
+.project-charts h3 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* On a phone the name sits above its bar, so long repository names don't squeeze the bar. */
+@media (max-width: 760px) {
+  .bars {
+    grid-template-columns: minmax(60px, 1fr) max-content;
+    gap: 2px 12px;
+  }
+  .bar-name {
+    grid-column: 1 / -1;
+    max-width: none;
+    margin-top: 4px;
+  }
+}

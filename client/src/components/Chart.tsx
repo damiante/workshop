@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent, type ReactNode, type RefObject } from 'react';
-import { niceTicks, spreadLabels } from '../chart.ts';
+import { niceTicks, percent, spreadLabels } from '../chart.ts';
 import { clock } from '../format.ts';
 
 const HEIGHT = 200;
@@ -67,6 +67,28 @@ export function Legend({ items }: { items: { key?: string; name: string; color: 
 const roundedTop = (x: number, y: number, w: number, h: number, r: number) =>
   `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
 
+/** Horizontal bars, biggest first, each labelled with its value and share of the total. */
+export function Bars({ rows, format, label }: { rows: { key: string; name: string; value: number; share: number }[]; format: (n: number) => string; label: string }) {
+  const top = Math.max(0, ...rows.map((r) => r.value));
+  return (
+    <ul className="bars" aria-label={label}>
+      {rows.map((r) => (
+        <li key={r.key}>
+          <span className="bar-name" title={r.name}>
+            {r.name}
+          </span>
+          <span className="bar-track" aria-hidden="true">
+            <span className="bar-fill" style={{ width: `${top > 0 ? (r.value / top) * 100 : 0}%` }} />
+          </span>
+          <span className="bar-value small">
+            {format(r.value)} · {percent(r.share)}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export interface ColumnSeries {
   key: string;
   name: string;
@@ -74,19 +96,38 @@ export interface ColumnSeries {
   values: number[];
 }
 
-/** Stacked columns, one per bucket, bottom-up in series order. */
-export function StackedColumns({ labels, series, format, label, minStep }: { labels: string[]; series: ColumnSeries[]; format: (n: number) => string; label: string; minStep?: number }) {
+/**
+ * Stacked columns, one per bucket, bottom-up in series order. `max` sets the lowest top of the scale, so small multiples
+ * can share one.
+ */
+export function StackedColumns({
+  labels,
+  series,
+  format,
+  label,
+  minStep,
+  max = 0,
+  height = HEIGHT,
+}: {
+  labels: string[];
+  series: ColumnSeries[];
+  format: (n: number) => string;
+  label: string;
+  minStep?: number;
+  max?: number;
+  height?: number;
+}) {
   const [ref, width] = useWidth();
   const [hovered, setActive, leave] = useActive<number>(ref);
   // A tapped column stays active, so it can outlive a refetch with fewer buckets.
   const active = hovered !== null && hovered < labels.length ? hovered : null;
   const totals = labels.map((_, i) => series.reduce((n, s) => n + s.values[i], 0));
-  const ticks = niceTicks(Math.max(0, ...totals), 4, minStep);
+  const ticks = niceTicks(Math.max(0, max, ...totals), height < HEIGHT ? 2 : 4, minStep);
   const top = ticks[ticks.length - 1];
   const left = Math.max(...ticks.map((t) => format(t).length)) * 7 + 12;
   const right = 8;
   const plotW = Math.max(0, width - left - right);
-  const plotH = HEIGHT - TOP - BOTTOM;
+  const plotH = height - TOP - BOTTOM;
   const band = labels.length ? plotW / labels.length : 0;
   const colW = Math.max(1, band * 0.75);
   const tight = band < 4;
@@ -101,9 +142,9 @@ export function StackedColumns({ labels, series, format, label, minStep }: { lab
   };
 
   return (
-    <div className="chart" ref={ref} style={{ height: HEIGHT }}>
+    <div className="chart" ref={ref} style={{ height }}>
       {width > 0 && (
-        <svg width={width} height={HEIGHT} role="img" aria-label={label} onPointerMove={pick} onPointerDown={pick} onPointerLeave={leave}>
+        <svg width={width} height={height} role="img" aria-label={label} onPointerMove={pick} onPointerDown={pick} onPointerLeave={leave}>
           {ticks.map((t) => (
             <g key={t}>
               <line x1={left} x2={width - right} y1={y(t) + 0.5} y2={y(t) + 0.5} className="chart-grid" />
@@ -141,7 +182,7 @@ export function StackedColumns({ labels, series, format, label, minStep }: { lab
             // A label that would run off the right edge is dropped rather than shifted into its neighbour.
             if (x + 24 > width) return null;
             return (
-              <text key={l} x={x} y={HEIGHT - 6} textAnchor="middle" className="chart-axis">
+              <text key={l} x={x} y={height - 6} textAnchor="middle" className="chart-axis">
                 {l}
               </text>
             );
@@ -160,10 +201,13 @@ export function StackedColumns({ labels, series, format, label, minStep }: { lab
                 <span>{format(s.values[active])}</span>
               </div>
             ))}
-          <div className="tip-row">
-            <span className="grow">Total</span>
-            <span>{format(totals[active])}</span>
-          </div>
+          {series.length > 1 && (
+            <div className="tip-row">
+              <span className="grow">Total</span>
+              <span>{format(totals[active])}</span>
+            </div>
+          )}
+          {totals[active] === 0 && <span className="muted">No spend</span>}
         </Tip>
       )}
     </div>

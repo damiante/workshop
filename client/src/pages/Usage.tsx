@@ -1,8 +1,8 @@
 import { useSearchParams } from 'react-router';
 import type { AllowanceHistory, LifetimeSpend, SpendTotals, UsageHistory } from '../../../server/src/api-types.ts';
-import { bucketLabel, foldSeries, GROUPINGS, METRICS, RANGES, readFilters, value, type Grouping } from '../chart.ts';
+import { bucketLabel, foldSeries, GROUPINGS, METRICS, RANGES, readFilters, shares, value, type Grouping, type Metric } from '../chart.ts';
 import { useApi, useNow } from '../api.ts';
-import { Legend, LineChart, StackedColumns } from '../components/Chart.tsx';
+import { Bars, Legend, LineChart, StackedColumns } from '../components/Chart.tsx';
 import { ErrorNote, Panel } from '../components/ui.tsx';
 import { money, tokens } from '../format.ts';
 import { projectionLines } from '../projections.ts';
@@ -10,6 +10,8 @@ import { projectionLines } from '../projections.ts';
 const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 const OTHER_COLOR = 'var(--series-other)';
 const SEVEN_DAYS = 7 * 86400_000;
+/** Projects that get a chart of their own on the Usage page; the bars rank them all. */
+const PROJECT_CHARTS = 6;
 
 const SERIES_OF: Record<Grouping, keyof Pick<UsageHistory, 'byBilling' | 'byModel' | 'byProject' | 'byConnection'>> = {
   billing: 'byBilling',
@@ -114,11 +116,13 @@ function Projections({ data, now }: { data: UsageHistory; now: number }) {
   );
 }
 
-function SpendOverTime({ data, group, metric }: { data: UsageHistory; group: Grouping; metric: 'cost' | 'tokens' }) {
+const formatter = (metric: Metric) => (metric === 'cost' ? (n: number) => money(n)! : (n: number) => tokens(n)!.replace(' tokens', ''));
+
+function SpendOverTime({ data, group, metric }: { data: UsageHistory; group: Grouping; metric: Metric }) {
   const all = data[SERIES_OF[group]];
   const folded = foldSeries(all, metric);
   const series = folded.map((s, i) => ({ name: s.name, key: s.key, color: SERIES_COLORS[i] ?? OTHER_COLOR, values: s.points.map((p) => value(p, metric)) }));
-  const format = metric === 'cost' ? (n: number) => money(n)! : (n: number) => tokens(n)!.replace(' tokens', '');
+  const format = formatter(metric);
   const unit = data.bucket === 'day' ? 'day' : 'month';
   const groupLabel = GROUPINGS.find((g) => g.value === group)!.label;
   const total = folded.reduce((n, s) => n + value(s.totals, metric), 0);
@@ -144,6 +148,53 @@ function SpendOverTime({ data, group, metric }: { data: UsageHistory; group: Gro
               label={`${metric === 'cost' ? 'Cost' : 'Tokens'} per ${unit} by ${groupLabel.toLowerCase()}, ${metric === 'cost' ? money(total) : tokens(total)} in total.`}
             />
             <SpendTable title={`By ${groupLabel.toLowerCase()}`} label={group} rows={rows.map((s) => ({ key: s.key, name: s.name, t: s.totals }))} />
+          </>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+/** Every project's share of the range, then the biggest few over time on one shared scale so their heights compare. */
+function ProjectUsage({ data, metric }: { data: UsageHistory; metric: Metric }) {
+  const ranked = shares(data.byProject, metric);
+  const format = formatter(metric);
+  const unit = data.bucket === 'day' ? 'day' : 'month';
+  const what = metric === 'cost' ? 'cost' : 'tokens';
+  const charted = ranked.slice(0, PROJECT_CHARTS).map((r) => data.byProject.find((p) => p.key === r.key)!);
+  const max = Math.max(0, ...charted.flatMap((p) => p.points.map((t) => value(t, metric))));
+  const labels = data.buckets.map((b) => bucketLabel(b, data.bucket));
+  return (
+    <Panel title="Usage by project">
+      <div className="panel-body stack">
+        {ranked.length === 0 ? (
+          <p className="small muted">No agent runs in this range.</p>
+        ) : (
+          <>
+            <p className="small muted">Each project's share of the {metric === 'cost' ? 'token-equivalent cost' : 'tokens'} in this range.</p>
+            <Bars rows={ranked} format={format} label={`Share of ${what} by project in this range.`} />
+            <p className="small muted">
+              {ranked.length > PROJECT_CHARTS ? `The ${PROJECT_CHARTS} biggest projects` : ranked.length === 1 ? 'The project' : 'Each project'} per {unit}, all on the same scale.
+            </p>
+            <div className="project-charts">
+              {charted.map((p) => (
+                <div key={p.key} className="stack" style={{ gap: 4 }}>
+                  <h3 className="small" title={p.name}>
+                    {p.name}
+                  </h3>
+                  <StackedColumns
+                    labels={labels}
+                    series={[{ key: p.key, name: p.name, color: SERIES_COLORS[0], values: p.points.map((t) => value(t, metric)) }]}
+                    format={format}
+                    minStep={metric === 'cost' ? 0.01 : 1}
+                    max={max}
+                    height={140}
+                    label={`${p.name}: ${what} per ${unit}, ${format(value(p.totals, metric))} in total.`}
+                  />
+                </div>
+              ))}
+            </div>
+            {data.byProject.some((p) => p.key === '') && <p className="small muted">Unknown is spend from runs deleted before Workshop recorded their repository.</p>}
           </>
         )}
       </div>
@@ -241,6 +292,7 @@ export function Usage() {
         <>
           <Projections data={data} now={now} />
           <SpendOverTime data={data} group={group} metric={metric} />
+          <ProjectUsage data={data} metric={metric} />
           {data.allowance.length > 0 && <SubscriptionUsage allowance={data.allowance} now={now} />}
         </>
       )}
