@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import type { ApiTokenView, LifetimeSpend, Limits, NewApiToken, Settings, SpendTotals, TicketOrder, Usage } from '../../../server/src/api-types.ts';
+import { Link } from 'react-router';
+import type { ApiTokenView, Limits, NewApiToken, Settings, TicketOrder, Usage } from '../../../server/src/api-types.ts';
 import { TOKEN_LIFETIMES } from '../access.ts';
 import { api, useApi, useNow } from '../api.ts';
 import { ErrorNote, Panel } from '../components/ui.tsx';
@@ -21,82 +22,6 @@ function NumberField({ label, help, value, min, max, step = 1, onChange }: { lab
       <input type="number" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} required />
       {help && <span className="help">{help}</span>}
     </label>
-  );
-}
-
-function SpendTable({ title, label, rows }: { title: string; label: string; rows: { key: string; name: string; t: SpendTotals }[] }) {
-  return (
-    <div className="table-wrap">
-      <table className="spend-table">
-        <thead>
-          <tr>
-            <th>{title}</th>
-            <th className="num">Runs</th>
-            <th className="num">Input</th>
-            <th className="num">Output</th>
-            <th className="num">Cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={`${label}-${r.key}`}>
-              <td>{r.name}</td>
-              <td className="num">{r.t.runs}</td>
-              <td className="num">{tokens(r.t.inputTokens)}</td>
-              <td className="num">{tokens(r.t.outputTokens)}</td>
-              <td className="num">{money(r.t.costUsd)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function LifetimeUsage() {
-  const { data, error } = useApi<LifetimeSpend>('/usage/lifetime', ['runs']);
-  return (
-    <Panel title="Lifetime usage">
-      <div className="panel-body stack">
-        <ErrorNote error={error} />
-        {data && data.since === null && <p className="small muted">No agent runs recorded yet.</p>}
-        {data && data.since !== null && (
-          <>
-            <p className="small muted">
-              Tokens and token-equivalent cost of every agent run Workshop has recorded since {new Date(data.since).toLocaleDateString()}. On a subscription this is what the same use would
-              cost on the API, not what you paid. Claude Code you use outside Workshop isn't counted.
-            </p>
-            <p>
-              {money(data.total.costUsd)} · {tokens(data.total.inputTokens)} in · {tokens(data.total.outputTokens)} out · {data.total.runs} runs
-            </p>
-            <SpendTable
-              title="By billing"
-              label="billing"
-              rows={[
-                { key: 'subscription', name: 'Subscription', t: data.subscription },
-                { key: 'api', name: 'API', t: data.api },
-              ]}
-            />
-            <SpendTable title="By model" label="model" rows={data.byModel.map((m) => ({ key: m.model, name: m.model, t: m }))} />
-            <SpendTable title="By project" label="project" rows={data.byProject.map((p) => ({ key: p.project ?? '', name: p.project ?? 'Unknown', t: p }))} />
-            {data.byProject.some((p) => p.project === null) && (
-              <p className="small muted">Unknown is spend from runs deleted before Workshop recorded their repository.</p>
-            )}
-            <SpendTable
-              title="By connection"
-              label="connection"
-              rows={data.byConnection.map((c) => ({
-                key: `${c.connectionId}:${c.billing}`,
-                name: `${c.connection ?? 'Unknown'} (${c.billing === 'api' ? 'API key' : 'subscription'})`,
-                t: c,
-              }))}
-            />
-            {data.byConnection.some((c) => c.connection === null) && <p className="small muted">Unknown is spend recorded before Workshop kept track of connections.</p>}
-            <SpendTable title="By month" label="month" rows={data.byMonth.map((m) => ({ key: m.month, name: m.month, t: m }))} />
-          </>
-        )}
-      </div>
-    </Panel>
   );
 }
 
@@ -338,6 +263,9 @@ export function SettingsPage() {
           <NumberField label="Limit per run (USD)" value={draft.apiRunCapUsd} min={0} max={1000} step={0.5} onChange={(n) => set({ apiRunCapUsd: n })} />
           <NumberField label="Limit per day (USD)" help="Agents on API billing stop starting once today's runs reach this." value={draft.apiDailyCapUsd} min={0} max={10000} step={1} onChange={(n) => set({ apiDailyCapUsd: n })} />
         </div>
+        <p className="panel-body small muted" style={{ paddingTop: 0 }}>
+          See usage and projections on the <Link to="/usage">Usage page</Link>.
+        </p>
       </Panel>
       <Panel title="Tickets">
         <div className="panel-body fields">
@@ -369,7 +297,6 @@ export function SettingsPage() {
       </div>
     </form>
     <ApiTokens />
-    <LifetimeUsage />
     </div>
   );
 }

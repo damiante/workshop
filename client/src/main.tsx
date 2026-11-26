@@ -20,6 +20,7 @@ import { RunView } from './pages/RunView.tsx';
 import { Runs } from './pages/Runs.tsx';
 import { SettingsPage } from './pages/Settings.tsx';
 import { Tickets } from './pages/Tickets.tsx';
+import { Usage } from './pages/Usage.tsx';
 
 applyStoredTheme();
 
@@ -45,6 +46,7 @@ function App() {
           <Route path="tickets/:id/media" element={<Media />} />
           <Route path="runs" element={<Runs />} />
           <Route path="runs/:id" element={<RunView />} />
+          <Route path="usage" element={<Usage />} />
           <Route path="connections" element={<Connections />} />
           <Route path="agents" element={<Agents />} />
           <Route path="settings" element={<SettingsPage />} />
