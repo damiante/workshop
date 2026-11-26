@@ -15,7 +15,7 @@ import { getSettings } from '../settings.ts';
 import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
-import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
+import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 import { abortRun, cancelPause, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
 import { syncRepo } from './sync.ts';
@@ -331,11 +331,6 @@ export function resumeNow(runId: string) {
   appendLog(runId, { step: 'workshop', stream: 'stdout', text: 'Resumed from Workshop.' });
   resume(runId);
   kick();
-}
-
-export function startOfDay(now: number, timeZone: string) {
-  const { minutes } = localTime(new Date(now), timeZone);
-  return now - minutes * 60_000 - (now % 60_000);
 }
 
 // Fixed list, so the setting never reaches the SQL text.

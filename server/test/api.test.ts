@@ -147,6 +147,10 @@ describe('API tokens', () => {
     expect(put.body.error).toBe('This API token is read-only.');
     expect((await request(app).get('/api/usage').set('authorization', `Bearer ${read}`)).status).toBe(200);
     expect((await request(app).get('/api/usage/lifetime').set('authorization', `Bearer ${read}`)).status).toBe(200);
+    const history = await request(app).get('/api/usage/history').set('authorization', `Bearer ${read}`);
+    expect(history.status).toBe(200);
+    expect(history.body).toMatchObject({ range: '30d', bucket: 'day' });
+    expect(history.body.buckets).toHaveLength(30);
   });
 
   it('answers an unknown token with JSON 401, not a redirect', async () => {
@@ -212,6 +216,22 @@ describe('API tokens', () => {
     sweepExpiredTokens();
     const left = (id: number) => Boolean(one('SELECT id FROM api_tokens WHERE id = ?', id));
     expect(ids.map(left)).toEqual([false, true, true]);
+  });
+});
+
+describe('usage history', () => {
+  it('refuses an unknown range', async () => {
+    const res = await request(app).get('/api/usage/history?range=1y').set('cookie', cookie);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Range must be 7d, 30d, 90d or all.');
+    expect((await request(app).get('/api/usage/history?range=7d&range=30d').set('cookie', cookie)).status).toBe(400);
+  });
+
+  it('answers each range', async () => {
+    for (const [range, n] of [['7d', 7], ['90d', 90]] as const) {
+      const res = await request(app).get(`/api/usage/history?range=${range}`).set('cookie', cookie);
+      expect(res.body.buckets).toHaveLength(n);
+    }
   });
 });
 
@@ -572,6 +592,7 @@ describe('OpenAPI', () => {
     ['/settings', 'Settings'],
     ['/usage', 'Usage'],
     ['/usage/lifetime', 'LifetimeSpend'],
+    ['/usage/history?range=all', 'UsageHistory'],
   ])('%s matches its schema fields', async (path, name) => {
     const res = await request(app).get(`/api${path}`).set('cookie', cookie);
     const props = Object.keys((OPENAPI.components.schemas[name] as { properties: object }).properties);

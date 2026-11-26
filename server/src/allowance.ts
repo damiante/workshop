@@ -1,5 +1,5 @@
 import type { AllowanceView, Limits, UsageWindow } from './api-types.ts';
-import { one, run } from './db.ts';
+import { all, one, run } from './db.ts';
 import { publish } from './events.ts';
 import { getConnection, listConnections } from './providers/index.ts';
 
@@ -36,6 +36,15 @@ export function allowanceOf(connectionId: number, name = '', limits?: Limits): A
     tokens: { fiveHour: tokensSince(5 * 3600_000), sevenDay: tokensSince(7 * 86400_000) },
     limits: limits ?? getConnection(connectionId)?.limits ?? DEFAULT_LIMITS,
   };
+}
+
+/** A connection's usage readings since `since`, oldest first. */
+export function allowanceSamples(connectionId: number, since: number): { ts: number; fiveHour: number | null; sevenDay: number | null }[] {
+  return all<{ ts: number; fiveHour: number | null; sevenDay: number | null }>(
+    "SELECT ts, five_hour AS fiveHour, seven_day AS sevenDay FROM allowance_samples WHERE connection_id = ? AND source = 'probe' AND ts >= ? ORDER BY ts, rowid",
+    connectionId,
+    since,
+  );
 }
 
 /** Allowance for every Claude connection that has a subscription token. */

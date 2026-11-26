@@ -3,17 +3,17 @@ import path from 'node:path';
 import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
 import { allowanceOf, allowanceViews, apiSpendSince } from '../allowance.ts';
-import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, TicketStatePatch, Usage } from '../api-types.ts';
+import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, TicketStatePatch, Usage, UsageRange } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { listMedia, mediaDir, mediaView } from '../media.ts';
 import { getConnection, listConnections, modelsOf, setLimits } from '../providers/index.ts';
 import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews, ticketRunViews } from '../runs.ts';
-import { pushRefusal, withinHours } from '../scheduler/gates.ts';
-import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, startOfDay, syncSoon } from '../scheduler/loop.ts';
+import { pushRefusal, startOfDay, withinHours } from '../scheduler/gates.ts';
+import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncSoon } from '../scheduler/loop.ts';
 import { requestPause, stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
-import { lifetimeSpend } from '../spend.ts';
+import { lifetimeSpend, USAGE_RANGES, usageHistory } from '../spend.ts';
 import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { CONTENT_TYPES, extType, validName } from '../workflow/media.ts';
@@ -70,6 +70,12 @@ apiRouter.get('/overview', (_req, res) => {
 
 apiRouter.get('/usage/lifetime', (_req, res) => {
   res.json(lifetimeSpend(getSettings().timezone));
+});
+
+apiRouter.get('/usage/history', (req, res) => {
+  const range = req.query.range ?? '30d';
+  check(typeof range === 'string' && USAGE_RANGES.includes(range as UsageRange), 'Range must be 7d, 30d, 90d or all.');
+  res.json(usageHistory(range as UsageRange, getSettings().timezone));
 });
 
 apiRouter.get('/usage', (_req, res) => {

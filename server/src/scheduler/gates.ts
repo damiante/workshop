@@ -14,6 +14,12 @@ export function localTime(now: Date, timeZone: string): { day: number; minutes: 
   return { day: WEEKDAYS.indexOf(part('weekday')), minutes: Number(part('hour')) * 60 + Number(part('minute')) };
 }
 
+/** Local midnight today in the time zone, as epoch milliseconds. */
+export function startOfDay(now: number, timeZone: string) {
+  const { minutes } = localTime(new Date(now), timeZone);
+  return now - minutes * 60_000 - (now % 60_000);
+}
+
 const toMinutes = (hhmm: string) => {
   const [h, m] = hhmm.split(':').map(Number);
   return h * 60 + m;

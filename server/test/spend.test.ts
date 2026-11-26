@@ -3,7 +3,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { all, initDb, MIGRATIONS, one, run } from '../src/db.ts';
-import { backfillSpend, lifetimeSpend } from '../src/spend.ts';
+import { saveSettings } from '../src/settings.ts';
+import { backfillSpend, lifetimeSpend, usageHistory } from '../src/spend.ts';
 
 const spendOf = (id: string) => one<{ repo: string | null; agent: string | null; ticket: number | null }>('SELECT repo, agent, ticket FROM spend WHERE run_id = ?', id)!;
 const addRun = (id: string, ticket: number, usage: number | null) =>
@@ -84,5 +85,95 @@ describe('lifetimeSpend by connection', () => {
       { connectionId: conn, connection: 'Claude-2', billing: 'subscription', runs: 2, inputTokens: 20, outputTokens: 2, costUsd: 3 },
       { connectionId: null, connection: null, billing: 'subscription', runs: 1, inputTokens: 10, outputTokens: 1, costUsd: 0.5 },
     ]);
+  });
+});
+
+describe('usageHistory', () => {
+  const ins = (runId: string, ts: string, o: { model?: string; billing?: string; cost?: number; repo?: string | null; conn?: number | null; name?: string | null } = {}) =>
+    run(
+      'INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd, repo, connection_id, connection) VALUES (?, ?, ?, ?, 10, 1, ?, ?, ?, ?)',
+      runId,
+      Date.parse(ts),
+      o.model ?? 'opus',
+      o.billing ?? 'subscription',
+      o.cost ?? 1,
+      o.repo === undefined ? 'me/app' : o.repo,
+      o.conn ?? null,
+      o.name ?? null,
+    );
+
+  it('gives 7 contiguous days across a DST change', () => {
+    run('DELETE FROM spend');
+    const h = usageHistory('7d', 'Europe/London', Date.parse('2026-10-28T12:00:00Z'));
+    expect(h.bucket).toBe('day');
+    expect(h.buckets).toEqual(['2026-10-22', '2026-10-23', '2026-10-24', '2026-10-25', '2026-10-26', '2026-10-27', '2026-10-28']);
+    expect(usageHistory('90d', 'Europe/London', Date.parse('2026-10-28T12:00:00Z')).buckets).toHaveLength(90);
+  });
+
+  it('counts a resumed run once per bucket, and a run across midnight once in its totals', () => {
+    run('DELETE FROM spend');
+    ins('a', '2026-11-20T10:00:00Z');
+    ins('a', '2026-11-20T11:00:00Z'); // resumed
+    ins('b', '2026-11-21T23:30:00Z');
+    ins('b', '2026-11-22T00:30:00Z'); // past midnight
+    ins('old', '2026-10-01T00:00:00Z'); // outside the range
+    const h = usageHistory('7d', 'UTC', Date.parse('2026-11-26T12:00:00Z'));
+    const [s] = h.byBilling;
+    expect(h.byBilling).toHaveLength(1);
+    expect(s).toMatchObject({ key: 'subscription', name: 'Subscription' });
+    expect(s.points.map((p) => p.runs)).toEqual([1, 1, 1, 0, 0, 0, 0]);
+    expect(s.points[0]).toMatchObject({ inputTokens: 20, costUsd: 2 });
+    expect(s.totals).toMatchObject({ runs: 2, inputTokens: 40, costUsd: 4 });
+  });
+
+  it('has only the current month and no series when nothing is recorded', () => {
+    run('DELETE FROM spend');
+    const h = usageHistory('all', 'UTC', Date.parse('2026-11-26T12:00:00Z'));
+    expect(h).toMatchObject({ bucket: 'month', buckets: ['2026-11'], byBilling: [], byModel: [], byProject: [], byConnection: [] });
+    expect(h.projection.api).toMatchObject({ todayUsd: 0, capAt: null, perDayUsd: 0, monthToDateUsd: 0, monthEndUsd: 0 });
+  });
+
+  it('gives contiguous months from the first row for all time', () => {
+    run('DELETE FROM spend');
+    ins('a', '2025-11-15T00:00:00Z');
+    ins('b', '2026-02-01T00:00:00Z');
+    const h = usageHistory('all', 'UTC', Date.parse('2026-03-10T12:00:00Z'));
+    expect(h.buckets).toEqual(['2025-11', '2025-12', '2026-01', '2026-02', '2026-03']);
+    expect(h.byModel[0].points.map((p) => p.runs)).toEqual([1, 0, 0, 1, 0]);
+  });
+
+  it('sorts series by cost and names unknown projects and connections', () => {
+    run('DELETE FROM spend');
+    const conn = Number(run("INSERT INTO connections (kind, provider, name, config, created_at, updated_at) VALUES ('model', 'anthropic', 'Claude-3', '{}', 0, 0)").lastInsertRowid);
+    ins('a', '2026-11-25T00:00:00Z', { model: 'sonnet', cost: 1, repo: null, conn, name: 'Old name' });
+    ins('b', '2026-11-25T00:00:00Z', { model: 'opus', cost: 5, billing: 'api', conn, name: 'Claude-3' });
+    ins('c', '2026-11-25T00:00:00Z', { model: 'haiku', cost: 3 });
+    const h = usageHistory('30d', 'UTC', Date.parse('2026-11-26T12:00:00Z'));
+    expect(h.buckets).toHaveLength(30);
+    expect(h.byModel.map((s) => s.name)).toEqual(['opus', 'haiku', 'sonnet']);
+    expect(h.byBilling.map((s) => s.name)).toEqual(['API', 'Subscription']);
+    expect(h.byProject.map((s) => s.name)).toEqual(['me/app', 'Unknown']);
+    expect(h.byConnection.map((s) => s.name)).toEqual(['Claude-3 (API key)', 'Unknown (subscription)', 'Claude-3 (subscription)']);
+  });
+
+  it('splits month-to-date and the pace by billing', () => {
+    run('DELETE FROM spend');
+    saveSettings({ apiDailyCapUsd: 20 });
+    ins('s1', '2026-10-30T00:00:00Z', { cost: 100 }); // last month: in the pace, not month-to-date
+    ins('s2', '2026-11-03T00:00:00Z', { cost: 7 });
+    ins('a1', '2026-11-25T00:00:00Z', { billing: 'api', cost: 14 });
+    const now = Date.parse('2026-11-05T12:00:00Z');
+    const h = usageHistory('7d', 'UTC', now);
+    // Recording began 6.5 days ago, so the pace divides by 6.5; the API row is in the future of `now` and ignored.
+    expect(h.projection.subscription.perDayUsd).toBeCloseTo(107 / 6.5);
+    expect(h.projection.subscription.perDayTokens).toBeCloseTo(22 / 6.5);
+    expect(h.projection.subscription.monthToDateUsd).toBe(7);
+    expect(h.projection.subscription.monthEndUsd).toBeCloseTo(7 + (107 / 6.5) * 25.5);
+    expect(h.projection.api).toMatchObject({ perDayUsd: 0, monthToDateUsd: 0, monthEndUsd: 0, dailyCapUsd: 20 });
+
+    const later = usageHistory('7d', 'UTC', Date.parse('2026-11-26T12:00:00Z'));
+    expect(later.projection.api.perDayUsd).toBeCloseTo(2);
+    expect(later.projection.api.monthToDateUsd).toBe(14);
+    expect(later.projection.subscription.perDayUsd).toBe(0);
   });
 });

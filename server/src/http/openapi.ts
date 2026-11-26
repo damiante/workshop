@@ -67,6 +67,33 @@ const schemas: Record<string, Schema> = {
     byConnection: array({ allOf: [ref('SpendTotals'), object({ connectionId: nullable(int), connection: nullable(str), billing: str })] }),
     byMonth: array({ allOf: [ref('SpendTotals'), object({ month: str })] }),
   }),
+  SpendSeries: object({ key: str, name: str, points: array(ref('SpendTotals')), totals: ref('SpendTotals') }),
+  WindowProjection: object({ pct: num, resetsAt: int, ratePerHour: num, limitAt: nullable(int), fullAt: nullable(int), over: bool }),
+  AllowanceHistory: object({
+    connectionId: int,
+    connectionName: str,
+    limits: ref('Limits'),
+    samples: array(object({ ts: int, fiveHour: nullable(num), sevenDay: nullable(num) })),
+    sampledAt: nullable(int),
+    blockedUntil: nullable(int),
+    unknown: bool,
+    fiveHour: nullable(ref('WindowProjection')),
+    sevenDay: nullable(ref('WindowProjection')),
+  }),
+  UsageHistory: object({
+    range: enumOf('7d', '30d', '90d', 'all'),
+    bucket: enumOf('day', 'month'),
+    buckets: array(str),
+    byBilling: array(ref('SpendSeries')),
+    byModel: array(ref('SpendSeries')),
+    byProject: array(ref('SpendSeries')),
+    byConnection: array(ref('SpendSeries')),
+    allowance: array(ref('AllowanceHistory')),
+    projection: object({
+      api: object({ todayUsd: num, dailyCapUsd: num, capAt: nullable(int), perDayUsd: num, monthToDateUsd: num, monthEndUsd: num }),
+      subscription: object({ perDayUsd: num, perDayTokens: num, monthToDateUsd: num, monthEndUsd: num }),
+    }),
+  }),
   RunView: object({
     id: str,
     ticketId: int,
@@ -239,6 +266,15 @@ const paths: Record<string, Record<string, Op>> = {
     },
   },
   '/usage/lifetime': { get: { summary: "Lifetime token use and token-equivalent cost of Workshop's agent runs, by billing, model, project and month.", ok: ref('LifetimeSpend') } },
+  '/usage/history': {
+    get: {
+      summary:
+        "Token use and token-equivalent cost over time (days, or months for all time), as one series per billing, model, project and connection, plus each subscription's readings over the last 7 days and projections: when each usage window reaches your limit, when API spend reaches the daily limit, and month-end totals.",
+      query: { range: '7d, 30d (the default), 90d or all.' },
+      ok: ref('UsageHistory'),
+      errors: [400],
+    },
+  },
   '/openapi.json': { get: { summary: 'This document.', ok: { type: 'object' } } },
   '/settings': {
     get: { summary: 'Operating settings.', ok: ref('Settings') },

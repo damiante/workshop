@@ -351,6 +351,63 @@ export interface LifetimeSpend {
   byMonth: (SpendTotals & { month: string })[];
 }
 
+export type UsageRange = '7d' | '30d' | '90d' | 'all';
+
+/** One group's totals per bucket; `points[i]` belongs to `buckets[i]`. */
+export interface SpendSeries {
+  key: string;
+  name: string;
+  points: SpendTotals[];
+  /** Over the whole range; a run in two buckets counts once here, so this isn't the sum of `points`. */
+  totals: SpendTotals;
+}
+
+export interface WindowProjection {
+  pct: number;
+  resetsAt: number;
+  /** Average use since the window began, in percentage points per hour. */
+  ratePerHour: number;
+  /** When usage reaches your limit at that pace; the reading's time if already there; null if it resets first or nothing is used. */
+  limitAt: number | null;
+  /** The same for 100%, where Claude itself stops. */
+  fullAt: number | null;
+  /** Above your limit, strictly, as the launch gate judges it. */
+  over: boolean;
+}
+
+export interface AllowanceHistory {
+  connectionId: number;
+  connectionName: string;
+  limits: Limits;
+  /** Readings from the last 7 days, oldest first. */
+  samples: { ts: number; fiveHour: number | null; sevenDay: number | null }[];
+  sampledAt: number | null;
+  blockedUntil: number | null;
+  unknown: boolean;
+  /** Null without a reading from the current window. */
+  fiveHour: WindowProjection | null;
+  sevenDay: WindowProjection | null;
+}
+
+export interface UsageHistory {
+  range: UsageRange;
+  bucket: 'day' | 'month';
+  /** 'YYYY-MM-DD' or 'YYYY-MM' in the settings time zone, oldest first, no gaps. */
+  buckets: string[];
+  /** Each sorted by cost over the range, highest first. */
+  byBilling: SpendSeries[];
+  byModel: SpendSeries[];
+  byProject: SpendSeries[];
+  byConnection: SpendSeries[];
+  allowance: AllowanceHistory[];
+  projection: {
+    /** `capAt`: when today's API spend reaches the daily limit at today's pace; null when it doesn't today or the limit is $0. */
+    api: { todayUsd: number; dailyCapUsd: number; capAt: number | null; perDayUsd: number; monthToDateUsd: number; monthEndUsd: number };
+    /** Token-equivalent; subscriptions aren't billed per token. */
+    subscription: { perDayUsd: number; perDayTokens: number; monthToDateUsd: number; monthEndUsd: number };
+  };
+}
+
 export type TokenScope = 'read' | 'write';
 
 export interface ApiTokenView {
