@@ -142,6 +142,14 @@ A push lifts only the mode gate. Dependencies, model settings, allowance, the AP
 
 Priority only changes the order. It doesn't lift the operation mode or hours, or any other gate; it does skip waiting for higher-priority repositories to be classified. Unlike a push, it lasts through waits for you (questions, your review, failures and skip): once you act, the ticket goes first again. It's cleared when the ticket closes, or with **Remove priority**. Prioritised tickets show a "Prioritised" tag, a brown left edge and sit at the top of their column.
 
+## Ignoring usage limits for a ticket
+
+**Ignore usage limits** on a ticket's card lets that ticket's agents start, keep running and resume while a Claude subscription is over your 5-hour or weekly limit. Every other ticket still waits for usage to drop under your limits. Use it for the one ticket you want now when the rest of the backlog can wait.
+
+Only your own limits are lifted. A usage limit Claude reports still stops the ticket's agents until it resets, and so does the rule that a subscription launch needs a fresh usage reading. The API daily cap, the operation mode and hours, the queue order and every other gate still apply. Combine it with **Prioritise** or a push if the ticket should also go first.
+
+It lasts through the ticket's whole lifecycle and is cleared when the ticket closes, or with **Respect usage limits**. Turning it off pauses a running agent at its next turn boundary if usage is still over your limits. Flagged tickets show an "Ignores limits" tag.
+
 ## Failures, pauses and stops
 
 - **A failed attempt** (error result, invalid result, timeout, out of memory, a lost container, a failed push) counts against the stage. After the second one: `workshop/failed`, a comment with the error, and an alert.

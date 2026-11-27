@@ -222,6 +222,39 @@ function PriorityControls({ t }: { t: TicketView }) {
   );
 }
 
+function BypassControls({ t }: { t: TicketView }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (t.state !== 'open' && !t.bypassLimits) return null;
+  const send = (bypassLimits: boolean) => {
+    setBusy(true);
+    setError(null);
+    api(`/tickets/${t.id}/bypass-limits`, { method: 'PUT', body: { bypassLimits } })
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setBusy(false));
+  };
+  const title = 'Agents on this ticket keep going past your 5-hour and weekly limits. Limits Claude reports still stop them.';
+  return (
+    <>
+      <div className="row small">
+        {t.bypassLimits ? (
+          <>
+            <span className="muted">Ignores usage limits</span>
+            <button onClick={() => send(false)} disabled={busy}>
+              Respect usage limits
+            </button>
+          </>
+        ) : (
+          <button onClick={() => send(true)} disabled={busy} title={title}>
+            Ignore usage limits
+          </button>
+        )}
+      </div>
+      <ErrorNote error={error} />
+    </>
+  );
+}
+
 function Card({ t }: { t: TicketView }) {
   const [editing, setEditing] = useState(false);
   return (
@@ -232,6 +265,7 @@ function Card({ t }: { t: TicketView }) {
         </Link>
         <span className="row">
           {t.prioritised && <span className="tag">Prioritised</span>}
+          {t.bypassLimits && <span className="tag">Ignores limits</span>}
           {t.size && <span className="tag">{t.size.toUpperCase()}</span>}
         </span>
       </div>
@@ -261,6 +295,7 @@ function Card({ t }: { t: TicketView }) {
       {t.nominated !== false && (
         <>
           <PriorityControls t={t} />
+          <BypassControls t={t} />
           <PushControls t={t} />
         </>
       )}

@@ -14,7 +14,7 @@ import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncSoon 
 import { requestPause, stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend, USAGE_RANGES, usageHistory } from '../spend.ts';
-import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
+import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setBypassLimits, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { CONTENT_TYPES, extType, validName } from '../workflow/media.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
@@ -269,6 +269,19 @@ apiRouter.put('/tickets/:id/prioritised', (req, res) => {
   }
   setPrioritised(t, prioritised);
   if (prioritised) kick();
+  res.json(ticketView(t, repo));
+});
+
+apiRouter.put('/tickets/:id/bypass-limits', (req, res) => {
+  const { t, repo } = pushableTicket(req.params.id);
+  const bypassLimits = req.body?.bypassLimits;
+  check(typeof bypassLimits === 'boolean', 'Say whether this ticket should ignore your usage limits.');
+  if (bypassLimits) {
+    check(t.state === 'open', 'This ticket is closed.', 409);
+    check(ticketInScope(t, repo), 'This repository only works on nominated tickets. Nominate this ticket first.', 409);
+  }
+  setBypassLimits(t, bypassLimits);
+  if (bypassLimits) kick(); // launches it, or resumes its run paused at your limits
   res.json(ticketView(t, repo));
 });
 

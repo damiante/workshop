@@ -924,6 +924,39 @@ describe('prioritising a ticket', () => {
   });
 });
 
+describe('ignoring usage limits for a ticket', () => {
+  it('sets and removes the flag, and refuses closed tickets', async () => {
+    const id = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
+    const bypass = (body: object, tid: number = id) => request(app).put(`/api/tickets/${tid}/bypass-limits`).set('cookie', cookie).send(body);
+
+    expect((await bypass({ bypassLimits: 'yes' })).status).toBe(400);
+    expect((await bypass({ bypassLimits: true }, 99999)).status).toBe(404);
+    run("UPDATE repos SET selection = 'nominated' WHERE id = 1");
+    expect((await bypass({ bypassLimits: true })).body.error).toMatch(/Nominate this ticket first/);
+    run("UPDATE repos SET selection = 'all' WHERE id = 1");
+    const on = await bypass({ bypassLimits: true });
+    expect(on.status).toBe(200);
+    expect(on.body.bypassLimits).toBe(true);
+    const queue = (await request(app).get('/api/overview').set('cookie', cookie)).body.queue as { ticketId: number; bypassLimits: boolean }[];
+    expect(queue.find((q) => q.ticketId === id)?.bypassLimits ?? true).toBe(true);
+    const off = await bypass({ bypassLimits: false });
+    expect(off.status).toBe(200);
+    expect(off.body.bypassLimits).toBe(false);
+
+    run("UPDATE tickets SET state = 'closed', bypass_limits = 1 WHERE id = ?", id);
+    try {
+      const refused = await bypass({ bypassLimits: true });
+      expect(refused.status).toBe(409);
+      expect(refused.body.error).toBe('This ticket is closed.');
+      const removed = await bypass({ bypassLimits: false });
+      expect(removed.status).toBe(200);
+      expect(removed.body.bypassLimits).toBe(false);
+    } finally {
+      run("UPDATE tickets SET state = 'open', bypass_limits = 0 WHERE id = ?", id);
+    }
+  });
+});
+
 describe('alert links', () => {
   it('points run and ticket alerts at a run, and leaves other alerts unlinked', async () => {
     const tid = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;

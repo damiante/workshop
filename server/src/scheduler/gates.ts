@@ -56,11 +56,14 @@ const used = (w: UsageWindow | null, now: number) => (!w || (w.resetsAt !== null
 
 export const ALLOWANCE_MAX_AGE_MS = 10 * 60_000;
 
-/** Why the subscription allowance blocks a launch right now, or null. */
-export function allowanceBlock(a: AllowanceView | undefined, s: Settings, now: number): string | null {
+/**
+ * Why the subscription allowance blocks a launch right now, or null. With `ignoreLimits` (a ticket you let
+ * past your limits) only a limit Claude reported and a missing or stale reading hold it.
+ */
+export function allowanceBlock(a: AllowanceView | undefined, s: Settings, now: number, ignoreLimits = false): string | null {
   if (a?.blockedUntil && a.blockedUntil > now) return `Claude reported you're at or near a usage limit; resumes ${formatTime(a.blockedUntil, s.timezone, now)}`;
   if (!a?.sampledAt || now - a.sampledAt > ALLOWANCE_MAX_AGE_MS) return 'Checking allowance';
-  return thresholdBlock(a, a.limits, s, now)?.reason ?? null;
+  return ignoreLimits ? null : (thresholdBlock(a, a.limits, s, now)?.reason ?? null);
 }
 
 /** Which usage window is over this subscription's limits, or null. Launches and running agents both stop on it. */

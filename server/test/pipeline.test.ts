@@ -27,7 +27,7 @@ const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { connectionPaused, drive, isDriving, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
 const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
-const { setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
+const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo, HELD_CHECKS_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
@@ -106,7 +106,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, handoff = NULL, rework = NULL, prioritised = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, handoff = NULL, rework = NULL, prioritised = 0, bypass_limits = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.modelsFor = null;
@@ -748,6 +748,43 @@ describe('runner', () => {
       expect(state.killedAt).toBe(3);
     });
 
+    describe('on a ticket you let past your limits', () => {
+      afterEach(() => setBypassLimits(getTicket(1)!, false));
+
+      it('keeps running over the threshold', async () => {
+        setBypassLimits(getTicket(1)!, true);
+        const { env, state } = killable([rate(0.75), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        expect((await settle(go())).status).toBe('succeeded');
+        expect(state.killedAt).toBe(-1);
+      });
+
+      it('resumes a threshold pause over the threshold once flagged, but a usage limit still waits for its reset', async () => {
+        const { env } = killable([rate(0.75), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        const id = go();
+        expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'threshold' });
+        recordProbe(ids.model, { pct: 75, resetsAt: Date.now() + 3600_000 }, null);
+        fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+        resumePaused(getSettings(), Date.now());
+        expect(getRun(id)!.status).toBe('paused');
+        setBypassLimits(getTicket(1)!, true);
+        resumePaused(getSettings(), Date.now());
+        await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+
+        fake.env = new FakeEnv({
+          prepare: ['ok'],
+          run: [line({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: resetsAt() } }), line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Usage limit reached'] })],
+        });
+        const limited = go();
+        expect(await settle(limited)).toMatchObject({ status: 'paused', pause_reason: 'limit' });
+        run("DELETE FROM allowance_samples WHERE source = 'limit'");
+        low();
+        resumePaused(getSettings(), Date.now());
+        expect(getRun(limited)!.status).toBe('paused');
+      });
+    });
+
     it('resumes a threshold pause once a fresh reading is under the threshold', async () => {
       const { env } = killable([rate(0.75), toolUse('a'), toolResult('a'), DONE]);
       fake.env = env;
@@ -944,6 +981,16 @@ describe('runner', () => {
         recordProbe(ids.model, { pct: 95, resetsAt: Date.now() + 3600_000 }, null);
         expect(() => resumeNow(id)).toThrow(/^Can't resume yet: /);
         expect(getRun(id)!.status).toBe('paused');
+      });
+
+      it('resumes over the thresholds when you let the ticket past your limits', async () => {
+        const id = await pausedRun();
+        recordProbe(ids.model, { pct: 95, resetsAt: Date.now() + 3600_000 }, null);
+        setBypassLimits(getTicket(1)!, true);
+        fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [PUSHED] });
+        resumeNow(id);
+        expect(getRun(id)!.status).toBe('running');
+        await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
       });
 
       it('refuses a run you did not pause', async () => {
@@ -2515,6 +2562,60 @@ describe('manual priority', () => {
     expect(getTicket(closed)!.prioritised).toBe(0);
     expect(ticket().prioritised).toBe(1);
     expect(ticketView(ticket(), getRepo(1)!).prioritised).toBe(true);
+  });
+});
+
+describe('ignoring usage limits', () => {
+  const queued = (id = 1) => buildQueue().find((c) => c.ticket.id === id);
+  const over = () => recordProbe(ids.model, { pct: 95, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+  let other: number;
+
+  beforeEach(() => {
+    saveSettings({ mode: 'always' });
+    setConnectionStatus(ids.env, 'ok');
+    fake.env = new FakeEnv({});
+    updateAgent('implement', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model, billing: 'subscription' });
+    run('DELETE FROM allowance_samples');
+    other = Number(
+      run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 9, 'Other', '', 'u', 'me', 'open', ?, '2026-10-12T00:00:00Z')", JSON.stringify([label.size('s'), label.stage('implement')])).lastInsertRowid,
+    );
+  });
+  afterEach(() => {
+    run('DELETE FROM tickets WHERE id = ?', other);
+    run('DELETE FROM allowance_samples');
+    saveSettings({ mode: 'paused' });
+  });
+
+  it("lets a flagged ticket launch over your limits while the rest wait", () => {
+    over();
+    setBypassLimits(getTicket(1)!, true);
+    expect(queued()).toMatchObject({ blockedBy: null, bypassLimits: true, modelConnectionId: ids.model });
+    expect(queued(other)).toMatchObject({ blockedBy: expect.stringMatching(/^5-hour allowance at 95%/), bypassLimits: false });
+  });
+
+  it("still waits for a limit Claude reported, and for a fresh reading", () => {
+    setBypassLimits(getTicket(1)!, true);
+    expect(queued()?.blockedBy).toBe('Checking allowance');
+    over();
+    recordLimit(ids.model, Date.now() + 3600_000);
+    expect(queued()?.blockedBy).toMatch(/^Claude reported/);
+  });
+
+  it('still follows the operation mode', () => {
+    over();
+    saveSettings({ mode: 'paused' });
+    setBypassLimits(getTicket(1)!, true);
+    expect(queued()?.blockedBy).toBe('Workshop is paused');
+  });
+
+  it('is cleared when the ticket closes, and kept while it is open', () => {
+    setBypassLimits(getTicket(1)!, true);
+    setBypassLimits(getTicket(other)!, true);
+    run("UPDATE tickets SET state = 'closed' WHERE id = ?", other);
+    settleManual();
+    expect(getTicket(other)!.bypass_limits).toBe(0);
+    expect(getTicket(1)!.bypass_limits).toBe(1);
+    expect(ticketView(getTicket(1)!, getRepo(1)!).bypassLimits).toBe(true);
   });
 });
 

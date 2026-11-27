@@ -12,7 +12,7 @@ import { appendLog, deleteLog, getRun, RUNNING_SQL, type RunRow } from '../runs.
 import { check } from '../http/util.ts';
 import { sweepExpiredTokens } from '../http/tokens.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, setBypassLimits, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
@@ -174,13 +174,14 @@ async function syncRepos() {
   }
 }
 
-/** Clears hand pushes that are finished or no longer eligible, and priority on closed tickets. */
+/** Clears hand pushes that are finished or no longer eligible, and priority and limit bypasses on closed tickets. */
 export function settleManual() {
   for (const t of all<TicketRow>('SELECT * FROM tickets WHERE push IS NOT NULL')) {
     const repo = getRepo(t.repo_id);
     if (!repo?.enabled || !isAllowedAuthor(t.author) || !inScope(repo.selection, labelsOf(t)) || pushEnded(t.push!, t.push_stage, labelsOf(t), t.state === 'open')) setPush(t, null);
   }
   for (const t of all<TicketRow>("SELECT * FROM tickets WHERE prioritised = 1 AND state = 'closed'")) setPrioritised(t, false);
+  for (const t of all<TicketRow>("SELECT * FROM tickets WHERE bypass_limits = 1 AND state = 'closed'")) setBypassLimits(t, false);
 }
 
 /** With `pushedOnly` (Workshop is paused), only tickets you've pushed are merged. */
@@ -199,10 +200,10 @@ export async function mergeApproved(pushedOnly: boolean) {
 }
 
 /** Every Claude subscription in your order that isn't paused, with the models it offers and what holds it back. */
-function subscriptions(s: Settings, now: number) {
+function subscriptions(s: Settings, now: number, ignoreLimits = false) {
   return listConnections('model')
     .filter((c) => !c.paused && modelsOf(c).billing().includes('subscription'))
-    .map((c) => ({ id: c.id, provider: c.provider, models: modelsOf(c).models().map((m) => m.id), block: allowanceBlock(allowanceOf(c.id), s, now), failing: probeFailing(c.id, now) }));
+    .map((c) => ({ id: c.id, provider: c.provider, models: modelsOf(c).models().map((m) => m.id), block: allowanceBlock(allowanceOf(c.id), s, now, ignoreLimits), failing: probeFailing(c.id, now) }));
 }
 
 /** The subscriptions that can run `model` for `provider`. The agent's own connection (`own`) counts as offering its model. */
@@ -215,8 +216,11 @@ const offering = (pool: ReturnType<typeof subscriptions>, provider: string, mode
  */
 function moveTarget(r: RunRow, s: Settings, now: number) {
   const conn = getConnection(r.model_connection_id);
-  return conn ? pickSubscription(offering(subscriptions(s, now), conn.provider, r.model)) : null;
+  return conn ? pickSubscription(offering(subscriptions(s, now, bypassesLimits(r)), conn.provider, r.model)) : null;
 }
+
+/** You let this run's ticket past your subscription limits. */
+const bypassesLimits = (r: RunRow) => Boolean(getTicket(r.ticket_id)?.bypass_limits);
 
 /** Subscription runs only: the connection the run is on is paused. */
 const onPausedSubscription = (r: RunRow) => r.billing === 'subscription' && Boolean(getConnection(r.model_connection_id)?.paused);
@@ -243,7 +247,7 @@ export function resumePaused(s: Settings, now: number) {
     // A threshold pause also ends early when you raise that subscription's limits: allowanceBlock below decides.
     if (r.pause_reason !== 'threshold' && r.resets_at && r.resets_at > now) continue;
     if (r.billing === 'subscription' && r.model_connection_id) {
-      const block = allowanceBlock(allowanceOf(r.model_connection_id), s, now);
+      const block = allowanceBlock(allowanceOf(r.model_connection_id), s, now, bypassesLimits(r));
       if (block === 'Checking allowance') void probeAllowance(r.model_connection_id).catch(() => {});
       if (block) continue;
     }
@@ -267,6 +271,7 @@ export interface Candidate {
   billing: Billing;
   pushed: boolean;
   prioritised: boolean;
+  bypassLimits: boolean;
 }
 
 function startCandidate(c: Candidate): string | null {
@@ -322,7 +327,7 @@ export function resumeNow(runId: string) {
   }
   const connectionId = getRun(runId)!.model_connection_id;
   if (r.billing === 'subscription' && connectionId) {
-    const block = allowanceBlock(allowanceOf(connectionId), s, now);
+    const block = allowanceBlock(allowanceOf(connectionId), s, now, bypassesLimits(r));
     if (block === 'Checking allowance') void probeAllowance(connectionId).catch(() => {});
     check(!block, `Can't resume yet: ${block}.`, 409);
   }
@@ -361,6 +366,8 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     .filter((t) => isAllowedAuthor(t.author) && ticketInScope(t, repos.get(t.repo_id)!) && isUnclassified(labelsOf(t), true, blockersOf(t)))
     .map((t) => ({ repo: repos.get(t.repo_id)!.full_name, priority: repos.get(t.repo_id)!.priority }));
   const pool = subscriptions(s, now);
+  // Tickets you let past your limits pick from the same subscriptions, judged without your limits.
+  const bypassPool = rows.some((t) => t.bypass_limits) ? subscriptions(s, now, true) : pool;
   // A run started while GitHub is rate-limited can't publish: it would only wait, and spend more of the quota.
   const githubBlock = new Map<number, string | null>();
   for (const r of repos.values()) {
@@ -389,15 +396,16 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     // API-billed agents use their connection's key, paused or not: pausing only manages subscriptions.
     if (!blockedBy && cls.billing === 'api') blockedBy = apiCapBlock(spentToday, s);
     else if (!blockedBy) {
-      const pick = pickSubscription(offering(pool, conn!.provider, cls.model!, conn!.id));
+      const subs = t.bypass_limits ? bypassPool : pool;
+      const pick = pickSubscription(offering(subs, conn!.provider, cls.model!, conn!.id));
       if (pick) {
         useConnection = getConnection(pick.id);
         blockedBy = pick.block;
-      } else if (pool.some((c) => c.provider === conn!.provider)) blockedBy = `No Claude subscription that isn't paused offers ${cls.model}. Resume one on the Connections page`;
+      } else if (subs.some((c) => c.provider === conn!.provider)) blockedBy = `No Claude subscription that isn't paused offers ${cls.model}. Resume one on the Connections page`;
       else blockedBy = 'Every Claude subscription is paused. Resume one on the Connections page';
     }
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), priority: stepPriority(step), repoPriority: repo.priority });
+    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), priority: stepPriority(step), repoPriority: repo.priority });
   }
   // The sort is stable, so the ticket order setting (from the query) decides ties.
   return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.prioritised) - Number(a.prioritised) || b.repoPriority - a.repoPriority || a.priority - b.priority);
@@ -412,6 +420,7 @@ export function queueView(): QueueItem[] {
     blockedBy: c.blockedBy,
     push: c.ticket.push,
     prioritised: c.prioritised,
+    bypassLimits: c.bypassLimits,
   }));
 }
 

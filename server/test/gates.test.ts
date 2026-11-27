@@ -87,6 +87,15 @@ describe('allowance gate', () => {
     expect(allowanceBlock(a({ blockedUntil: now + 60_000 }), s(), now)).toMatch(/usage limit/);
   });
 
+  it("skips your limits for a ticket you let past them, but not Claude's or a stale reading", () => {
+    const over = a({ fiveHour: { pct: 95, resetsAt: null }, sevenDay: { pct: 95, resetsAt: null } });
+    expect(allowanceBlock(over, s(), now)).toMatch(/5-hour allowance at 95%/);
+    expect(allowanceBlock(over, s(), now, true)).toBeNull();
+    expect(allowanceBlock(a({ ...over, blockedUntil: now + 60_000 }), s(), now, true)).toMatch(/usage limit/);
+    expect(allowanceBlock(undefined, s(), now, true)).toBe('Checking allowance');
+    expect(allowanceBlock(a({ ...over, sampledAt: now - 11 * 60_000 }), s(), now, true)).toBe('Checking allowance');
+  });
+
   it('says which window is over the thresholds and when it resets, for pausing running agents', () => {
     const five = { pct: 74, resetsAt: now + 600_000 };
     const week = { pct: 81, resetsAt: now + 86400_000 };

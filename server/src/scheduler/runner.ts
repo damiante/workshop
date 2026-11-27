@@ -357,6 +357,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   // which other runs and probes keep current.
   const overThreshold = () => {
     if (r.billing !== 'subscription' || claude.result) return null;
+    if (getTicket(r.ticket_id)?.bypass_limits) return null; // you let this ticket past your limits
     const s = getSettings();
     const now = Date.now();
     const stored = r.model_connection_id ? allowanceOf(r.model_connection_id) : null;

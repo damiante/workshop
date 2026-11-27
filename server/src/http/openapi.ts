@@ -175,6 +175,7 @@ const schemas: Record<string, Schema> = {
     push: nullable(enumOf('stage', 'lifecycle')),
     nominated: nullable(bool),
     prioritised: bool,
+    bypassLimits: bool,
     mediaCount: int,
     updatedAt: str,
   }),
@@ -192,7 +193,7 @@ const schemas: Record<string, Schema> = {
     [],
   ),
   HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), available: bool, slots: int, busy: int, specs: nullable(str) }),
-  QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str), push: nullable(enumOf('stage', 'lifecycle')), prioritised: bool }),
+  QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str), push: nullable(enumOf('stage', 'lifecycle')), prioritised: bool, bypassLimits: bool }),
   AlertView: object({
     id: int,
     level: enumOf('error', 'warning', 'info'),
@@ -373,6 +374,16 @@ const paths: Record<string, Record<string, Op>> = {
         'Puts the ticket ahead of every ticket you haven\'t prioritised, for its whole lifecycle, or removes that. Send { "prioritised": true | false }. Workshop\'s mode and hours still apply. Cleared when the ticket closes.',
       params: ['id'],
       body: object({ prioritised: bool }),
+      ok: ref('TicketView'),
+      errors: [400, 403, 404, 409],
+    },
+  },
+  '/tickets/{id}/bypass-limits': {
+    put: {
+      summary:
+        'Lets this ticket\'s agents start, run and resume past your subscription usage limits for its whole lifecycle, or removes that. Send { "bypassLimits": true | false }. Limits Claude reports, the API daily cap, mode and hours still apply. Cleared when the ticket closes.',
+      params: ['id'],
+      body: object({ bypassLimits: bool }),
       ok: ref('TicketView'),
       errors: [400, 403, 404, 409],
     },

@@ -55,6 +55,10 @@ curl -X POST $WORKSHOP/api/tickets/12/push -H "Authorization: Bearer $TOKEN" \
 curl -X PUT $WORKSHOP/api/tickets/12/prioritised -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"prioritised":true}'
 
+# Let a ticket's agents run past your subscription usage limits, until it closes (false removes that)
+curl -X PUT $WORKSHOP/api/tickets/12/bypass-limits -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"bypassLimits":true}'
+
 # Switch an agent host off for new agents (it stays connected; running agents carry on)
 curl -X PUT $WORKSHOP/api/hosts/3 -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"available":false}'
@@ -101,6 +105,8 @@ Either push also ends where Workshop would wait for you anyway: your pull reques
 `PUT /api/tickets/:id/dismissed` with `{"dismissed": true}` or `false` hides a ticket from **Needs you** on the dashboard, or brings it back. `/api/overview` lists dismissed tickets under `dismissed`. A dismissed ticket comes back by itself when the reason it needs you changes: a new question, a new failure stop or a new pull request to review (anything that starts a new run). It also comes back if cleanup removes the ticket's latest run after the retention period. Nothing changes on GitHub. It answers with the ticket; 400 if `dismissed` isn't a boolean, 409 when dismissing a ticket that isn't waiting on you.
 
 `PUT /api/tickets/:id/prioritised` with `{"prioritised": true}` or `false` puts a ticket ahead of every ticket you haven't prioritised, for its whole lifecycle, or removes that. Unlike a push, it only changes the order: Workshop's mode and hours and every other gate still apply. It stays set through questions and your reviews, and is cleared when the ticket closes. Between prioritised tickets the usual order decides (repository priority, step, ticket order); pushed tickets still go first. `/api/overview` marks them with `prioritised` in `queue`. It answers with the ticket; 400 if `prioritised` isn't a boolean, 404 for a ticket you couldn't push either, and 409 when prioritising a closed ticket or one that isn't nominated in a nominated-only repository. Removing priority always works.
+
+`PUT /api/tickets/:id/bypass-limits` with `{"bypassLimits": true}` or `false` lets a ticket's agents start, run and resume past your 5-hour and weekly subscription limits for its whole lifecycle, or removes that. Limits Claude reports still apply, as do the need for a fresh usage reading, the API daily cap, Workshop's mode and hours and the queue order. It's cleared when the ticket closes. `/api/overview` marks these tickets with `bypassLimits` in `queue`. It answers with the ticket; 400 if `bypassLimits` isn't a boolean, 404 for a ticket you couldn't push either, and 409 when setting it on a closed ticket or one that isn't nominated in a nominated-only repository. Removing it always works.
 
 A push is refused with 409 and the reason when the ticket is closed, failed, skipped, waiting on a question or waiting for your review, or (for `stage`) already has an agent working on that stage. A ticket that doesn't exist, belongs to a disabled repository or was opened by someone outside the author allowlist is 404, and a missing or invalid scope is 400.
 

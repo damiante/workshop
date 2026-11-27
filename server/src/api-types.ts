@@ -168,6 +168,8 @@ export interface TicketView {
   push: Push | null;
   /** You put this ticket ahead of the rest of the queue; it stays until you remove it or the ticket closes. */
   prioritised: boolean;
+  /** Workshop's usage limits don't hold this ticket's agents; limits Claude reports still do. Cleared when it closes. */
+  bypassLimits: boolean;
   /** How many images the ticket's media store holds. */
   mediaCount: number;
   updatedAt: string;
@@ -290,6 +292,7 @@ export interface QueueItem {
   blockedBy: string | null;
   push: Push | null;
   prioritised: boolean;
+  bypassLimits: boolean;
 }
 
 export interface AlertView {
