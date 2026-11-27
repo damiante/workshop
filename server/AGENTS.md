@@ -42,6 +42,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
   - `prepare` and `publish` may simply run again;
   - a vanished `run` container is a failure;
   - re-attaching skips log lines already stored for that container (`linesFrom`).
+- A run that frees its slot (it ends, fails, publishes, pauses, waits to publish again or is cancelled) calls `onRunSettled`, which `kick()`s the scheduler so the next job starts within a second instead of at the next 60 s tick. A run that only lost contact with its host doesn't, so re-attaching can't loop. A host that comes back, or a connection that tests fine, kicks too.
 - The unique index `runs_one_active_per_ticket` enforces one agent per ticket (paused runs included). `launch()` returns null on conflict.
 - `publish` merges in commits that appeared on the remote branch and retries the push; on a conflict it saves the work on `<branch>-unmerged-<sha>` (exit 3). The run then succeeds and the ticket moves to `stage:reconcile`, with what was interrupted kept in `tickets.rescue`; the Merge agent merges the rescue branch and `planTransition` finishes the interrupted stage. A conflict during that reconcile run fails it.
 - Side effects happen only in `publishRun`, from `planTransition`'s plan. Agents never apply labels.

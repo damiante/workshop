@@ -122,6 +122,7 @@ async function testConnection(c: Connection): Promise<TestResult> {
   try {
     const message = await describe(c);
     setConnectionStatus(c.id, 'ok');
+    kick(); // a host that's new, back or has more slots can take work, and so can a working subscription
     return { ok: true, message };
   } catch (err) {
     const message = (err as Error).message;

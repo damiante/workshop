@@ -67,7 +67,10 @@ export const isDriving = (id: string) => driving.has(id);
 const pauseSignals = new Map<string, () => void>();
 
 let settled = () => {};
-/** Called whenever a run stops being driven (the scheduler uses it to look for the next job). */
+/**
+ * Called whenever a run frees its slot: its containers exit or it fails, publishes, pauses, waits to publish again
+ * or is cancelled. The scheduler uses it to look for the next job. Not called when only the host is out of reach.
+ */
 export function onRunSettled(fn: () => void) {
   settled = fn;
 }
@@ -870,6 +873,7 @@ async function publishRun(ctx: Ctx) {
 export async function drive(runId: string) {
   if (driving.has(runId)) return;
   driving.add(runId);
+  let lost = false;
   try {
     const r = getRun(runId);
     if (!r || !ACTIVE_STATUSES.includes(r.status) || r.status === 'paused') return;
@@ -905,6 +909,8 @@ export async function drive(runId: string) {
     }
   } catch (err) {
     if (err instanceof HostUnreachable) {
+      // The run still holds its slot, and kicking here would only re-attach to the unreachable host again.
+      lost = true;
       raiseAlert('warning', 'run-detached', `${err.message} The agent may still be working; Workshop reconnects when the host is back.`, `run:${runId}`);
       return;
     }
@@ -912,7 +918,7 @@ export async function drive(runId: string) {
     await fail(runId, errorText(err));
   } finally {
     driving.delete(runId);
-    settled();
+    if (!lost) settled();
   }
 }
 
@@ -1097,6 +1103,8 @@ export async function stopRun(runId: string, reason: string, hold: boolean) {
   activity.delete(runId);
   const conn = getConnection(r.environment_id);
   if (conn && r.container_id) await environmentOf(conn).kill(r.container_id).catch(() => {});
+  // A paused run or one waiting to publish isn't being driven, so nothing else tells the scheduler.
+  settled();
   const t = getTicket(r.ticket_id);
   if (!t) return;
   await markRunning(t, false);

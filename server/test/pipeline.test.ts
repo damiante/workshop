@@ -25,7 +25,7 @@ const { createConnection, reorderConnections, setConnectionPaused, setConnection
 const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
-const { connectionPaused, drive, isDriving, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
+const { connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
 const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
@@ -1557,6 +1557,116 @@ describe('publish retries', () => {
     expect(r.error).toContain('6 hours');
     expect(one<{ message: string }>("SELECT message FROM alerts WHERE kind = 'publish-failed' AND ref = ?", `run:${id}`)?.message).toContain('me/app#3');
     expect(getTicket(1)!.failures).toBe(1);
+  });
+});
+
+describe('freeing a slot', () => {
+  // The scheduler kicks a tick from this hook; each call records the run's status at that moment.
+  let calls: (string | undefined)[] = [];
+  let watched = '';
+  const PUSHED = line({ before: '', after: 'def5678', ahead: 1 });
+  const work = (over: Record<string, string[]> = {}) => new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Done.' })], publish: [PUSHED], ...over });
+  /** A host whose agent keeps working until its container is killed. `env.say` prints a line from it. */
+  const busy = () => {
+    const env = Object.assign(work(), { say: null as ((text: string) => void) | null });
+    let end = () => {};
+    let killed = false;
+    env.follow = async (id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+      if (!id.startsWith('run')) return onLine({ stream: 'stdout', text: id.startsWith('publish') ? PUSHED : 'ok' });
+      env.say = (text) => onLine({ stream: 'stdout', text });
+      await new Promise<void>((resolve) => (end = resolve));
+    };
+    env.kill = async () => {
+      killed = true;
+      end();
+    };
+    env.wait = async (id: string) => ({ running: false, exitCode: id.startsWith('run') && killed ? 137 : 0, oomKilled: false });
+    return env;
+  };
+
+  beforeEach(() => {
+    setConnectionStatus(ids.env, 'ok');
+    calls = [];
+    watched = '';
+    onRunSettled(() => calls.push(getRun(watched)?.status));
+  });
+  afterEach(() => onRunSettled(() => {}));
+
+  it('tells the scheduler once a run has published, not before', async () => {
+    fake.env = work();
+    watched = go();
+    await settle(watched);
+    await vi.waitFor(() => expect(isDriving(watched)).toBe(false));
+    expect(calls).toEqual(['succeeded']);
+  });
+
+  it('tells the scheduler when the agent fails', async () => {
+    const env = work();
+    env.exitCodes = { prepare: 1 };
+    fake.env = env;
+    watched = go();
+    await vi.waitFor(() => expect(isDriving(watched)).toBe(false));
+    expect(calls).toEqual(['failed']);
+  });
+
+  it('tells the scheduler when publishing fails for now and the run waits to try again', async () => {
+    failOnce(fake.tickets.setLabels, Object.assign(new Error(''), { status: 502 }), (_repo: unknown, _n: number, add: string[]) => add.includes(label.stage('code-review')));
+    fake.env = work();
+    watched = go();
+    await deferred(watched);
+    expect(calls).toEqual(['publishing']);
+    expect(hostLoads()[0].pools.standard.busy).toBe(0);
+  });
+
+  it('tells the scheduler when you stop a running agent', async () => {
+    fake.env = busy();
+    watched = go();
+    await vi.waitFor(() => expect(getRun(watched)!.step).toBe('run'));
+    await stopRun(watched, 'Stopped from Workshop.', false);
+    await vi.waitFor(() => expect(isDriving(watched)).toBe(false));
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(calls.every((s) => s === 'cancelled')).toBe(true);
+  });
+
+  it('tells the scheduler when you stop a paused run, which nothing is driving', async () => {
+    fake.env = work();
+    watched = go();
+    await settle(watched);
+    run("UPDATE runs SET status = 'paused', ended_at = NULL WHERE id = ?", watched);
+    calls = [];
+    await stopRun(watched, 'Stopped from Workshop.', false);
+    expect(calls).toEqual(['cancelled']);
+  });
+
+  it('tells the scheduler when an agent pauses', async () => {
+    const env = busy();
+    fake.env = env;
+    watched = go();
+    await vi.waitFor(() => expect(env.say).not.toBeNull());
+    const tool = { type: 'tool_use', id: 'a', name: 'Bash', input: { command: 'npm test' } };
+    env.say!(line({ type: 'assistant', message: { content: [tool] } }));
+    env.say!(line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: 'ok' }] } }));
+    requestPause(watched); // between turns, so it stops at once
+    await vi.waitFor(() => expect(isDriving(watched)).toBe(false));
+    expect(calls).toEqual(['paused']);
+  });
+
+  it("doesn't when only the host is out of reach, so a lost run isn't re-attached in a loop", async () => {
+    const env = busy();
+    fake.env = env;
+    watched = go();
+    await vi.waitFor(() => expect(getRun(watched)!.step).toBe('run'));
+    env.ping = async () => {
+      throw new Error('connection refused');
+    };
+    env.wait = async () => {
+      throw new Error('connection refused');
+    };
+    await env.kill('');
+    await vi.waitFor(() => expect(isDriving(watched)).toBe(false));
+    expect(getRun(watched)!.status).toBe('running');
+    expect(calls).toEqual([]);
+    await stopRun(watched, 'Stopped from Workshop.', false);
   });
 });
 

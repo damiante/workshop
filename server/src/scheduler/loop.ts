@@ -165,6 +165,7 @@ async function checkHosts() {
       await withTimeout(environmentOf(c).ping(), 15_000);
       hostFailures.delete(c.id);
       setConnectionStatus(c.id, 'ok');
+      if (c.status !== 'ok') kick(); // a host that's back has free slots again
       clearAlert('host-offline', `host:${c.id}`);
     } catch (err) {
       const failures = (hostFailures.get(c.id) ?? 0) + 1;
