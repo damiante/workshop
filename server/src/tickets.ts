@@ -5,7 +5,7 @@ import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
 import type { RepoRef, TicketLink } from './providers/types.ts';
 import { mediaCount } from './media.ts';
 import { getSettings } from './settings.ts';
-import { dependencyBlock, implicitPriority, inScope } from './scheduler/gates.ts';
+import { dependencyBlock, implicitPriority, inScope, waitingCounts } from './scheduler/gates.ts';
 import type { Handoff, Rescue, Rework } from './workflow/schemas.ts';
 import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
 
@@ -310,6 +310,8 @@ export interface PriorityGraph {
   prioritisedFor(t: TicketRow, repo: RepoRow): TicketRefView[];
   /** A blocker ref of a ticket in `repo`, with Workshop's id for it when Workshop has it. */
   resolve(ref: string, repo: RepoRow): TicketRefView;
+  /** How many open tickets wait on this one, directly or through others. */
+  unblocks(t: TicketRow, repo: RepoRow): number;
 }
 
 /** Implicit priority, worked out from the open tickets' stored blockers. Nothing of it is stored. */
@@ -319,9 +321,9 @@ export function priorityGraph(): PriorityGraph {
   );
   const known = new Map<string, { id: number; ref: string }>();
   for (const r of rows) known.set(refKey(`#${r.number}`, r.full_name), { id: r.id, ref: `${r.full_name}#${r.number}` });
-  const graph = implicitPriority(
-    rows.map((r) => ({ key: refKey(`#${r.number}`, r.full_name), prioritised: Boolean(r.prioritised), blockers: (JSON.parse(r.blocked_by) as string[]).map((b) => refKey(b, r.full_name)) })),
-  );
+  const nodes = rows.map((r) => ({ key: refKey(`#${r.number}`, r.full_name), prioritised: Boolean(r.prioritised), blockers: (JSON.parse(r.blocked_by) as string[]).map((b) => refKey(b, r.full_name)) }));
+  const graph = implicitPriority(nodes);
+  const counts = waitingCounts(nodes);
   /** `#n` within `repo`, otherwise `owner/repo#n` as GitHub spells it. */
   const displayRef = (key: string, repo: RepoRow) => {
     const full = known.get(key)?.ref ?? key;
@@ -331,6 +333,7 @@ export function priorityGraph(): PriorityGraph {
   return {
     prioritisedFor: (t, repo) => (graph.get(refKey(`#${t.number}`, repo.full_name)) ?? []).map((k) => ({ ref: displayRef(k, repo), ticketId: known.get(k)?.id ?? null })),
     resolve: (ref, repo) => ({ ref, ticketId: known.get(refKey(ref, repo.full_name))?.id ?? null }),
+    unblocks: (t, repo) => counts.get(refKey(`#${t.number}`, repo.full_name)) ?? 0,
   };
 }
 

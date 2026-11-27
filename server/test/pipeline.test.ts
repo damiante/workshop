@@ -26,7 +26,7 @@ const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { connectionPaused, drive, isDriving, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
-const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
+const { allocate, buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, tick } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
@@ -1702,6 +1702,82 @@ describe('agent sizes', () => {
   });
 });
 
+describe('allocation', () => {
+  const script = () => ({ usage: [RATE, result({})], prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'Done.', tests: 'ok' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+  const configure = (slots: number) => run('UPDATE connections SET config = ? WHERE id = ?', JSON.stringify({ mode: 'socket', slots, cpus: 2, memoryGb: 4 }), ids.env);
+  const started = () => all<{ id: string; ticket_id: number }>("SELECT id, ticket_id FROM runs WHERE id NOT LIKE 'busy-%'");
+  const ticketIds = () => all<{ id: number }>('SELECT id FROM tickets ORDER BY id').map((t) => t.id);
+
+  beforeEach(() => {
+    saveSettings({ mode: 'always' });
+    setConnectionStatus(ids.env, 'ok');
+    recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+    updateAgent('implement', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model, billing: 'subscription' });
+    fake.models.models = () => [];
+    fake.tickets.listChanged = async () => [];
+    fake.env = new FakeEnv(script());
+    for (const n of [20, 21, 22]) {
+      run(
+        `INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, ?, 'Ready', '', 'u', 'me', 'open', ?, '2026-10-14T00:00:00Z')`,
+        n,
+        JSON.stringify([label.size('s'), label.stage('implement')]),
+      );
+    }
+  });
+  afterEach(async () => {
+    await new Promise((done) => setTimeout(done, 700)); // let ticks kicked by Refresh and the probes run before cleaning up
+    for (const r of all<{ id: string }>("SELECT id FROM runs WHERE id NOT LIKE 'busy-%'")) await settle(r.id);
+    run('DELETE FROM runs');
+    run('DELETE FROM tickets WHERE number IN (20, 21, 22)');
+    configure(1);
+  });
+
+  it('starts an agent in every free slot in one pass, and holds the rest', async () => {
+    configure(3);
+    const queue = allocate(getSettings(), Date.now());
+    expect(started()).toHaveLength(3);
+    expect(hostLoads().find((h) => h.id === ids.env)!.pools.standard).toEqual({ slots: 3, busy: 3 });
+    expect(queue).toHaveLength(1);
+    expect(queue[0].blockedBy).toBe('Every agent host is busy or offline');
+    expect(ticketIds()).toContain(queue[0].ticket.id);
+  });
+
+  it('fills every free slot on a regular tick', async () => {
+    configure(3);
+    await tick();
+    expect(started()).toHaveLength(3);
+  });
+
+  it('counts slots already in use', () => {
+    configure(3);
+    const other = one<{ id: number }>('SELECT id FROM tickets WHERE number = 22')!.id;
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, environment_id, size, model, billing, status, started_at) VALUES ('busy-standard', ?, 'implement', 1, ?, 'standard', 'm', 'subscription', 'running', 0)", other, ids.env);
+    const queue = allocate(getSettings(), Date.now());
+    expect(started()).toHaveLength(2);
+    expect(hostLoads().find((h) => h.id === ids.env)!.pools.standard).toEqual({ slots: 3, busy: 3 });
+    expect(queue.map((c) => c.blockedBy)).toEqual(['Every agent host is busy or offline']);
+  });
+
+  it('waits on Refresh for the allowance check, then fills the free slots', async () => {
+    configure(2);
+    run('DELETE FROM allowance_samples');
+    forgetProbe(ids.model);
+    expect(buildQueue().every((c) => c.blockedBy === 'Checking allowance')).toBe(true);
+    await refreshNow();
+    expect(fake.env.started.filter((spec: StepSpec) => spec.labels?.['workshop.probe'] === String(ids.model))).toHaveLength(1);
+    expect(started()).toHaveLength(2);
+  });
+
+  it('shares an allowance check that is already running', async () => {
+    run('DELETE FROM allowance_samples');
+    const first = probeAllowance(ids.model, true);
+    const second = probeAllowance(ids.model, true);
+    expect(second).toBe(first);
+    expect(await second).toEqual(await first);
+    expect(fake.env.started.filter((spec: StepSpec) => spec.cmd[0] === 'usage-probe')).toHaveLength(1);
+  });
+});
+
 describe('subscription order', () => {
   const pick = () => buildQueue().find((c) => c.ticket.id === 1)!;
   const reading = (conn: number, pct: number) => recordProbe(conn, { pct, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
@@ -3235,6 +3311,7 @@ describe('implicit priority', () => {
   it('puts the tickets a prioritised ticket depends on first, without marking them prioritised', () => {
     const merge = add(1, 30, [label.stage('merge'), label.size('s')]);
     run("UPDATE tickets SET pr_status = 'conflict' WHERE id = ?", merge);
+    add(1, 31, [label.stage('design'), label.size('s')], ['#30']); // so both unblock one ticket and the step order decides
     const b = add(1, 20, [label.stage('design'), label.size('s')], ['#3']);
     expect(buildQueue()[0].ticket.id).toBe(merge);
     expect(queued(1).prioritisedFor).toEqual([]);
@@ -3384,8 +3461,14 @@ describe('nominated tickets only', () => {
 describe('ticket order', () => {
   const implement = JSON.stringify([label.size('s'), label.stage('implement')]);
   const numbers = () => buildQueue().map((c) => c.ticket.number);
-  const add = (n: number, updated: string, created: string | null, labels = implement) =>
-    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at, created_at) VALUES (1, ?, 'T', '', 'u', 'me', 'open', ?, ?, ?)", n, labels, updated, created);
+  const add = (n: number, updated: string, created: string | null, labels = implement, blockedBy: string[] = [], repo = 1) =>
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at, created_at) VALUES (?, ?, 'T', '', 'u', 'me', 'open', ?, ?, ?, ?)", repo, n, labels, JSON.stringify(blockedBy), updated, created);
+  /** Tickets not waiting on another ticket, in queue order. */
+  const startable = () => buildQueue().filter((c) => !c.blockedBy?.startsWith('Depends on')).map((c) => c.ticket.number);
+  /** `count` open tickets, numbered from `from`, that wait on `ref`. */
+  const dependents = (from: number, count: number, ref: string) => {
+    for (let i = 0; i < count; i++) add(from + i, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', implement, [ref]);
+  };
 
   beforeEach(() => {
     saveSettings({ mode: 'always', ticketOrder: 'updated-asc' });
@@ -3394,7 +3477,7 @@ describe('ticket order', () => {
     add(11, '2026-10-15T00:00:00Z', null); // no creation time: falls back to its update time
   });
   afterEach(() => {
-    run('DELETE FROM tickets WHERE number IN (10, 11, 12)');
+    run('DELETE FROM tickets WHERE number BETWEEN 10 AND 49');
     saveSettings({ ticketOrder: 'updated-asc' });
   });
 
@@ -3418,6 +3501,62 @@ describe('ticket order', () => {
     add(12, '2026-10-16T00:00:00Z', null, '[]'); // unclassified: a later step, though the newest update
     saveSettings({ ticketOrder: 'updated-desc' });
     expect(numbers()).toEqual([11, 3, 10, 12]);
+    setPush(getTicket(1)!, 'lifecycle');
+    expect(numbers()[0]).toBe(3);
+  });
+
+  it('offers a newer ticket that open tickets wait on before older ones', () => {
+    saveSettings({ ticketOrder: 'created-asc' });
+    add(20, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '[]'); // older, blocks nothing
+    add(21, '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', '[]'); // newer, a fresh prerequisite
+    expect(startable()).toEqual([3, 10, 11, 20, 21]);
+    dependents(30, 5, '#21');
+    expect(startable()).toEqual([21, 3, 10, 11, 20]);
+    expect(queueView().find((q) => q.ticket === 'me/app#21')?.unblocks).toBe(5);
+    expect(queueView().find((q) => q.ticket === 'me/app#20')?.unblocks).toBe(0);
+  });
+
+  it('counts tickets that wait through others', () => {
+    saveSettings({ ticketOrder: 'created-asc' });
+    add(20, '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', '[]'); // newest, two wait on it
+    add(21, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', implement, ['#20']);
+    add(22, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', implement, ['#21']);
+    add(23, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '[]'); // oldest, one waits on it
+    add(24, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', implement, ['#23']);
+    expect(startable().slice(0, 2)).toEqual([20, 23]);
+    expect(buildQueue().find((c) => c.ticket.number === 20)?.unblocks).toBe(2);
+  });
+
+  it('lets the ticket order decide between tickets that unblock the same amount', () => {
+    add(20, '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '[]');
+    add(21, '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', '[]');
+    dependents(30, 1, '#20');
+    dependents(31, 1, '#21');
+    saveSettings({ ticketOrder: 'created-asc' });
+    expect(startable().slice(0, 2)).toEqual([20, 21]);
+    saveSettings({ ticketOrder: 'created-desc' });
+    expect(startable().slice(0, 2)).toEqual([21, 20]);
+  });
+
+  it('counts blockers in other repositories', () => {
+    const app = one<{ vcs_connection_id: number; ticket_connection_id: number }>('SELECT * FROM repos WHERE id = 1')!;
+    const lib = Number(run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled) VALUES (?, ?, 'Me/Lib', 'main', 'u', 1)", app.vcs_connection_id, app.ticket_connection_id).lastInsertRowid);
+    try {
+      add(40, '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', '[]', [], lib);
+      add(30, '2026-10-13T00:00:00Z', '2026-10-13T00:00:00Z', implement, ['me/lib#40']);
+      expect(startable()[0]).toBe(40);
+      expect(queueView().find((q) => q.ticket === 'Me/Lib#40')?.unblocks).toBe(1);
+    } finally {
+      run('DELETE FROM tickets WHERE repo_id = ?', lib);
+      run('DELETE FROM repos WHERE id = ?', lib);
+    }
+  });
+
+  it('still puts prioritised and pushed tickets first', () => {
+    add(21, '2026-10-20T00:00:00Z', '2026-10-20T00:00:00Z', '[]');
+    dependents(30, 5, '#21');
+    setPrioritised(getTicket(one<{ id: number }>('SELECT id FROM tickets WHERE number = 10')!.id)!, true);
+    expect(startable().slice(0, 2)).toEqual([10, 21]);
     setPush(getTicket(1)!, 'lifecycle');
     expect(numbers()[0]).toBe(3);
   });

@@ -209,7 +209,7 @@ const schemas: Record<string, Schema> = {
     [],
   ),
   HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), available: bool, slots: int, busy: int, pools: nullable(array(object({ size: enumOf('small', 'standard', 'large'), slots: int, busy: int }))), specs: nullable(str) }),
-  QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str), push: nullable(enumOf('stage', 'lifecycle')), prioritised: bool, bypassLimits: bool, prioritisedFor: array(str), after: { ...array(str), description: "Higher-priority repositories whose queued tickets go ahead of this one. It orders the queue; a ticket that fits a free slot they can't use still starts." } }),
+  QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str), push: nullable(enumOf('stage', 'lifecycle')), prioritised: bool, bypassLimits: bool, prioritisedFor: array(str), unblocks: int, after: { ...array(str), description: "Higher-priority repositories whose queued tickets go ahead of this one. It orders the queue; a ticket that fits a free slot they can't use still starts." } }),
   AlertView: object({
     id: int,
     level: enumOf('error', 'warning', 'info'),
@@ -420,7 +420,7 @@ const paths: Record<string, Record<string, Op>> = {
   '/refresh': {
     post: {
       summary:
-        "Runs the checks Workshop's timer runs, now: syncs tickets from GitHub, re-reads the Claude usage of subscriptions that are over your limits or haven't been checked recently, then starts or resumes whatever is ready. Answers at once; the checks finish in the background.",
+        "Runs the checks Workshop's timer runs, now: syncs tickets from GitHub, re-reads the Claude usage of subscriptions that are over your limits or haven't been checked recently (waiting up to about 2.5 minutes for those checks), then starts or resumes agents in every free slot that a ready ticket fits. Answers at once; the checks finish in the background.",
       status: '202',
       errors: [403],
     },

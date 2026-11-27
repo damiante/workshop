@@ -88,7 +88,7 @@ Usage limits are set per subscription. `PUT /api/settings` with the old global `
 
 ## Checking now
 
-`POST /api/refresh` runs the checks Workshop's timer runs, without waiting for the next poll: it syncs tickets from GitHub, re-reads the usage of every Claude subscription that is over your limits or hasn't been checked in the last 10 minutes (even one whose last check failed), then starts or resumes whatever is now ready. A usage limit Claude reported mid-run still waits for its reset time. It answers 202 at once; the checks finish in the background, and the dashboard updates when they do.
+`POST /api/refresh` runs the checks Workshop's timer runs, without waiting for the next poll: it syncs tickets from GitHub, re-reads the usage of every Claude subscription that is over your limits or hasn't been checked in the last 10 minutes (even one whose last check failed), and starts agents in every free slot that a ready ticket fits. It waits up to about 2.5 minutes for those usage checks, then starts or resumes what they made ready too. A usage limit Claude reported mid-run still waits for its reset time. It answers 202 at once; the checks finish in the background, and the dashboard updates when they do.
 
 ## Pausing a run
 

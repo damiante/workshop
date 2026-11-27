@@ -344,6 +344,8 @@ export interface QueueItem {
   prioritisedFor: string[];
   /** Higher-priority repositories whose queued tickets go ahead of this one. It orders the queue, it doesn't hold it. */
   after: string[];
+  /** Open tickets that wait on this one, directly or through others. */
+  unblocks: number;
 }
 
 export interface AlertView {

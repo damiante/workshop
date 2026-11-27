@@ -23,7 +23,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
 | `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`, and the code review's routing `stageForRework` and formatters), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |
-| `src/scheduler/loop.ts` | The 60-second tick: host checks, re-attach, sync, API merges, resume paused runs, the queue, launch one, usage probe, cleanup |
+| `src/scheduler/loop.ts` | The 60-second tick: host checks, re-attach, sync, API merges, resume paused runs, the queue, fill every free slot, usage probe, cleanup |
 | `src/media.ts` | The per-ticket media store (`DATA_DIR/media/<ticket id>/` plus the `media` table): downloads issue images, copies agent screenshots back, delivers the folder to runs, deletes it on finish and in the 30-day sweep |
 | `src/workflow/media.ts` | Pure media rules: allowed hosts, image sniffing, name and size checks, link rewriting, the PR's Screenshots line |
 | `src/scheduler/runner.ts` | Run lifecycle (`launch`, `drive`, `resume`, `fail`, `stopRun`) |
