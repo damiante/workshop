@@ -30,6 +30,8 @@ const view = (over: Partial<TicketView> = {}): TicketView => ({
   prioritised: false,
   bypassLimits: false,
   mediaCount: 0,
+  dependsOn: [],
+  prioritisedFor: [],
   updatedAt: 'x',
   ...over,
 });

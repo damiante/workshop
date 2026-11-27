@@ -2485,6 +2485,29 @@ describe('sync', () => {
         expect(holdOf(1149)).toBe('[]');
       });
 
+      it('reads first the tickets a prioritised ticket waits on', async () => {
+        add(2100, '["#1148"]');
+        run('UPDATE tickets SET prioritised = 1 WHERE number = 2100');
+        run('UPDATE tickets SET blockers_checked_at = 1');
+        run('UPDATE tickets SET blockers_checked_at = 2 WHERE number IN (1148, 2100)');
+        fake.tickets.blockers = vi.fn(async (_r: unknown, n: number) => (n === 1148 ? [] : [open(900)]));
+        await syncRepo(repo());
+        expect(checked().slice(0, 2).sort()).toEqual([1148, 2100]);
+        expect(holdOf(1148)).toBe('[]');
+      });
+
+      it('caps the tickets whose blocker closed, after every ticket you prioritised or pushed', async () => {
+        // Many blockers closing at once (gate tickets) used to make one sync read every held ticket.
+        add(950, '[]', 'closed');
+        run(`UPDATE tickets SET blocked_by = '["#950"]' WHERE number >= 1000`);
+        run('UPDATE tickets SET prioritised = 1, blockers_checked_at = 9 WHERE number = 1149');
+        run(`UPDATE tickets SET push = 'stage', blockers_checked_at = 9 WHERE number = 1148`);
+        fake.tickets.blockers = vi.fn(async () => []);
+        await syncRepo(repo());
+        expect(checked()).toHaveLength(HELD_CHECKS_PER_SYNC + 2);
+        expect(checked().slice(0, 2).sort()).toEqual([1148, 1149]);
+      });
+
       it('stops the round at a rate limit, keeping what it read', async () => {
         const limited = Object.assign(new Error('API rate limit exceeded'), { status: 403, response: { headers: { 'x-ratelimit-remaining': '0' } } });
         let calls = 0;
@@ -2922,6 +2945,84 @@ describe('manual priority', () => {
     expect(getTicket(closed)!.prioritised).toBe(0);
     expect(ticket().prioritised).toBe(1);
     expect(ticketView(ticket(), getRepo(1)!).prioritised).toBe(true);
+  });
+});
+
+describe('implicit priority', () => {
+  const queued = (id: number) => buildQueue().find((c) => c.ticket.id === id)!;
+  let api: number;
+  let added: number[] = [];
+  const add = (repo: number, number: number, labels: string[], blockedBy: string[] = []) => {
+    const id = Number(
+      run(
+        "INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (?, ?, 'T', '', 'u', 'me', 'open', ?, ?, '2026-10-12T00:00:00Z')",
+        repo,
+        number,
+        JSON.stringify(labels),
+        JSON.stringify(blockedBy),
+      ).lastInsertRowid,
+    );
+    added.push(id);
+    return id;
+  };
+
+  beforeEach(() => {
+    saveSettings({ mode: 'always' });
+    const app = one<{ vcs_connection_id: number; ticket_connection_id: number }>('SELECT * FROM repos WHERE id = 1')!;
+    api = Number(run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled, priority) VALUES (?, ?, 'Me/Api', 'main', 'u', 1, 1)", app.vcs_connection_id, app.ticket_connection_id).lastInsertRowid);
+  });
+  afterEach(() => {
+    for (const id of added) run('DELETE FROM tickets WHERE id = ?', id);
+    added = [];
+    run('DELETE FROM repos WHERE id = ?', api);
+  });
+
+  it('puts the tickets a prioritised ticket depends on first, without marking them prioritised', () => {
+    const merge = add(1, 30, [label.stage('merge'), label.size('s')]);
+    run("UPDATE tickets SET pr_status = 'conflict' WHERE id = ?", merge);
+    const b = add(1, 20, [label.stage('design'), label.size('s')], ['#3']);
+    expect(buildQueue()[0].ticket.id).toBe(merge);
+    expect(queued(1).prioritisedFor).toEqual([]);
+    setPrioritised(getTicket(b)!, true);
+    const first = buildQueue()[0];
+    expect(first.ticket.id).toBe(1);
+    expect(first.prioritised).toBe(false);
+    expect(first.prioritisedFor).toEqual(['#20']);
+    expect(queued(b).blockedBy).toBe('Depends on #3');
+    expect(ticketView(getTicket(1)!, getRepo(1)!).prioritisedFor).toEqual([{ ref: '#20', ticketId: b }]);
+    expect(ticketView(getTicket(b)!, getRepo(1)!).dependsOn).toEqual([{ ref: '#3', ticketId: 1 }]);
+    setPrioritised(getTicket(b)!, false);
+    expect(buildQueue()[0].ticket.id).toBe(merge);
+    expect(queued(1).prioritisedFor).toEqual([]);
+  });
+
+  it('follows chains and blockers in other repositories, and lifts the repository priority gate', () => {
+    add(api, 9, []); // unclassified, so it holds back the lower-priority me/app
+    expect(queued(1).blockedBy).toBe('Waiting for Me/Api to be classified first');
+    const c = add(api, 21, [label.stage('design'), label.size('s')], ['me/app#3']);
+    const b = add(1, 20, [label.stage('design'), label.size('s')], ['me/api#21']);
+    setPrioritised(getTicket(b)!, true);
+    expect(queued(1).blockedBy ?? '').not.toMatch(/Waiting/);
+    expect(queued(1).prioritisedFor).toEqual(['#20']);
+    expect(ticketView(getTicket(c)!, getRepo(api)!).prioritisedFor).toEqual([{ ref: 'me/app#20', ticketId: b }]);
+    expect(ticketView(getTicket(b)!, getRepo(1)!).dependsOn).toEqual([{ ref: 'me/api#21', ticketId: c }]);
+    expect(ticketView(getTicket(1)!, getRepo(1)!).dependsOn).toEqual([]);
+  });
+
+  it('ends when the prioritised ticket closes', () => {
+    const b = add(1, 20, [label.stage('design'), label.size('s')], ['#3']);
+    setPrioritised(getTicket(b)!, true);
+    run("UPDATE tickets SET state = 'closed' WHERE id = ?", b);
+    expect(queued(1).prioritisedFor).toEqual([]);
+    expect(ticketView(getTicket(1)!, getRepo(1)!).prioritisedFor).toEqual([]);
+  });
+
+  it('shows blockers Workshop does not track without an id', () => {
+    const b = add(1, 20, [label.stage('design'), label.size('s')], ['#77', 'other/repo#5']);
+    expect(ticketView(getTicket(b)!, getRepo(1)!).dependsOn).toEqual([
+      { ref: '#77', ticketId: null },
+      { ref: 'other/repo#5', ticketId: null },
+    ]);
   });
 });
 

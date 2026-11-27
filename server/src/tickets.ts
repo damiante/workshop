@@ -1,11 +1,11 @@
-import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, TicketView } from './api-types.ts';
+import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, TicketRefView, TicketView } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import { publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
 import type { RepoRef, TicketLink } from './providers/types.ts';
 import { mediaCount } from './media.ts';
 import { getSettings } from './settings.ts';
-import { dependencyBlock, inScope } from './scheduler/gates.ts';
+import { dependencyBlock, implicitPriority, inScope } from './scheduler/gates.ts';
 import type { Handoff, Rescue, Rework } from './workflow/schemas.ts';
 import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
 
@@ -87,6 +87,8 @@ export const labelsOf = (t: TicketRow): string[] => JSON.parse(t.labels);
 export const ticketInScope = (t: TicketRow, repo: RepoRow) => inScope(repo.selection, labelsOf(t));
 /** Open tickets this one waits for, as display refs such as "#2" or "other/repo#5". */
 export const blockersOf = (t: TicketRow): string[] => JSON.parse(t.blocked_by);
+/** A blocker ref as a graph key: `#n` becomes `owner/repo#n`, all lower case. */
+export const refKey = (ref: string, repoFullName: string) => (ref.startsWith('#') ? repoFullName + ref : ref).toLowerCase();
 export const branchOf = (t: TicketRow) => t.branch ?? branchFor(t.number, t.title);
 /** The design doc lives beside the branch name, so renaming the issue doesn't move it. */
 export const docPathOf = (t: TicketRow) => `docs/workshop/${branchOf(t).replace(/^workshop\//, '')}.md`;
@@ -301,7 +303,36 @@ export function setDismissed(t: TicketRow, on: boolean) {
   publish('tickets');
 }
 
-export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
+export interface PriorityGraph {
+  /** The prioritised tickets that wait on this one, directly or through others. */
+  prioritisedFor(t: TicketRow, repo: RepoRow): TicketRefView[];
+  /** A blocker ref of a ticket in `repo`, with Workshop's id for it when Workshop has it. */
+  resolve(ref: string, repo: RepoRow): TicketRefView;
+}
+
+/** Implicit priority, worked out from the open tickets' stored blockers. Nothing of it is stored. */
+export function priorityGraph(): PriorityGraph {
+  const rows = all<{ id: number; number: number; prioritised: number; blocked_by: string; full_name: string }>(
+    openTicketsSql.replace('SELECT t.*', 'SELECT t.id, t.number, t.prioritised, t.blocked_by, r.full_name'),
+  );
+  const known = new Map<string, { id: number; ref: string }>();
+  for (const r of rows) known.set(refKey(`#${r.number}`, r.full_name), { id: r.id, ref: `${r.full_name}#${r.number}` });
+  const graph = implicitPriority(
+    rows.map((r) => ({ key: refKey(`#${r.number}`, r.full_name), prioritised: Boolean(r.prioritised), blockers: (JSON.parse(r.blocked_by) as string[]).map((b) => refKey(b, r.full_name)) })),
+  );
+  /** `#n` within `repo`, otherwise `owner/repo#n` as GitHub spells it. */
+  const displayRef = (key: string, repo: RepoRow) => {
+    const full = known.get(key)?.ref ?? key;
+    const prefix = `${repo.full_name.toLowerCase()}#`;
+    return key.startsWith(prefix) ? `#${key.slice(prefix.length)}` : full;
+  };
+  return {
+    prioritisedFor: (t, repo) => (graph.get(refKey(`#${t.number}`, repo.full_name)) ?? []).map((k) => ({ ref: displayRef(k, repo), ticketId: known.get(k)?.id ?? null })),
+    resolve: (ref, repo) => ({ ref, ticketId: known.get(refKey(ref, repo.full_name))?.id ?? null }),
+  };
+}
+
+export function ticketView(t: TicketRow, repo: RepoRow, graph: PriorityGraph = priorityGraph()): TicketView {
   const labels = labelsOf(t);
   const state = parseLabels(labels);
   const step = nextStep(state, t.state === 'open');
@@ -336,6 +367,8 @@ export function ticketView(t: TicketRow, repo: RepoRow): TicketView {
     push: t.push,
     prioritised: Boolean(t.prioritised),
     bypassLimits: Boolean(t.bypass_limits),
+    dependsOn: blockersOf(t).map((r) => graph.resolve(r, repo)),
+    prioritisedFor: graph.prioritisedFor(t, repo),
     mediaCount: mediaCount(t.id),
     updatedAt: t.updated_at,
   };
@@ -346,7 +379,8 @@ export function listTicketViews(includeClosed = false): TicketView[] {
     `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE r.enabled = 1 ${includeClosed ? '' : "AND t.state = 'open'"} ORDER BY t.updated_at DESC`,
   );
   const repos = new Map(all<RepoRow>('SELECT * FROM repos').map((r) => [r.id, r]));
-  return rows.map((t) => ticketView(t, repos.get(t.repo_id)!));
+  const graph = priorityGraph();
+  return rows.map((t) => ticketView(t, repos.get(t.repo_id)!, graph));
 }
 
 /** Applies label edits on the ticket source, then mirrors them locally. */

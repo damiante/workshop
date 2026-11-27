@@ -11,6 +11,8 @@ import {
   labelsOf,
   linkCount,
   linkRef,
+  priorityGraph,
+  refKey,
   repoRef,
   setBlockers,
   setLinks,
@@ -75,7 +77,7 @@ export async function syncRepo(repo: RepoRow) {
   if (changed.length) publish('tickets');
 }
 
-/** Held tickets re-read per repo per sync, beyond those whose blockers look closed or that you prioritised. */
+/** Held tickets re-read per repo per sync, beyond those you prioritised or pushed. */
 export const HELD_CHECKS_PER_SYNC = 100;
 /** Tickets whose links were never read, read per repo per sync, so the Dependencies page fills in over time. */
 export const LINK_BACKFILL_PER_SYNC = 20;
@@ -83,8 +85,9 @@ export const LINK_BACKFILL_PER_SYNC = 20;
 /**
  * Open blockers decide whether a ticket is held. The list's count says which tickets not yet held need a look;
  * those are all read, so nothing blocked gets launched. Held tickets are re-read because closing a blocker may not
- * touch their update time, but there can be thousands, so each sync reads first the ones you prioritised or pushed,
- * then those with a blocker Workshop has seen close, then up to HELD_CHECKS_PER_SYNC more, least recently read first.
+ * touch their update time, but there can be thousands, so each sync reads first every ticket you prioritised or
+ * pushed, then up to HELD_CHECKS_PER_SYNC more: those with a blocker Workshop has seen close, then the least recently
+ * read. The cap matters when many blockers close at once: reads are one at a time, and the scheduler waits for them.
  *
  * Every read also stores the ticket's full list of links (open and closed) for the Dependencies page. Two more groups
  * are read for that alone: listed tickets whose total link count differs from what's stored, then up to
@@ -108,13 +111,17 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
   const closed = new Set(
     all<{ ref: string }>("SELECT lower(r.full_name) || '#' || t.number AS ref FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE t.state = 'closed'").map((r) => r.ref),
   );
-  const looksFree = (t: TicketRow) => blockersOf(t).some((b) => closed.has((b.startsWith('#') ? repo.full_name + b : b).toLowerCase()));
+  const looksFree = (t: TicketRow) => blockersOf(t).some((b) => closed.has(refKey(b, repo.full_name)));
   const held = all<TicketRow>(
     "SELECT * FROM tickets WHERE repo_id = ? AND state = 'open' AND blocked_by != '[]' ORDER BY COALESCE(blockers_checked_at, 0), id",
     repo.id,
   );
-  const urgent = held.filter((t) => t.prioritised || t.push || looksFree(t));
-  const holds = [...fresh, ...urgent, ...held.filter((t) => !urgent.includes(t)).slice(0, HELD_CHECKS_PER_SYNC)];
+  const graph = priorityGraph();
+  const isYours = (t: TicketRow) => t.prioritised || t.push || graph.prioritisedFor(t, repo).length > 0;
+  const yours = held.filter(isYours);
+  const rest = held.filter((t) => !isYours(t));
+  const capped = [...rest.filter(looksFree), ...rest.filter((t) => !looksFree(t))].slice(0, HELD_CHECKS_PER_SYNC);
+  const holds = [...yours, ...fresh, ...capped];
   const seen = new Set(holds.map((t) => t.id));
   const recounts = recount.filter((t) => !seen.has(t.id) && seen.add(t.id));
   const backfill = all<TicketRow>(
@@ -146,7 +153,7 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
         else run('UPDATE tickets SET links_checked_at = COALESCE(links_checked_at, ?) WHERE id = ?', Date.now(), t.id);
         if (isRateLimited(err)) {
           retryLater(targets.slice(i + 1));
-          return i >= fresh.length;
+          return i >= yours.length + fresh.length;
         }
       }
     }
