@@ -2,7 +2,7 @@ import { all, one, run } from '../db.ts';
 import { publish } from '../events.ts';
 import { deleteMedia } from '../media.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, editLabels, getTicket, isAllowedAuthor, labelsOf, linkRef, repoRef, setBlockers, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, blockersOf, editLabels, getTicket, isAllowedAuthor, labelsOf, linkRef, priorityGraph, refKey, repoRef, setBlockers, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
 import type { RemoteTicket } from '../providers/types.ts';
 import { label, moveTo, parseLabels } from '../workflow/labels.ts';
 import { raiseAlert } from '../alerts.ts';
@@ -82,12 +82,13 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
   const closed = new Set(
     all<{ ref: string }>("SELECT lower(r.full_name) || '#' || t.number AS ref FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE t.state = 'closed'").map((r) => r.ref),
   );
-  const looksFree = (t: TicketRow) => blockersOf(t).some((b) => closed.has((b.startsWith('#') ? repo.full_name + b : b).toLowerCase()));
+  const looksFree = (t: TicketRow) => blockersOf(t).some((b) => closed.has(refKey(b, repo.full_name)));
   const held = all<TicketRow>(
     "SELECT * FROM tickets WHERE repo_id = ? AND state = 'open' AND blocked_by != '[]' ORDER BY COALESCE(blockers_checked_at, 0), id",
     repo.id,
   );
-  const urgent = held.filter((t) => t.prioritised || t.push || looksFree(t));
+  const graph = priorityGraph();
+  const urgent = held.filter((t) => t.prioritised || t.push || graph.prioritisedFor(t, repo).length || looksFree(t));
   const targets = [...fresh, ...urgent, ...held.filter((t) => !urgent.includes(t)).slice(0, HELD_CHECKS_PER_SYNC)];
   for (const [i, t] of targets.entries()) {
     try {

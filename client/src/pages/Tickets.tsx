@@ -255,6 +255,21 @@ function BypassControls({ t }: { t: TicketView }) {
   );
 }
 
+/** Explicit priority first, then tickets prioritised tickets wait on, then the rest. */
+const priorityRank = (t: TicketView) => (t.prioritised ? 2 : t.prioritisedFor.length ? 1 : 0);
+
+/** The tag a ticket gets when prioritised tickets wait on it; explicit priority has its own tag. */
+export function PrioritisedForTag({ t }: { t: TicketView }) {
+  if (t.prioritised || !t.prioritisedFor.length) return null;
+  const refs = t.prioritisedFor.map((r) => r.ref).join(', ');
+  const verb = t.prioritisedFor.length > 1 ? 'are' : 'is';
+  return (
+    <span className="tag" title={`${refs} ${verb} prioritised and depend${verb === 'is' ? 's' : ''} on this ticket`}>
+      Prioritised for {refs}
+    </span>
+  );
+}
+
 function Card({ t }: { t: TicketView }) {
   const [editing, setEditing] = useState(false);
   return (
@@ -265,6 +280,7 @@ function Card({ t }: { t: TicketView }) {
         </Link>
         <span className="row">
           {t.prioritised && <span className="tag">Prioritised</span>}
+          <PrioritisedForTag t={t} />
           {t.bypassLimits && <span className="tag">Ignores limits</span>}
           {t.size && <span className="tag">{t.size.toUpperCase()}</span>}
         </span>
@@ -351,7 +367,7 @@ export function Tickets() {
       )}
       <div className="board">
         {COLUMNS.map((col) => {
-          const tickets = shown.filter(col.match).sort((a, b) => Number(b.prioritised) - Number(a.prioritised));
+          const tickets = shown.filter(col.match).sort((a, b) => priorityRank(b) - priorityRank(a));
           return (
             <section key={col.title} className="column" aria-label={col.title}>
               <h3>

@@ -13,7 +13,7 @@ import { appendLog, deleteLog, getRun, RUNNING_SQL, type RunRow } from '../runs.
 import { check } from '../http/util.ts';
 import { sweepExpiredTokens } from '../http/tokens.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, setBypassLimits, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, priorityGraph, setBypassLimits, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { agentSize, nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, freeSlots, inScope, isUnclassified, localTime, modeBlock, pickHost, poolFor, priorityBlock, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
@@ -294,6 +294,8 @@ export interface Candidate {
   pushed: boolean;
   prioritised: boolean;
   bypassLimits: boolean;
+  /** Refs of the prioritised tickets that wait on this one; it goes first for them. */
+  prioritisedFor: string[];
 }
 
 function startCandidate(c: Candidate): string | null {
@@ -397,7 +399,8 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const until = vcsConn(r)?.rateLimitedUntil?.() ?? null;
     githubBlock.set(r.id, until ? `GitHub's rate limit is used up until ${formatTime(until, s.timezone, now)}` : null);
   }
-  const out: (Candidate & { priority: number; repoPriority: number })[] = [];
+  const graph = priorityGraph();
+  const out: (Candidate & { priority: number; repoPriority: number; boosted: boolean })[] = [];
   for (const t of rows) {
     const repo = repos.get(t.repo_id)!;
     if (!isAllowedAuthor(t.author) || !ticketInScope(t, repo) || activeRunId(t.id)) continue;
@@ -407,10 +410,13 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const agent: AgentName = step.kind === 'merge' ? 'merge' : step.agent;
     const mode = step.kind === 'merge' ? 'normal' : step.mode;
     const priorityReason = opts.ignoreMode ? null : priorityBlock(repo.priority, waiting);
+    // A ticket a prioritised ticket waits on goes first as if you'd prioritised it too.
+    const prioritisedFor = graph.prioritisedFor(t, repo).map((r) => r.ref);
+    const boosted = Boolean(t.prioritised) || prioritisedFor.length > 0;
     const cls = getAgent(agent);
     const conn = getConnection(cls.model_connection_id);
     const name = AGENT_INFO[agent].label;
-    let blockedBy = dependencyBlock(blockersOf(t)) ?? githubBlock.get(repo.id) ?? (t.push ? null : modeReason ?? (t.prioritised ? null : priorityReason));
+    let blockedBy = dependencyBlock(blockersOf(t)) ?? githubBlock.get(repo.id) ?? (t.push ? null : modeReason ?? (boosted ? null : priorityReason));
     if (!blockedBy && (!cls.model || !conn)) blockedBy = `Choose a model for ${name} on the Agents page`;
     if (!blockedBy && !modelsOf(conn!).billing().includes(cls.billing)) {
       blockedBy = `${conn!.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`;
@@ -430,10 +436,10 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const size = agentSize(agent, parseLabels(labelsOf(t)), Boolean(t.ui));
     const hostId = hostFor.get(size)!;
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, size, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), priority: stepPriority(step), repoPriority: repo.priority });
+    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, size, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), prioritisedFor, boosted, priority: stepPriority(step), repoPriority: repo.priority });
   }
   // The sort is stable, so the ticket order setting (from the query) decides ties.
-  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.prioritised) - Number(a.prioritised) || b.repoPriority - a.repoPriority || a.priority - b.priority);
+  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.repoPriority - a.repoPriority || a.priority - b.priority);
 }
 
 export function queueView(): QueueItem[] {
@@ -446,6 +452,7 @@ export function queueView(): QueueItem[] {
     push: c.ticket.push,
     prioritised: c.prioritised,
     bypassLimits: c.bypassLimits,
+    prioritisedFor: c.prioritisedFor,
   }));
 }
 

@@ -137,6 +137,28 @@ export function dependencyBlock(refs: string[]): string | null {
   return refs.length ? `Depends on ${joinRefs(refs)}` : null;
 }
 
+/** For each ticket, the explicitly prioritised tickets that wait on it, directly or through others (sorted). Keys are `owner/repo#n`, lower case. */
+export function implicitPriority(nodes: { key: string; prioritised: boolean; blockers: string[] }[]): Map<string, string[]> {
+  const byKey = new Map(nodes.map((n) => [n.key, n]));
+  const found = new Map<string, Set<string>>();
+  for (const root of nodes) {
+    if (!root.prioritised) continue;
+    // Iterative DFS with its own visited set, so cycles and shared blockers end.
+    const seen = new Set([root.key]);
+    const stack = [...root.blockers];
+    while (stack.length) {
+      const key = stack.pop()!;
+      const node = byKey.get(key);
+      if (!node || seen.has(key)) continue;
+      seen.add(key);
+      if (!found.has(key)) found.set(key, new Set());
+      found.get(key)!.add(root.key);
+      stack.push(...node.blockers);
+    }
+  }
+  return new Map([...found].map(([k, v]) => [k, [...v].sort()]));
+}
+
 /** A ticket the Classifier still has to look at: no stage yet, and nothing it waits on. */
 export function isUnclassified(labels: string[], open: boolean, blockers: string[]): boolean {
   if (blockers.length) return false;

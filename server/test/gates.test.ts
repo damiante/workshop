@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Limits, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, isUnclassified, modeBlock, priorityBlock, pickHost, poolFor, freeSlots, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours, type HostLoad } from '../src/scheduler/gates.ts';
+import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, isUnclassified, modeBlock, priorityBlock, pickHost, poolFor, freeSlots, implicitPriority, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours, type HostLoad } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -272,5 +272,36 @@ describe('publish retries', () => {
 
   it('waits 1, 5 and 15 minutes, then every 30', () => {
     expect([0, 1, 2, 3, 4, 5].map(publishRetryMinutes)).toEqual([1, 5, 15, 30, 30, 30]);
+  });
+});
+
+describe('implicitPriority', () => {
+  const node = (key: string, blockers: string[] = [], prioritised = false) => ({ key, blockers, prioritised });
+  const of = (map: Map<string, string[]>) => Object.fromEntries(map);
+
+  it('follows a chain from the prioritised ticket', () => {
+    expect(of(implicitPriority([node('r#b', ['r#a'], true), node('r#a', ['r#c']), node('r#c')]))).toEqual({ 'r#a': ['r#b'], 'r#c': ['r#b'] });
+  });
+
+  it('reaches each ticket of a diamond once', () => {
+    const map = implicitPriority([node('r#d', ['r#b', 'r#c'], true), node('r#b', ['r#a']), node('r#c', ['r#a']), node('r#a')]);
+    expect(of(map)).toEqual({ 'r#a': ['r#d'], 'r#b': ['r#d'], 'r#c': ['r#d'] });
+  });
+
+  it('ends on a cycle without listing a ticket for itself', () => {
+    expect(of(implicitPriority([node('r#a', ['r#b']), node('r#b', ['r#a'], true)]))).toEqual({ 'r#a': ['r#b'] });
+  });
+
+  it('skips blockers it does not know', () => {
+    expect(of(implicitPriority([node('r#b', ['x#1', 'r#a'], true), node('r#a', ['x#2'])]))).toEqual({ 'r#a': ['r#b'] });
+  });
+
+  it('lists every prioritised ticket that waits on a shared blocker, sorted and once', () => {
+    const map = implicitPriority([node('r#c', ['r#a', 'r#b'], true), node('r#b', ['r#a'], true), node('r#a')]);
+    expect(of(map)).toEqual({ 'r#a': ['r#b', 'r#c'], 'r#b': ['r#c'] });
+  });
+
+  it('gives nothing without a prioritised ticket', () => {
+    expect(implicitPriority([node('r#b', ['r#a']), node('r#a')]).size).toBe(0);
   });
 });

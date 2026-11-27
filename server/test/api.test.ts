@@ -922,6 +922,31 @@ describe('prioritising a ticket', () => {
       run("UPDATE tickets SET state = 'open', prioritised = 0 WHERE id = ?", id);
     }
   });
+
+  it('shows what a prioritised ticket depends on, and that those go first for it', async () => {
+    const { run } = await import('../src/db.ts');
+    const add = (number: number, blockedBy: string[]) =>
+      Number(
+        run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (1, ?, 'T', '', 'u', 'me', 'open', '[]', ?, '2026-10-13T00:00:00Z')", number, JSON.stringify(blockedBy)).lastInsertRowid,
+      );
+    const a = add(50, []);
+    const b = add(51, ['#50']);
+    try {
+      expect((await request(app).put(`/api/tickets/${b}/prioritised`).set('cookie', cookie).send({ prioritised: true })).status).toBe(200);
+      const ticket = async (id: number) => (await request(app).get(`/api/tickets/${id}`).set('cookie', cookie)).body.ticket;
+      expect((await ticket(a)).prioritisedFor).toEqual([{ ref: '#51', ticketId: b }]);
+      expect((await ticket(a)).prioritised).toBe(false);
+      expect((await ticket(b)).dependsOn).toEqual([{ ref: '#50', ticketId: a }]);
+      expect((await ticket(b)).prioritisedFor).toEqual([]);
+      const queue = (await request(app).get('/api/overview').set('cookie', cookie)).body.queue as { ticketId: number; prioritisedFor: string[] }[];
+      expect(queue.some((q) => q.ticketId === a)).toBe(true);
+      for (const q of queue) expect(q.prioritisedFor).toEqual(q.ticketId === a ? ['#51'] : []);
+      expect((await request(app).put(`/api/tickets/${b}/prioritised`).set('cookie', cookie).send({ prioritised: false })).status).toBe(200);
+      expect((await ticket(a)).prioritisedFor).toEqual([]);
+    } finally {
+      run('DELETE FROM tickets WHERE id IN (?, ?)', a, b);
+    }
+  });
 });
 
 describe('ignoring usage limits for a ticket', () => {
@@ -1213,4 +1238,5 @@ describe('pausing and resuming a run', () => {
     expect((await post('p-running', 'resume')).status).toBe(409);
     run("UPDATE runs SET status = 'cancelled' WHERE id = 'p-running'");
   });
+
 });

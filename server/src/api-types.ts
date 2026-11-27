@@ -177,6 +177,10 @@ export interface TicketView {
   prioritised: boolean;
   /** Workshop's usage limits don't hold this ticket's agents; limits Claude reports still do. Cleared when it closes. */
   bypassLimits: boolean;
+  /** Open tickets this one waits for. */
+  dependsOn: TicketRefView[];
+  /** Prioritised tickets that wait on this one, directly or through others; it goes first for them. */
+  prioritisedFor: TicketRefView[];
   /** How many images the ticket's media store holds. */
   mediaCount: number;
   updatedAt: string;
@@ -293,6 +297,12 @@ export interface HostView {
   specs: string | null;
 }
 
+/** Another ticket, by its display ref (`#2`, `other/repo#5`), and its Workshop id when Workshop tracks it. */
+export interface TicketRefView {
+  ref: string;
+  ticketId: number | null;
+}
+
 export interface QueueItem {
   ticketId: number;
   ticket: string;
@@ -302,6 +312,8 @@ export interface QueueItem {
   push: Push | null;
   prioritised: boolean;
   bypassLimits: boolean;
+  /** Refs of the prioritised tickets this one goes first for. */
+  prioritisedFor: string[];
 }
 
 export interface AlertView {

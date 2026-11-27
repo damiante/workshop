@@ -165,6 +165,8 @@ A push lifts only the mode gate. Dependencies, model settings, allowance, the AP
 
 Priority only changes the order. It doesn't lift the operation mode or hours, or any other gate; it does skip waiting for higher-priority repositories to be classified. Unlike a push, it lasts through waits for you (questions, your review, failures and skip): once you act, the ticket goes first again. It's cleared when the ticket closes, or with **Remove priority**. Prioritised tickets show a "Prioritised" tag, a brown left edge and sit at the top of their column.
 
+**Implicit priority.** A prioritised ticket that depends on others can't start until they close, so the open tickets it waits for, directly or through other tickets, go first too. Workshop works this out each time from the stored blockers, so nothing extra is saved: remove the priority or close the ticket and its dependencies go back to the usual order. They're ordered and pass the repository priority gate like a prioritised ticket, but no other gate is lifted; a dependency that isn't nominated in a nominated-only repository still waits. Their cards show "Prioritised for #B" instead of the "Prioritised" tag and sit just below the prioritised cards; the ticket page lists what a ticket depends on and which prioritised tickets it goes first for. Sync re-reads the blockers of these tickets early, so a chain keeps moving as each blocker closes.
+
 ## Ignoring usage limits for a ticket
 
 **Ignore usage limits** on a ticket's card lets that ticket's agents start, keep running and resume while a Claude subscription is over your 5-hour or weekly limit. Every other ticket still waits for usage to drop under your limits. Use it for the one ticket you want now when the rest of the backlog can wait.

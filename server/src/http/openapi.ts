@@ -152,6 +152,7 @@ const schemas: Record<string, Schema> = {
     stepStartedAt: nullable(int),
     publishRetryAt: nullable(int),
   }),
+  TicketRef: object({ ref: str, ticketId: nullable(int) }),
   TicketView: object({
     id: int,
     repo: str,
@@ -178,6 +179,8 @@ const schemas: Record<string, Schema> = {
     nominated: nullable(bool),
     prioritised: bool,
     bypassLimits: bool,
+    dependsOn: { ...array(ref('TicketRef')), description: 'Open tickets this one waits for.' },
+    prioritisedFor: { ...array(ref('TicketRef')), description: 'Prioritised tickets that wait on this one, directly or through others; it goes first for them.' },
     mediaCount: int,
     updatedAt: str,
   }),
@@ -195,7 +198,7 @@ const schemas: Record<string, Schema> = {
     [],
   ),
   HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), available: bool, slots: int, busy: int, pools: nullable(array(object({ size: enumOf('small', 'standard', 'large'), slots: int, busy: int }))), specs: nullable(str) }),
-  QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str), push: nullable(enumOf('stage', 'lifecycle')), prioritised: bool, bypassLimits: bool }),
+  QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str), push: nullable(enumOf('stage', 'lifecycle')), prioritised: bool, bypassLimits: bool, prioritisedFor: array(str) }),
   AlertView: object({
     id: int,
     level: enumOf('error', 'warning', 'info'),
@@ -373,7 +376,7 @@ const paths: Record<string, Record<string, Op>> = {
   '/tickets/{id}/prioritised': {
     put: {
       summary:
-        'Puts the ticket ahead of every ticket you haven\'t prioritised, for its whole lifecycle, or removes that. Send { "prioritised": true | false }. Workshop\'s mode and hours still apply. Cleared when the ticket closes.',
+        'Puts the ticket ahead of every ticket you haven\'t prioritised, for its whole lifecycle, or removes that. Send { "prioritised": true | false }. Open tickets it depends on, directly or through others, go first too, without being marked prioritised. Workshop\'s mode and hours still apply. Cleared when the ticket closes.',
       params: ['id'],
       body: object({ prioritised: bool }),
       ok: ref('TicketView'),

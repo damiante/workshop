@@ -1,14 +1,24 @@
 import { useCallback, useState } from 'react';
 import { Link, useParams } from 'react-router';
-import type { MediaItem, RunView, TicketLifecycle } from '../../../server/src/api-types.ts';
+import type { MediaItem, RunView, TicketLifecycle, TicketRefView } from '../../../server/src/api-types.ts';
 import { useApi, useNow } from '../api.ts';
 import { Gallery, plainClick } from '../components/Gallery.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, runStatus, STAGE_TEXT } from '../format.ts';
-import { TicketStatus } from './Tickets.tsx';
+import { PrioritisedForTag, TicketStatus } from './Tickets.tsx';
 
 const stageText = (r: RunView) => AGENT_LABEL[r.agent] + (r.mode === 'delta' ? ', requested changes' : '') + (r.attempt > 1 ? `, attempt ${r.attempt}` : '');
+
+/** Ticket refs, each linked to its page when Workshop tracks it. */
+function Refs({ refs }: { refs: TicketRefView[] }) {
+  return refs.map((r, i) => (
+    <span key={r.ref}>
+      {i > 0 && ', '}
+      {r.ticketId === null ? r.ref : <Link to={`/tickets/${r.ticketId}`}>{r.ref}</Link>}
+    </span>
+  ));
+}
 
 function Thumbs({ items }: { items: MediaItem[] }) {
   const [open, setOpen] = useState<string | null>(null);
@@ -60,6 +70,7 @@ export function Ticket() {
           <span className="tag">{t.stage ? STAGE_TEXT[t.stage] : 'To classify'}</span>
           {t.size && <span className="tag">{t.size.toUpperCase()}</span>}
           {t.prioritised && <span className="tag">Prioritised</span>}
+          <PrioritisedForTag t={t} />
           {t.bypassLimits && <span className="tag">Ignores limits</span>}
           {t.state === 'closed' && <span className="muted">Closed</span>}
           <TicketStatus t={t} />
@@ -70,6 +81,16 @@ export function Ticket() {
           )}
           {media.length > 0 && <Link to={`/tickets/${t.id}/media`}>Screenshots ({media.length})</Link>}
         </div>
+        {t.dependsOn.length > 0 && (
+          <p className="small muted">
+            Depends on <Refs refs={t.dependsOn} />
+          </p>
+        )}
+        {!t.prioritised && t.prioritisedFor.length > 0 && (
+          <p className="small muted">
+            Prioritised because <Refs refs={t.prioritisedFor} /> {t.prioritisedFor.length > 1 ? 'depend' : 'depends'} on it
+          </p>
+        )}
       </div>
       <Panel title="Lifecycle">
         {runs.length || loose.length ? (
