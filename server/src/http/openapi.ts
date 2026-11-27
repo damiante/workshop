@@ -187,6 +187,7 @@ const schemas: Record<string, Schema> = {
     title: nullable(str),
     url: str,
     state: enumOf('open', 'closed'),
+    held: { ...bool, description: 'Workshop holds this ticket for an open blocker. Always false outside Workshop.' },
     ticket: { ...nullable(ref('TicketView')), description: "Null when the ticket isn't in Workshop (another repository, or an author Workshop doesn't work for)." },
   }),
   DependencyEdge: { ...object({ blocker: str, ticket: str }), description: '`blocker` must finish before `ticket`; both are node refs.' },

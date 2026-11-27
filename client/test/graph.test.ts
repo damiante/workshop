@@ -33,7 +33,7 @@ const view = (over: Partial<TicketView> = {}): TicketView => ({
   updatedAt: 'x',
   ...over,
 });
-const node = (n: number, over: Partial<DependencyNode> = {}): DependencyNode => ({ ref: `#${n}`, number: n, title: `Ticket ${n}`, url: 'u', state: 'open', ticket: view({ number: n }), ...over });
+const node = (n: number, over: Partial<DependencyNode> = {}): DependencyNode => ({ ref: `#${n}`, number: n, title: `Ticket ${n}`, url: 'u', state: 'open', held: false, ticket: view({ number: n }), ...over });
 const graph = (nodes: DependencyNode[], links: [number, number][]): Pick<DependencyGraph, 'nodes' | 'edges'> => ({
   nodes,
   edges: links.map(([b, t]) => ({ blocker: `#${b}`, ticket: `#${t}` })),
@@ -68,6 +68,7 @@ describe('layoutGraph', () => {
     const l = layoutGraph(graph([node(1), node(2), node(3)], [[1, 2], [2, 3], [3, 1]]));
     expect(l.nodes.map((p) => p.col)).toEqual([0, 1, 2]);
     expect(l.edges).toHaveLength(3);
+    expect(l.edges.filter((e) => e.cycle).map((e) => `${e.blocker}>${e.ticket}`)).toEqual(['#3>#1']);
   });
 
   it('stacks separate trees without overlapping', () => {
@@ -98,9 +99,17 @@ describe('layoutGraph', () => {
     expect(l.nodes.map((p) => p.node.ref)).toEqual(['#1', '#2', '#5', '#3', '#4']); // tab order: column, then row
   });
 
-  it('marks tickets an open blocker holds', () => {
-    const l = layoutGraph(graph([node(1), node(2, { state: 'closed' }), node(3), node(4)], [[1, 3], [2, 4]]));
-    expect(l.nodes.filter((p) => p.blocked).map((p) => p.node.ref)).toEqual(['#3']);
+  it('ignores repeated links and links to itself', () => {
+    const l = layoutGraph(graph([node(1), node(2)], [[1, 2], [1, 2], [2, 2]]));
+    expect(l.edges).toHaveLength(1);
+    expect(l.nodes.map((p) => p.col)).toEqual([0, 1]);
+  });
+
+  it('shares the slots of links from one blocker, so a fan-out stays short', () => {
+    // #1 blocks a chain of five and every ticket in it.
+    const chain: [number, number][] = [[2, 3], [3, 4], [4, 5], [5, 6]];
+    const l = layoutGraph(graph([1, 2, 3, 4, 5, 6].map((n) => node(n)), [[1, 2], ...chain, ...[3, 4, 5, 6].map((n) => [1, n] as [number, number])]));
+    expect(l.height).toBeLessThanOrEqual(2 * (NODE_H + 20) + 24);
   });
 
   it('handles an empty graph', () => {
@@ -114,8 +123,8 @@ describe('nodeStatus', () => {
     expect(nodeStatus(node(1, { ticket: null }))).toEqual({ tone: 'idle', text: 'Not in Workshop' });
     expect(nodeStatus(node(1, { ticket: view({ activeRunId: 'r', failed: true }) }))).toEqual({ tone: 'running', text: 'Agent working' });
     expect(nodeStatus(node(1, { ticket: view({ skipped: true }) }))).toEqual({ tone: 'idle', text: 'Skipped' });
-    expect(nodeStatus(node(1, { ticket: view({ attention: 'review', stage: 'pr-review' }) }), true)).toEqual({ tone: 'attention', text: 'Waiting for your review' });
-    expect(nodeStatus(node(1, { ticket: view({ next: 'Depends on #2' }) }), true)).toEqual({ tone: 'attention', text: 'Depends on #2' });
+    expect(nodeStatus(node(1, { held: true, ticket: view({ attention: 'review', stage: 'pr-review' }) }))).toEqual({ tone: 'attention', text: 'Waiting for your review' });
+    expect(nodeStatus(node(1, { held: true, ticket: view({ next: 'Depends on #2' }) }))).toEqual({ tone: 'attention', text: 'Depends on #2' });
     expect(nodeStatus(node(1, { ticket: view({ next: 'Implementation', stage: 'implement' }) }))).toEqual({ tone: 'idle', text: 'Implementation' });
     expect(nodeStatus(node(1))).toEqual({ tone: 'idle', text: 'To classify' });
   });

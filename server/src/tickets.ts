@@ -148,7 +148,8 @@ function upsertLink(ticketId: number, l: TicketLink) {
     l.repo,
     l.number,
     l.title ?? null,
-    l.url,
+    // Shown as a link on the Dependencies page, so only web addresses are kept.
+    /^https?:\/\//i.test(l.url) ? l.url : `https://github.com/${l.repo}/issues/${l.number}`,
     l.state,
   );
 }
@@ -209,14 +210,22 @@ export function dependencyGraphs(): DependencyGraph[] {
       const nodes = new Map<string, DependencyNode>();
       for (const t of rows) {
         const r = byId.get(t.repo_id)!;
-        nodes.set(linkKey(r.full_name, t.number), { ref: refOf(r.full_name, t.number), number: t.number, title: t.title, url: t.url, state: t.state, ticket: ticketView(t, r) });
+        const node = { ref: refOf(r.full_name, t.number), number: t.number, title: t.title, url: t.url, state: t.state, held: blockersOf(t).length > 0, ticket: ticketView(t, r) };
+        nodes.set(linkKey(r.full_name, t.number), node);
       }
-      const edges = links.map((l) => {
+      const seen = new Set<string>();
+      const edges = links.flatMap((l) => {
         const key = linkKey(l.blocker_repo, l.blocker_number);
         if (!nodes.has(key)) {
-          nodes.set(key, { ref: refOf(l.blocker_repo, l.blocker_number), number: l.blocker_number, title: l.blocker_title, url: l.blocker_url, state: l.blocker_state, ticket: null });
+          const node = { ref: refOf(l.blocker_repo, l.blocker_number), number: l.blocker_number, title: l.blocker_title, url: l.blocker_url, state: l.blocker_state, held: false, ticket: null };
+          nodes.set(key, node);
         }
-        return { blocker: nodes.get(key)!.ref, ticket: `#${l.number}` };
+        const edge = { blocker: nodes.get(key)!.ref, ticket: `#${l.number}` };
+        // The same link can be stored twice when GitHub spelled the repo with different case.
+        const id = `${edge.blocker}>${edge.ticket}`;
+        if (seen.has(id)) return [];
+        seen.add(id);
+        return [edge];
       });
       const sortedNodes = [...nodes.values()].sort((a, b) => a.number - b.number || a.ref.localeCompare(b.ref));
       edges.sort((a, b) => a.ticket.localeCompare(b.ticket, undefined, { numeric: true }) || a.blocker.localeCompare(b.blocker, undefined, { numeric: true }));

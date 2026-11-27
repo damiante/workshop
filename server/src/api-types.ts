@@ -190,6 +190,8 @@ export interface DependencyNode {
   title: string | null;
   url: string;
   state: 'open' | 'closed';
+  /** Workshop holds this ticket for an open blocker. Always false outside Workshop. */
+  held: boolean;
   /** Null when the ticket isn't in Workshop (another repository, or an author Workshop doesn't work for). */
   ticket: TicketView | null;
 }

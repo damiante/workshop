@@ -2344,7 +2344,7 @@ describe('sync', () => {
       it('hands a failed re-read of a changed count to the backfill, which reads it next sync', async () => {
         fake.tickets.listChanged = async () => [remote({ labels: [], openBlockers: 0, totalBlockers: 1 })];
         fake.tickets.blockers = vi.fn(async () => {
-          throw new Error('Server Error');
+          throw Object.assign(new Error('Server Error'), { status: 502 });
         });
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         await syncRepo(repo());
@@ -2355,6 +2355,36 @@ describe('sync', () => {
         expect(reads()).toEqual([3]);
         expect(checkedAt()).toBeGreaterThan(1);
         expect(linkRows().map((l) => l.blocker_number)).toEqual([2]);
+      });
+
+      it('hands a changed count back even when the held round read it and failed', async () => {
+        run(`UPDATE tickets SET blocked_by = '["#2"]' WHERE id = 1`);
+        fake.tickets.listChanged = async () => [remote({ labels: [], openBlockers: 1, totalBlockers: 2 })];
+        fake.tickets.blockers = vi.fn(async () => {
+          throw Object.assign(new Error('Server Error'), { status: 502 });
+        });
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await syncRepo(repo());
+        expect(reads()).toEqual([3]);
+        expect(checkedAt()).toBeNull();
+        expect(held()).toBe('["#2"]');
+      });
+
+      it('moves the backfill past a ticket whose links can never be read', async () => {
+        add(500);
+        add(501);
+        fake.tickets.listChanged = async () => [];
+        fake.tickets.blockers = vi.fn(async (_r: unknown, n: number) => {
+          if (n === 501) throw Object.assign(new Error('Not Found'), { status: 404 });
+          return [];
+        });
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await syncRepo(repo());
+        expect(checkedAt(501)).toBeGreaterThan(1);
+        expect(linkRows(one<{ id: number }>('SELECT id FROM tickets WHERE number = 501')!.id)).toEqual([]);
+        fake.tickets.blockers = vi.fn(async () => []);
+        await syncRepo(repo());
+        expect(reads()).toEqual([]);
       });
 
       it('hands changed counts a rate limit stopped to the backfill', async () => {

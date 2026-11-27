@@ -8,7 +8,7 @@ import { clip, layoutGraph, NODE_H, NODE_W, nodeStatus, type PlacedNode } from '
 function Node({ p }: { p: PlacedNode }) {
   const navigate = useNavigate();
   const { node } = p;
-  const status = nodeStatus(node, p.blocked);
+  const status = nodeStatus(node);
   const title = node.title ?? 'Untitled';
   const label = `${node.ref} ${title}, ${status.text}`;
   const body = (
@@ -121,7 +121,7 @@ export function Dependencies() {
                 {layout.edges.map((e) => (
                   <path
                     key={`${e.blocker}>${e.ticket}`}
-                    className={`graph-edge${e.done ? ' done' : ''}`}
+                    className={`graph-edge${e.done ? ' done' : ''}${e.cycle ? ' cycle' : ''}`}
                     d={e.path}
                     markerEnd={`url(#graph-arrow${e.done ? '-done' : ''})`}
                   />

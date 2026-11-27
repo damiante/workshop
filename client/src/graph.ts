@@ -15,8 +15,6 @@ export interface PlacedNode {
   x: number;
   y: number;
   col: number;
-  /** Whether a blocker still shown as open holds it. */
-  blocked: boolean;
 }
 
 export interface PlacedEdge {
@@ -26,6 +24,8 @@ export interface PlacedEdge {
   path: string;
   /** The blocker is closed, so this link no longer holds anything. */
   done: boolean;
+  /** Part of a loop of links: drawn, but not used to place tickets. */
+  cycle: boolean;
 }
 
 export interface Layout {
@@ -39,7 +39,13 @@ export interface Layout {
 export function layoutGraph(graph: Pick<DependencyGraph, 'nodes' | 'edges'>, { hideClosed = false } = {}): Layout {
   const nodes = graph.nodes.filter((n) => !hideClosed || n.state !== 'closed');
   const index = new Map(nodes.map((n, i) => [n.ref, i]));
-  const edges = graph.edges.filter((e) => index.has(e.blocker) && index.has(e.ticket) && e.blocker !== e.ticket);
+  const seen = new Set<string>();
+  const edges = graph.edges.filter((e) => {
+    const key = `${e.blocker}>${e.ticket}`;
+    if (!index.has(e.blocker) || !index.has(e.ticket) || e.blocker === e.ticket || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const out = nodes.map(() => [] as number[]);
   for (const e of edges) out[index.get(e.blocker)!].push(index.get(e.ticket)!);
 
@@ -95,17 +101,22 @@ export function layoutGraph(graph: Pick<DependencyGraph, 'nodes' | 'edges'>, { h
   });
 
   // A link that skips columns passes through a free slot in each one, so it never runs behind another ticket.
-  // Slots are numbered after the nodes; `prev` is what each node or slot follows, for ordering.
+  // Links from the same blocker share their slots. Slots are numbered after the nodes; `prev` is what each node or
+  // slot follows, for ordering.
   const itemCol = [...col];
   const prev = preds.map((p) => [...p]);
+  const slotOf = new Map<string, number>();
   const route = new Map<string, number[]>();
   for (const [a, b] of forward) {
     const via: number[] = [];
     for (let c = col[a] + 1; c < col[b]; c++) {
-      const slot = itemCol.length;
-      itemCol.push(c);
-      prev.push([via.length ? via[via.length - 1] : a]);
-      via.push(slot);
+      const key = `${a}@${c}`;
+      if (!slotOf.has(key)) {
+        slotOf.set(key, itemCol.length);
+        itemCol.push(c);
+        prev.push([via.length ? via[via.length - 1] : a]);
+      }
+      via.push(slotOf.get(key)!);
     }
     if (via.length) prev[b] = prev[b].map((p) => (p === a ? via[via.length - 1] : p));
     route.set(`${a}>${b}`, via);
@@ -120,15 +131,13 @@ export function layoutGraph(graph: Pick<DependencyGraph, 'nodes' | 'edges'>, { h
     const g = find(i);
     bands.set(g, [...(bands.get(g) ?? []), i]);
   });
-  for (const [key, via] of route) bands.get(find(Number(key.split('>')[0])))!.push(...via);
+  for (const [key, slot] of slotOf) bands.get(find(Number(key.split('@')[0])))!.push(slot);
 
   const placed: PlacedNode[] = [];
   const y = itemCol.map(() => 0);
   const x = (c: number) => PAD + c * (NODE_W + GAP_X);
   let top = PAD;
   let width = 0;
-  const state = new Map(nodes.map((n) => [n.ref, n.state]));
-  const blocked = new Set(edges.filter((e) => state.get(e.blocker) === 'open').map((e) => e.ticket));
   for (const members of bands.values()) {
     const columns: number[][] = [];
     for (const i of members) (columns[itemCol[i]] ??= []).push(i);
@@ -144,7 +153,7 @@ export function layoutGraph(graph: Pick<DependencyGraph, 'nodes' | 'edges'>, { h
       ordered.forEach((i, r) => {
         row.set(i, r);
         y[i] = top + r * (NODE_H + GAP_Y);
-        if (i < nodes.length) placed.push({ node: nodes[i], x: x(ci), y: y[i], col: ci, blocked: blocked.has(nodes[i].ref) });
+        if (i < nodes.length) placed.push({ node: nodes[i], x: x(ci), y: y[i], col: ci });
       });
       rows = Math.max(rows, ordered.length);
       width = Math.max(width, x(ci) + NODE_W + PAD);
@@ -173,20 +182,20 @@ export function layoutGraph(graph: Pick<DependencyGraph, 'nodes' | 'edges'>, { h
       cy = sy;
     }
     path += ` ${curve(cx, cy, b.x, b.y + NODE_H / 2)}`;
-    return { blocker: e.blocker, ticket: e.ticket, path, done: a.node.state === 'closed' };
+    return { blocker: e.blocker, ticket: e.ticket, path, done: a.node.state === 'closed', cycle: back.has(`${ai}>${bi}`) };
   });
   return { nodes: placed, edges: placedEdges, width, height: placed.length ? top - BAND_GAP + PAD : 0 };
 }
 
-/** The status words under a ticket on the graph, in the Tickets page's order. `blocked`: an open blocker holds it. */
-export function nodeStatus(node: DependencyNode, blocked = false): { tone: Tone; text: string } {
+/** The status words under a ticket on the graph, in the Tickets page's order. */
+export function nodeStatus(node: DependencyNode): { tone: Tone; text: string } {
   if (node.state === 'closed') return { tone: 'ok', text: 'Closed' };
   const t = node.ticket;
   if (!t) return { tone: 'idle', text: 'Not in Workshop' };
   const status = ticketStatus(t);
   if (status) return status;
   if (t.attention === 'review') return { tone: 'attention', text: 'Waiting for your review' };
-  if (blocked && t.next) return { tone: 'attention', text: t.next };
+  if (node.held && t.next) return { tone: 'attention', text: t.next };
   return { tone: 'idle', text: t.stage ? STAGE_TEXT[t.stage] : 'To classify' };
 }
 

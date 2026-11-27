@@ -24,7 +24,7 @@ import { label, moveTo, parseLabels } from '../workflow/labels.ts';
 import { raiseAlert } from '../alerts.ts';
 import { cleanUpClosedIssue, finishMerged, stopAfterClosedPr } from './merge.ts';
 import { stopRun } from './runner.ts';
-import { isRateLimited } from './gates.ts';
+import { isRateLimited, isTransient } from './gates.ts';
 
 /** Pulls changed tickets for one repo, then checks pull requests waiting for your review. */
 export async function syncRepo(repo: RepoRow) {
@@ -88,8 +88,8 @@ export const LINK_BACKFILL_PER_SYNC = 20;
  *
  * Every read also stores the ticket's full list of links (open and closed) for the Dependencies page. Two more groups
  * are read for that alone: listed tickets whose total link count differs from what's stored, then up to
- * LINK_BACKFILL_PER_SYNC tickets never read, closed ones included. A failed read of a changed count hands the ticket
- * to the backfill, since the sync moves on and won't list it again.
+ * LINK_BACKFILL_PER_SYNC tickets never read, closed ones included. A temporary failure to read a changed count hands
+ * the ticket to the backfill, since the sync moves on and won't list it again; a permanent one (404) marks it read.
  *
  * A failure for one ticket keeps its stored hold; a rate limit ends the round. Returns false when GitHub's rate limit
  * stopped it before every newly blocked ticket was read, so the next sync lists them again.
@@ -103,7 +103,7 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
     const row = one<TicketRow>('SELECT * FROM tickets WHERE repo_id = ? AND number = ?', repo.id, t.number);
     if (!row) continue;
     if (t.state === 'open' && t.openBlockers && row.blocked_by === '[]') fresh.push(row);
-    else if (t.totalBlockers !== undefined && t.totalBlockers !== linkCount(row.id)) recount.push(row);
+    if (t.totalBlockers !== undefined && t.totalBlockers !== linkCount(row.id)) recount.push(row);
   }
   const closed = new Set(
     all<{ ref: string }>("SELECT lower(r.full_name) || '#' || t.number AS ref FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE t.state = 'closed'").map((r) => r.ref),
@@ -123,11 +123,11 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
     LINK_BACKFILL_PER_SYNC + seen.size,
   ).filter((t) => !seen.has(t.id)).slice(0, LINK_BACKFILL_PER_SYNC);
   const targets = [...holds, ...recounts, ...backfill];
-  const recountFrom = holds.length;
-  const recountTo = holds.length + recounts.length;
-  // Hands changed counts that weren't read to the backfill, which retries them on a later sync.
+  // A changed count that isn't read goes to the backfill, which retries it on a later sync: the sync moves on and
+  // won't list it again. That holds whichever group read it.
+  const recounted = new Set(recount.map((t) => t.id));
   const retryLater = (ts: TicketRow[]) => {
-    for (const t of ts) run('UPDATE tickets SET links_checked_at = NULL WHERE id = ?', t.id);
+    for (const t of ts) if (recounted.has(t.id)) run('UPDATE tickets SET links_checked_at = NULL WHERE id = ?', t.id);
   };
   let linksChanged = false;
   try {
@@ -141,9 +141,11 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
         run('UPDATE tickets SET blockers_checked_at = ? WHERE id = ?', Date.now(), t.id);
       } catch (err) {
         console.warn(`Couldn't read the blockers of ${repo.full_name}#${t.number}: ${(err as Error).message}`);
-        if (i >= recountFrom && i < recountTo) retryLater([t]);
+        if (isTransient(err)) retryLater([t]);
+        // A read that can't succeed (a deleted or moved issue) counts as done, so the backfill moves past it.
+        else run('UPDATE tickets SET links_checked_at = COALESCE(links_checked_at, ?) WHERE id = ?', Date.now(), t.id);
         if (isRateLimited(err)) {
-          retryLater(targets.slice(Math.max(i + 1, recountFrom), recountTo));
+          retryLater(targets.slice(i + 1));
           return i >= fresh.length;
         }
       }

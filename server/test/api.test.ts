@@ -13,6 +13,7 @@ import { createConnection } from '../src/providers/index.ts';
 import { publish } from '../src/events.ts';
 import { appendLog, readLog } from '../src/runs.ts';
 import { saveSettings } from '../src/settings.ts';
+import { getTicket, setLinks } from '../src/tickets.ts';
 import { apiRouter } from '../src/http/api.ts';
 import { OPENAPI } from '../src/http/openapi.ts';
 import { sweepExpiredTokens } from '../src/http/tokens.ts';
@@ -592,11 +593,13 @@ describe('dependencies', () => {
       Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, ?, ?, '', ?, 'me', ?, '[]', 'x')", repo, n, title, `https://github.com/x/${n}`, state).lastInsertRowid);
     const one2 = addTicket(deps, 1, 'Build the API', 'closed');
     const two = addTicket(deps, 2, 'Use the API');
+    run(`UPDATE tickets SET blocked_by = '["me/lib#5"]' WHERE id = ?`, two);
     addTicket(lib, 5, 'Shared parser', 'closed');
     const link = (ticket: number, repo: string, n: number, state: string, title: string | null = null) =>
       run('INSERT INTO ticket_links (ticket_id, blocker_repo, blocker_number, blocker_title, blocker_url, blocker_state) VALUES (?, ?, ?, ?, ?, ?)', ticket, repo, n, title, `https://github.com/${repo}/issues/${n}`, state);
     link(two, 'me/deps', 1, 'open'); // stale: the ticket row says closed
     link(two, 'Me/Lib', 5, 'open');
+    link(two, 'me/lib', 5, 'open'); // the same link, spelled differently: shown once
     link(one2, 'stranger/tool', 7, 'closed', 'Fix the tool');
   });
 
@@ -617,9 +620,19 @@ describe('dependencies', () => {
     const node = (ref: string) => g.nodes.find((n: { ref: string }) => n.ref === ref);
     expect(node('#1')).toMatchObject({ state: 'closed', title: 'Build the API', ticket: { number: 1, repo: 'me/deps' } });
     expect(node('me/lib#5')).toMatchObject({ state: 'closed', ticket: { repo: 'me/lib', number: 5 } });
-    expect(node('stranger/tool#7')).toEqual({ ref: 'stranger/tool#7', number: 7, title: 'Fix the tool', url: 'https://github.com/stranger/tool/issues/7', state: 'closed', ticket: null });
+    expect(node('stranger/tool#7')).toEqual({ ref: 'stranger/tool#7', number: 7, title: 'Fix the tool', url: 'https://github.com/stranger/tool/issues/7', state: 'closed', held: false, ticket: null });
+    expect(node('#2')).toMatchObject({ held: true });
     expect(Object.keys(g).sort()).toEqual(Object.keys((OPENAPI.components.schemas.DependencyGraph as { properties: object }).properties).sort());
     expect(Object.keys(node('#1')).sort()).toEqual(Object.keys((OPENAPI.components.schemas.DependencyNode as { properties: object }).properties).sort());
+  });
+
+  it('keeps only web addresses as link URLs', async () => {
+    const id = one<{ id: number }>("SELECT t.id FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE r.full_name = 'me/lib' AND t.number = 5")!.id;
+    expect(setLinks(getTicket(id)!, [{ repo: 'evil/repo', number: 3, state: 'open', url: 'javascript:alert(1)' }])).toBe(true);
+    expect(setLinks(getTicket(id)!, [{ repo: 'evil/repo', number: 3, state: 'open', url: 'javascript:alert(1)' }])).toBe(false);
+    const res = await request(app).get('/api/dependencies').set('cookie', cookie);
+    expect(graphOf(res.body, 'me/lib').nodes.find((n: { ref: string }) => n.ref === 'evil/repo#3').url).toBe('https://github.com/evil/repo/issues/3');
+    setLinks(getTicket(id)!, []);
   });
 
   it('lists a repo without links with empty arrays', async () => {

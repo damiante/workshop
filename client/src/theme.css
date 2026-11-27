@@ -1055,6 +1055,10 @@ a.turn-no:hover {
 .graph-edge.done {
   stroke: var(--line);
 }
+/* A link that closes a loop runs backwards, so it's dashed to set it apart. */
+.graph-edge.cycle {
+  stroke-dasharray: 5 4;
+}
 .graph-arrow {
   fill: var(--muted);
 }
