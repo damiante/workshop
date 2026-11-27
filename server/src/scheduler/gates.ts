@@ -159,6 +159,37 @@ export function implicitPriority(nodes: { key: string; prioritised: boolean; blo
   return new Map([...found].map(([k, v]) => [k, [...v].sort()]));
 }
 
+/**
+ * How many distinct open tickets wait on each ticket, directly or through others. Keys and blockers
+ * are `refKey`s; blockers Workshop doesn't know are skipped, and in a cycle no ticket counts itself.
+ * Only tickets something waits on are in the result.
+ */
+export function waitingCounts(nodes: { key: string; blockers: string[] }[]): Map<string, number> {
+  const known = new Set(nodes.map((n) => n.key));
+  const dependents = new Map<string, string[]>();
+  for (const n of nodes) {
+    for (const b of new Set(n.blockers)) {
+      if (!known.has(b) || b === n.key) continue;
+      if (!dependents.has(b)) dependents.set(b, []);
+      dependents.get(b)!.push(n.key);
+    }
+  }
+  const counts = new Map<string, number>();
+  for (const root of dependents.keys()) {
+    // Iterative DFS over the reverse edges, with its own visited set, so cycles and diamonds end.
+    const seen = new Set([root]);
+    const stack = [...dependents.get(root)!];
+    while (stack.length) {
+      const key = stack.pop()!;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      stack.push(...(dependents.get(key) ?? []));
+    }
+    counts.set(root, seen.size - 1);
+  }
+  return counts;
+}
+
 /** A ticket the Classifier still has to look at: no stage yet, and nothing it waits on. */
 export function isUnclassified(labels: string[], open: boolean, blockers: string[]): boolean {
   if (blockers.length) return false;

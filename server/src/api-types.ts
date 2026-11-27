@@ -342,6 +342,8 @@ export interface QueueItem {
   bypassLimits: boolean;
   /** Refs of the prioritised tickets this one goes first for. */
   prioritisedFor: string[];
+  /** Open tickets that wait on this one, directly or through others. */
+  unblocks: number;
 }
 
 export interface AlertView {

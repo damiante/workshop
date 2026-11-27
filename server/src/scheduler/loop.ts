@@ -303,6 +303,8 @@ export interface Candidate {
   bypassLimits: boolean;
   /** Refs of the prioritised tickets that wait on this one; it goes first for them. */
   prioritisedFor: string[];
+  /** Open tickets that wait on this one, directly or through others. */
+  unblocks: number;
 }
 
 function startCandidate(c: Candidate): string | null {
@@ -443,10 +445,11 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const size = agentSize(agent, parseLabels(labelsOf(t)), Boolean(t.ui));
     const hostId = hostFor.get(size)!;
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, size, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), prioritisedFor, boosted, priority: stepPriority(step), repoPriority: repo.priority });
+    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, size, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), prioritisedFor, unblocks: graph.unblocks(t, repo), boosted, priority: stepPriority(step), repoPriority: repo.priority });
   }
-  // The sort is stable, so the ticket order setting (from the query) decides ties.
-  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.repoPriority - a.repoPriority || a.priority - b.priority);
+  // Pushed, prioritised, then tickets more open work waits on. The sort is stable, so the ticket
+  // order setting (from the query) decides ties.
+  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.unblocks - a.unblocks || b.repoPriority - a.repoPriority || a.priority - b.priority);
 }
 
 export function queueView(): QueueItem[] {
@@ -460,6 +463,7 @@ export function queueView(): QueueItem[] {
     prioritised: c.prioritised,
     bypassLimits: c.bypassLimits,
     prioritisedFor: c.prioritisedFor,
+    unblocks: c.unblocks,
   }));
 }
 

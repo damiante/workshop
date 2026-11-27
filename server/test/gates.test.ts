@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Limits, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, isUnclassified, modeBlock, priorityBlock, pickHost, poolFor, freeSlots, implicitPriority, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours, type HostLoad } from '../src/scheduler/gates.ts';
+import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, isUnclassified, modeBlock, priorityBlock, pickHost, poolFor, freeSlots, implicitPriority, waitingCounts, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours, type HostLoad } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -303,5 +303,36 @@ describe('implicitPriority', () => {
 
   it('gives nothing without a prioritised ticket', () => {
     expect(implicitPriority([node('r#b', ['r#a']), node('r#a')]).size).toBe(0);
+  });
+});
+
+describe('waitingCounts', () => {
+  const node = (key: string, blockers: string[] = []) => ({ key, blockers });
+  const of = (map: Map<string, number>) => Object.fromEntries(map);
+
+  it('counts a chain transitively', () => {
+    // r#a waits on r#b, which waits on r#c.
+    expect(of(waitingCounts([node('r#a', ['r#b']), node('r#b', ['r#c']), node('r#c')]))).toEqual({ 'r#c': 2, 'r#b': 1 });
+  });
+
+  it('counts each dependent of a diamond once', () => {
+    const map = waitingCounts([node('r#d', ['r#b', 'r#c']), node('r#b', ['r#a']), node('r#c', ['r#a']), node('r#a')]);
+    expect(of(map)).toEqual({ 'r#a': 3, 'r#b': 1, 'r#c': 1 });
+  });
+
+  it('ends on a cycle without counting a ticket for itself', () => {
+    expect(of(waitingCounts([node('r#a', ['r#b']), node('r#b', ['r#a']), node('r#c', ['r#c'])]))).toEqual({ 'r#a': 1, 'r#b': 1 });
+  });
+
+  it('skips blockers it does not know', () => {
+    expect(of(waitingCounts([node('r#b', ['x#1', 'r#a']), node('r#a', ['x#2'])]))).toEqual({ 'r#a': 1 });
+  });
+
+  it('counts across repositories', () => {
+    expect(of(waitingCounts([node('r/app#1', ['x/lib#5']), node('r/app#2', ['x/lib#5', 'x/lib#5']), node('x/lib#5')]))).toEqual({ 'x/lib#5': 2 });
+  });
+
+  it('gives nothing without links', () => {
+    expect(waitingCounts([node('r#a'), node('r#b')]).size).toBe(0);
   });
 });
