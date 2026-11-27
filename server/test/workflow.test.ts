@@ -171,9 +171,115 @@ describe('parseResult', () => {
 describe('parseResult blocked', () => {
   it('requires a list of positive ticket numbers', () => {
     expect(parseResult('classifier', { decision: 'blocked', blocked_by: [2], reason: 'x' })).toMatchObject({ decision: 'blocked', blocked_by: [2] });
-    for (const blocked_by of [undefined, [], ['2'], [0], [1.5]]) {
-      expect(parseResult('classifier', { decision: 'blocked', blocked_by, reason: 'x' })).toMatch(/blocked requires blocked_by/);
+    for (const blocked_by of [undefined, []]) {
+      expect(parseResult('classifier', { decision: 'blocked', blocked_by, reason: 'x' })).toBe('blocked requires blocked_by (open ticket numbers) or raise_blockers (new prerequisite tickets).');
     }
+    for (const blocked_by of [['2'], [0], [1.5]]) {
+      expect(parseResult('classifier', { decision: 'blocked', blocked_by, reason: 'x' })).toBe('blocked_by must be a list of ticket numbers.');
+    }
+  });
+
+  it('accepts new prerequisite tickets instead of, or beside, numbers', () => {
+    const raise_blockers = [{ title: 'Save modifiers', body: 'Build it.' }];
+    expect(parseResult('classifier', { decision: 'blocked', raise_blockers, reason: 'x' })).toMatchObject({ raise_blockers });
+    expect(parseResult('classifier', { decision: 'blocked', blocked_by: [], raise_blockers, reason: 'x' })).toMatchObject({ raise_blockers });
+    expect(parseResult('classifier', { decision: 'blocked', blocked_by: [2], raise_blockers, reason: 'x' })).toMatchObject({ blocked_by: [2], raise_blockers });
+    expect(parseResult('classifier', { decision: 'blocked', raise_blockers: [{ title: ' ', body: 'b' }], reason: 'x' })).toBe('raise_blockers must be a list of { title, body }.');
+    expect(parseResult('classifier', { decision: 'blocked', raise_blockers: [], reason: 'x' })).toMatch(/^blocked requires blocked_by/);
+  });
+
+  it('lets only Design and Implementation return blocked, and only with raise_blockers', () => {
+    const raise_blockers = [{ title: 'T', body: 'B' }];
+    for (const agent of ['design', 'implement'] as const) {
+      expect(parseResult(agent, { outcome: 'blocked', summary: 's', raise_blockers })).toMatchObject({ outcome: 'blocked', raise_blockers });
+      expect(parseResult(agent, { outcome: 'blocked', summary: 's' })).toBe('blocked requires raise_blockers: the prerequisite tickets to open.');
+      expect(parseResult(agent, { outcome: 'blocked', summary: 's', raise_blockers: [{ title: 'T' }] })).toBe('raise_blockers must be a list of { title, body }.');
+    }
+    for (const agent of ['code-review', 'merge', 'design-review'] as const) {
+      expect(parseResult(agent, { outcome: 'blocked', summary: 's', raise_blockers })).toBe('outcome must be done, needs_info or failed.');
+    }
+    expect(parseResult('design', { outcome: 'nope', summary: 's' })).toBe('outcome must be done, needs_info, failed or blocked.');
+  });
+});
+
+describe('raising blockers', () => {
+  it('adds raise_blockers to the schema only with the flag, and the blocked outcome only for Design and Implementation', () => {
+    expect(schemaFor('classifier')).not.toHaveProperty('properties.raise_blockers');
+    expect(schemaFor('classifier', { blockers: true })).toHaveProperty('properties.raise_blockers.maxItems', 3);
+    expect(schemaFor('classifier', { blockers: true })).toHaveProperty('properties.blocked_by.description', expect.stringContaining('may be empty when raise_blockers is given'));
+    expect(schemaFor('design')).toHaveProperty('properties.outcome.enum', ['done', 'needs_info', 'failed']);
+    expect(schemaFor('design', { blockers: true })).toHaveProperty('properties.outcome.enum', ['done', 'needs_info', 'failed', 'blocked']);
+    expect(schemaFor('implement', { blockers: true, noticed: true })).toHaveProperty('properties.raise_blockers.items.required', ['title', 'body']);
+    expect(schemaFor('implement', { blockers: true, noticed: true })).toHaveProperty('properties.noticed');
+    for (const agent of ['code-review', 'merge', 'design-review'] as const) {
+      expect(schemaFor(agent, { blockers: true })).not.toHaveProperty('properties.raise_blockers');
+      expect(schemaFor(agent, { blockers: true })).toHaveProperty('properties.outcome.enum', ['done', 'needs_info', 'failed']);
+    }
+  });
+
+  it('classify blocked with numbers only keeps the plan and comment as before', () => {
+    const plan = planTransition(ctx(), { decision: 'blocked', blocked_by: [2, 5], reason: 'Needs the API.' });
+    expect(plan).toEqual({
+      add: [],
+      remove: [],
+      addBlockers: [2, 5],
+      comment: "Workshop will wait for #2 and #5 before working on this ticket: Needs the API.\n\nIt carries on once they're closed. If it shouldn't wait, remove the link under Relationships and say so in a comment.",
+    });
+  });
+
+  it('classify blocked with raise_blockers asks for the tickets, with no labels', () => {
+    const raise_blockers = [{ title: 'Save modifiers', body: 'Build it.' }];
+    const plan = planTransition(ctx(), { decision: 'blocked', raise_blockers, reason: 'Needs modifiers.' });
+    expect(plan).toMatchObject({ add: [], remove: [], raiseBlockers: raise_blockers });
+    expect(plan.addBlockers).toBeUndefined();
+    expect(plan.comment).toContain('Workshop will wait for the prerequisite tickets listed below before working on this ticket: Needs modifiers.');
+    const both = planTransition(ctx(), { decision: 'blocked', blocked_by: [2], raise_blockers, reason: 'x' });
+    expect(both).toMatchObject({ addBlockers: [2], raiseBlockers: raise_blockers });
+    expect(both.comment).toContain('wait for #2 and the prerequisite tickets listed below');
+  });
+
+  it.each(['design', 'implement'] as const)('%s blocked publishes the work, keeps the stage and raises the prerequisites', (agent) => {
+    const labels = [label.size('l'), label.stage(agent)];
+    const raise_blockers = [{ title: 'T', body: 'B' }];
+    const plan = planTransition(ctx({ agent, labels }), { outcome: 'blocked', summary: 'Needs T first.', raise_blockers });
+    expect(plan).toMatchObject({ add: [], remove: [], publish: true, raiseBlockers: raise_blockers });
+    expect(plan.failure).toBeUndefined();
+    expect(plan.handOff).toBeUndefined();
+    expect(plan.comment).toContain('Needs T first.');
+  });
+
+  it('puts the blocker rule in the protocol and the classifier task only with the flag', () => {
+    const plain = protocolText({ branch: 'b', base: 'main', noticed: true });
+    expect(plain).not.toContain('raise_blockers');
+    expect(plain).toContain("don't let it stop you. List it");
+    const both = protocolText({ branch: 'b', base: 'main', noticed: true, blockers: true });
+    expect(both).toContain('Return "blocked" with that work under "raise_blockers"');
+    expect(both).toContain("don't let it stop you (if it does, see the next rule)");
+    expect(protocolText({ branch: 'b', base: 'main', blockers: true })).toContain('raise_blockers');
+
+    const task = {
+      agent: 'classifier' as const,
+      mode: 'normal' as const,
+      repo: 'me/app',
+      base: 'main',
+      branch: 'b',
+      docPath: 'd.md',
+      ticket: { number: 3, title: 'X', body: 'Do X', url: 'u', labels: [], size: null },
+      comments: [],
+      omittedComments: 0,
+      review: [],
+      ui: false,
+      media: [],
+    };
+    const openTickets = [{ number: 2, title: 'API', body: '' }];
+    expect(taskPrompt({ ...task, openTickets })).toContain('return "blocked" with their numbers in blocked_by and the reason.');
+    expect(taskPrompt({ ...task, openTickets })).not.toContain('raise_blockers');
+    expect(taskPrompt(task)).not.toContain('blocked');
+    const listed = taskPrompt({ ...task, openTickets, raiseBlockers: true });
+    expect(listed).toContain('put the numbers of the open tickets above that cover it in blocked_by, and describe prerequisite work that no open ticket covers under raise_blockers');
+    const none = taskPrompt({ ...task, raiseBlockers: true });
+    expect(none).toContain('prerequisite work outside its scope exists, return "blocked" and describe that work under raise_blockers');
+    expect(none).not.toContain('blocked_by');
   });
 });
 

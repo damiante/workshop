@@ -124,6 +124,7 @@ Once the App is installed, the **Repositories** list shows every repository it c
 - At most three per run. One whose title an open ticket already has is left out.
 - In a repository set to nominated tickets, the new tickets wait until you nominate them. In one that works on all open tickets, they're picked up like any other.
 - Agents working on a `workshop/raised` ticket aren't asked, so noticed work can't keep producing more.
+- When a ticket needs prerequisite work outside its scope that no open ticket covers, the Classifier, Design or Implementation agent can raise it as a blocker instead of asking you. Workshop opens it (or links an open ticket with the same title) as **blocked by**, and the ticket waits for it, then carries on from the same stage once it closes. Raised blockers also get `workshop/nominated` when the ticket has it.
 
 **Push to the default branch, no pull request** (off by default) is for repositories that don't use pull requests. Once the code review passes, Workshop brings the ticket's branch up to date and puts its files on the default branch as one commit, comments the commit on the issue, closes it and deletes the branch. Nothing waits for you, and CI isn't waited for either: the Code reviewer's own test run is the check.
 - The commit message is the first line of the branch's first commit, so it follows the repository's own style, with the ticket number added (`… (#12)`); later commits are listed underneath.

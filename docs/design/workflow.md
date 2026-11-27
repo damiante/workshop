@@ -57,10 +57,11 @@ When several tickets are ready, work already under way goes first: merge, then i
 | Classifier | accept, XS or S | size, `stage:implement` | Create the branch `workshop/<n>-<slug>`, linked to the issue; comment the size and reason |
 | Classifier | accept, M, L or XL | size, `stage:design` | Same |
 | Classifier (delta) | accept | size of the *requested changes*, then routed the same way | No new branch |
-| Classifier | blocked | no label change | Add the blocked-by links on GitHub; comment the reason. The ticket stays unsized with no branch, and is classified again once its blockers close |
+| Classifier | blocked | no label change | Add the blocked-by links on GitHub (`blocked_by` numbers, plus a ticket opened or found by title for each `raise_blockers` entry); comment the reason. The ticket stays unsized with no branch, and is classified again once its blockers close |
 | Classifier | reject | `skip`, stage removed | Comment the reason |
 | Design | done | `stage:implement` (M) or `stage:design-review` (L/XL) | Push the design doc; comment a link and summary |
 | Design adversary | done | `stage:implement` | Push the revised doc; comment a summary |
+| Design or Implementation | blocked | no label change | Push partial work; open or link the `raise_blockers` prerequisites as blocked-by; comment them. The stage runs again once they close |
 | Implementation | done | `stage:code-review` | Push; store the summary for the pull request (`tickets.handoff`); comment |
 | Code reviewer | done, nothing severe | `stage:pr-review` | Open the pull request with the Implementation summary and a Code review section, or comment on the existing one after a review round. Request your review |
 | Code reviewer | done, severe findings, no rework yet this round | `stage:design` (M/L/XL, design at fault) or `stage:implement` | Store the severe findings (`tickets.rework`); comment them. Nothing is pushed |
@@ -128,6 +129,7 @@ In a repository with **Agents open tickets for what they notice** on, every agen
 
 - Each opened ticket is recorded in `tickets.raised` at once, so a publish retried after a GitHub failure doesn't open it twice, and a later run on the same ticket doesn't repeat it. A title that an open ticket in the repository already has is left out.
 - A ticket carrying `workshop/raised` gets neither the schema field nor the rule (`mayRaise`), so the chain stops after one step.
+- **Blockers.** Under the same setting (`mayRaiseBlockers`), the Classifier, Design and Implementation agents may also return `raise_blockers`: prerequisite work outside the ticket that no open ticket covers. Design and Implementation return it with `outcome: "blocked"`, and the rule for when to use it is in the protocol (the Classifier's is in its task line). `raiseBlockers` reuses a `tickets.raised` record with `blocker: true` and the same title (from any run on the ticket, so retries and reruns don't duplicate), then an open ticket with that title, and otherwise opens one labelled `workshop/raised` (plus `workshop/nominated` when the ticket has it) and records it at once. The `blockers` step links them all; a candidate whose stored `blocked_by` already holds this ticket is dropped with a run warning, so a raised ticket's Classifier can't deadlock with its parent. Not on `workshop/raised` tickets, and at most `MAX_NOTICED` per run.
 - The new tickets follow the repository's usual rules: they wait for `workshop/nominated` in a nominated-only repository, and their author (the App's bot, or you with a personal access token) has to be an allowed author.
 
 ## Pushing to the default branch
@@ -199,8 +201,8 @@ Every run is `claude -p` in `/work/repo` on the ticket's branch, with:
   - how to ask a question.
 - **Task** (stdin): the ticket title, body and labels, then the comments (only from ticket authors and Workshop's bot), then any review feedback, then a one-line task for this stage.
 - **Result:** a JSON schema per agent.
-  - Classifier: `{decision: accept|reject|needs_info|blocked, size?, reason, questions?, blocked_by?}`.
-  - Others: `{outcome: done|needs_info|failed, summary, questions?, tests?}`.
+  - Classifier: `{decision: accept|reject|needs_info|blocked, size?, reason, questions?, blocked_by?, raise_blockers?: [{title, body}]}`.
+  - Others: `{outcome: done|needs_info|failed, summary, questions?, tests?}`. Design and Implementation may also return `outcome: blocked` with `raise_blockers` when the repository lets agents open tickets.
   - Code reviewer: the same, plus `findings: [{severity: severe|moderate|minor, cause: design|implementation, title, detail, evidence, fix, file?, line?}]` (required when done).
 - **Limits:** max turns and a time limit per agent; for API billing, `--max-budget-usd`.
 

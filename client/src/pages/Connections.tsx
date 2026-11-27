@@ -360,7 +360,7 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
               <input type="checkbox" checked={draft.mergeWithoutReview} onChange={(e) => setDraft({ ...draft, mergeWithoutReview: e.target.checked })} />
               <span className="muted">Merge without review</span>
             </label>
-            <label className="row small" title="When an agent comes across a problem outside its ticket, it reports it instead of fixing it there, and Workshop opens a ticket.">
+            <label className="row small" title="When an agent comes across a problem outside its ticket, or work its ticket needs first, Workshop opens a ticket for it.">
               <input type="checkbox" checked={draft.raiseTickets} onChange={(e) => setDraft({ ...draft, raiseTickets: e.target.checked })} />
               <span className="muted">Agents open tickets for what they notice</span>
             </label>

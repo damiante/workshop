@@ -7,6 +7,8 @@ export interface ClassifierResult {
   reason: string;
   questions?: string[];
   blocked_by?: number[];
+  /** Prerequisite work no open ticket covers (blocked only). Workshop opens a ticket for each and waits for it. */
+  raise_blockers?: Noticed[];
   capabilities?: Capability[];
   /** The ticket changes what a user sees, or is a bug best examined by running the app. */
   ui?: boolean;
@@ -21,12 +23,17 @@ export interface Noticed {
 /** At most this many tickets are opened from one run. */
 export const MAX_NOTICED = 3;
 
+/** The work agents that may stop on a prerequisite that has no ticket yet (`outcome: "blocked"`). */
+export const BLOCKING_AGENTS: AgentName[] = ['design', 'implement'];
+
 export interface WorkResult {
-  outcome: 'done' | 'needs_info' | 'failed';
+  outcome: 'done' | 'needs_info' | 'failed' | 'blocked';
   summary: string;
   questions?: string[];
   /** Only asked for in repositories that let agents open tickets. */
   noticed?: Noticed[];
+  /** Prerequisite tickets to open and wait for (blocked only; `BLOCKING_AGENTS`). */
+  raise_blockers?: Noticed[];
   tests?: string;
   /** Images this run added to /work/media. */
   media?: { path: string; caption: string }[];
@@ -166,17 +173,48 @@ const NOTICED_SCHEMA = {
   },
 };
 
+const RAISE_BLOCKERS_SCHEMA = {
+  type: 'array',
+  maxItems: MAX_NOTICED,
+  description:
+    "Prerequisite work this ticket can't be finished without, that is outside its scope and that no open ticket covers (blocked only). Workshop opens a ticket for each and waits for it.",
+  items: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'The ticket title: the prerequisite work in a few words.' },
+      body: { type: 'string', description: 'What has to be built and why this ticket needs it, where (files, interfaces), and how to tell it is done. Self-contained: written for someone who has not seen this ticket.' },
+    },
+    required: ['title', 'body'],
+    additionalProperties: false,
+  },
+};
+
 const SCHEMAS: Partial<Record<AgentName, { properties: object }>> = { classifier: CLASSIFIER_SCHEMA, 'code-review': REVIEW_SCHEMA };
 
-/** With `noticed`, every agent but the Classifier may also report work outside its ticket. */
-export function schemaFor(agent: AgentName, opts: { noticed?: boolean } = {}): object {
+/**
+ * With `noticed`, every agent but the Classifier may also report work outside its ticket. With `blockers`, the
+ * Classifier and `BLOCKING_AGENTS` may also return prerequisite tickets to open and wait for.
+ */
+export function schemaFor(agent: AgentName, opts: { noticed?: boolean; blockers?: boolean } = {}): object {
   const schema = SCHEMAS[agent] ?? WORK_SCHEMA;
-  if (!opts.noticed || agent === 'classifier') return schema;
-  return { ...schema, properties: { ...schema.properties, noticed: NOTICED_SCHEMA } };
+  let properties: Record<string, unknown> = schema.properties as Record<string, unknown>;
+  if (opts.noticed && agent !== 'classifier') properties = { ...properties, noticed: NOTICED_SCHEMA };
+  if (opts.blockers && agent === 'classifier') {
+    properties = {
+      ...properties,
+      blocked_by: { ...CLASSIFIER_SCHEMA.properties.blocked_by, description: 'Numbers of the open tickets listed in the task that must be finished first (blocked only; may be empty when raise_blockers is given).' },
+      raise_blockers: RAISE_BLOCKERS_SCHEMA,
+    };
+  }
+  if (opts.blockers && BLOCKING_AGENTS.includes(agent)) {
+    properties = { ...properties, outcome: { type: 'string', enum: ['done', 'needs_info', 'failed', 'blocked'] }, raise_blockers: RAISE_BLOCKERS_SCHEMA };
+  }
+  return properties === schema.properties ? schema : { ...schema, properties };
 }
 
 const isStringList = (v: unknown) => Array.isArray(v) && v.every((q) => typeof q === 'string');
 const isText = (v: unknown) => typeof v === 'string' && v.trim() !== '';
+const isTextList = (v: unknown) => Array.isArray(v) && v.every((n) => n && typeof n === 'object' && isText(n.title) && isText(n.body));
 
 function isFinding(v: unknown): v is Finding {
   if (!v || typeof v !== 'object') return false;
@@ -200,9 +238,13 @@ export function parseResult(agent: AgentName, value: unknown): AgentResult | str
   if (needsQuestions && !(v.questions as string[] | undefined)?.length) return 'needs_info requires at least one question.';
   if (agent === 'classifier') {
     if (!['accept', 'reject', 'needs_info', 'blocked'].includes(v.decision as string)) return 'decision must be accept, reject, needs_info or blocked.';
+    if (v.raise_blockers !== undefined && !isTextList(v.raise_blockers)) return 'raise_blockers must be a list of { title, body }.';
     if (v.decision === 'blocked') {
       const b = v.blocked_by;
-      if (!Array.isArray(b) || !b.length || !b.every((n) => Number.isInteger(n) && n > 0)) return 'blocked requires blocked_by: the numbers of the tickets this one waits for.';
+      if (b !== undefined && !(Array.isArray(b) && b.every((n) => Number.isInteger(n) && n > 0))) return 'blocked_by must be a list of ticket numbers.';
+      if (!(b as number[] | undefined)?.length && !(v.raise_blockers as Noticed[] | undefined)?.length) {
+        return 'blocked requires blocked_by (open ticket numbers) or raise_blockers (new prerequisite tickets).';
+      }
     }
     if (v.capabilities !== undefined && !(Array.isArray(v.capabilities) && v.capabilities.every((c) => CAPABILITIES.includes(c as Capability)))) return `capabilities must be a list of: ${CAPABILITIES.join(', ')}.`;
     if (v.ui !== undefined && typeof v.ui !== 'boolean') return 'ui must be true or false.';
@@ -210,10 +252,15 @@ export function parseResult(agent: AgentName, value: unknown): AgentResult | str
     if (v.decision === 'accept' && !SIZES.includes(v.size as Size)) return 'size (xs–xl) is required to accept a ticket.';
     return v as unknown as ClassifierResult;
   }
-  if (!['done', 'needs_info', 'failed'].includes(v.outcome as string)) return 'outcome must be done, needs_info or failed.';
+  const blocking = BLOCKING_AGENTS.includes(agent);
+  if (!['done', 'needs_info', 'failed', ...(blocking ? ['blocked'] : [])].includes(v.outcome as string)) {
+    return blocking ? 'outcome must be done, needs_info, failed or blocked.' : 'outcome must be done, needs_info or failed.';
+  }
   if (typeof v.summary !== 'string') return 'summary is required.';
   if (v.media !== undefined && !(Array.isArray(v.media) && v.media.every((m) => m && typeof m === 'object' && typeof m.path === 'string' && typeof m.caption === 'string'))) return 'media must be a list of { path, caption }.';
-  if (v.noticed !== undefined && !(Array.isArray(v.noticed) && v.noticed.every((n) => n && typeof n === 'object' && isText(n.title) && isText(n.body)))) return 'noticed must be a list of { title, body }.';
+  if (v.noticed !== undefined && !isTextList(v.noticed)) return 'noticed must be a list of { title, body }.';
+  if (v.raise_blockers !== undefined && !isTextList(v.raise_blockers)) return 'raise_blockers must be a list of { title, body }.';
+  if (v.outcome === 'blocked' && !(v.raise_blockers as Noticed[] | undefined)?.length) return 'blocked requires raise_blockers: the prerequisite tickets to open.';
   if (agent === 'code-review' && (v.outcome === 'done' || v.findings !== undefined) && !(Array.isArray(v.findings) && v.findings.every(isFinding))) {
     return 'findings must be a list of { severity, cause, title, detail, evidence, fix }, with severity severe, moderate or minor and cause design or implementation.';
   }

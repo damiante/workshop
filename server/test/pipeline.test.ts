@@ -2650,6 +2650,196 @@ describe('tickets for what agents notice', () => {
   });
 });
 
+describe('raising blockers', () => {
+  const prerequisite = { title: 'Save outcome modifiers', body: 'The engine needs a hook that changes a save outcome.' };
+  const file = (e: InstanceType<typeof FakeEnv>, name: string) => String(e.started.find((s) => s.cmd?.[0] === 'run')!.files![name]);
+  const classify = (over: object = {}) => {
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'blocked', raise_blockers: [prerequisite], reason: 'Needs save modifiers.', ...over })] });
+    return go('classifier');
+  };
+  const insert = (n: number, title: string, blockedBy = '[]') =>
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (1, ?, ?, '', 'u', 'me', 'open', '[]', ?, '2026-10-13T00:00:00Z')", n, title, blockedBy);
+  const blockedBy = () => getTicket(1)!.blocked_by;
+
+  beforeEach(() => {
+    run('UPDATE repos SET raise_tickets = 1 WHERE id = 1');
+    run("UPDATE tickets SET raised = NULL, labels = '[]' WHERE id = 1");
+    run('DELETE FROM ticket_links');
+    run('DELETE FROM alerts');
+    setConnectionStatus(ids.env, 'ok');
+    let next = 40;
+    fake.tickets.createTicket = vi.fn(async () => ({ number: ++next, url: `https://github.com/me/app/issues/${next}` }));
+  });
+  afterEach(() => {
+    run('UPDATE repos SET raise_tickets = 0 WHERE id = 1');
+    run('DELETE FROM tickets WHERE id != 1');
+  });
+
+  it('opens the prerequisite, links it, parks the ticket and picks it up again once it closes', async () => {
+    const r = await settle(classify());
+    expect(r).toMatchObject({ status: 'succeeded', summary: 'Waiting for 1 new ticket: Needs save modifiers.' });
+    expect(fake.tickets.createTicket).toHaveBeenCalledTimes(1);
+    const [, made] = fake.tickets.createTicket.mock.calls[0];
+    expect(made).toMatchObject({ title: 'Save outcome modifiers', labels: [label.raised] });
+    expect(made.body).toContain('changes a save outcome');
+    expect(made.body).toContain("Workshop's Classifier agent raised this as a prerequisite of #3, which waits until this ticket is closed.");
+    expect(fake.tickets.addBlocker).toHaveBeenCalledTimes(1);
+    expect(fake.tickets.addBlocker).toHaveBeenCalledWith(expect.anything(), 3, 41);
+    expect(blockedBy()).toBe('["#41"]');
+    expect(ticketLabels()).toEqual([]);
+    expect(buildQueue().find((c) => c.ticket.id === 1)?.blockedBy).toBe('Depends on #41');
+    const comment = fake.tickets.comment.mock.calls[0][2] as string;
+    expect(comment).toContain('Workshop will wait for the prerequisite tickets listed below');
+    expect(comment).toContain('Prerequisite tickets this one waits for:\n- #41 Save outcome modifiers');
+    expect(comment).not.toContain('Noticed outside this ticket');
+    expect(JSON.parse(getTicket(1)!.raised!)).toEqual([{ number: 41, url: 'https://github.com/me/app/issues/41', title: 'Save outcome modifiers', runId: r.id, blocker: true }]);
+
+    fake.tickets.listChanged = async () => [];
+    fake.tickets.blockers = vi.fn(async () => [{ repo: 'me/app', number: 41, state: 'closed', url: '' }]);
+    fake.vcs.pullRequestState = async () => null;
+    await syncRepo(one<any>('SELECT * FROM repos WHERE id = 1'));
+    expect(blockedBy()).toBe('[]');
+    expect(buildQueue().find((c) => c.ticket.id === 1)?.blockedBy ?? '').not.toMatch(/Depends/);
+  });
+
+  it('asks the Classifier for prerequisites in its schema and task', async () => {
+    await settle(classify());
+    expect(JSON.parse(file(fake.env, '.workshop/schema.json')).properties.raise_blockers).toMatchObject({ type: 'array', maxItems: 3 });
+    expect(file(fake.env, '.workshop/prompt.md')).toContain('describe that work under raise_blockers');
+    expect(file(fake.env, '.workshop/system.md')).not.toContain('"raise_blockers"');
+  });
+
+  it('links an open ticket with the same title instead of opening one', async () => {
+    insert(12, 'save  outcome Modifiers');
+    await settle(classify());
+    expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+    expect(fake.tickets.addBlocker).toHaveBeenCalledWith(expect.anything(), 3, 12);
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('- #12 save  outcome Modifiers (already open)'));
+    expect(getTicket(1)!.raised).toBeNull();
+  });
+
+  it('opens no duplicate issue or link when the publish is retried after a GitHub failure', async () => {
+    let failed = false;
+    fake.tickets.addBlocker = vi.fn(async (_repo: unknown, _n: number, blocker: number) => {
+      if (!failed) {
+        failed = true;
+        throw Object.assign(new Error(''), { status: 502 });
+      }
+      return { repo: 'me/app', number: blocker, state: 'open', url: '' };
+    });
+    const id = classify();
+    await deferred(id);
+    expect(getRun(id)!.status).toBe('publishing');
+    due(id);
+    reattachRuns();
+    expect(await settle(id)).toMatchObject({ status: 'succeeded' });
+    expect(fake.tickets.createTicket).toHaveBeenCalledTimes(1);
+    expect(fake.tickets.addBlocker.mock.calls.map((c: unknown[]) => c[2])).toEqual([41, 41]);
+    expect(fake.tickets.comment).toHaveBeenCalledTimes(1);
+    expect(blockedBy()).toBe('["#41"]');
+  });
+
+  it('reuses the prerequisite from an earlier run on the ticket', async () => {
+    await settle(classify());
+    run('DELETE FROM runs');
+    run("UPDATE tickets SET blocked_by = '[]' WHERE id = 1");
+    expect((await settle(classify())).status).toBe('succeeded');
+    expect(fake.tickets.createTicket).toHaveBeenCalledTimes(1);
+    expect(fake.tickets.addBlocker.mock.calls.map((c: unknown[]) => c[2])).toEqual([41, 41]);
+  });
+
+  it('lists a prerequisite only as a prerequisite, and noticed work only as noticed', async () => {
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('l'), label.stage('design')]));
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'blocked', summary: 'Needs save modifiers.', raise_blockers: [prerequisite], noticed: [{ title: 'Typo in README', body: 'README.md:3.' }] })],
+      publish: [line({ before: 'aaa', after: 'bbb', ahead: 1 })],
+    });
+    expect((await settle(go('design'))).status).toBe('succeeded');
+    const comment = fake.tickets.comment.mock.calls[0][2] as string;
+    expect(comment).toContain('Prerequisite tickets this one waits for:\n- #41 Save outcome modifiers');
+    expect(comment).toContain('opened as its own ticket:\n- #42 Typo in README');
+    expect(comment.match(/Save outcome modifiers/g)).toHaveLength(1);
+  });
+
+  it("doesn't link a ticket that already waits for this one", async () => {
+    insert(4, 'The raised one', '["#3"]');
+    const r = await settle(classify({ raise_blockers: undefined, blocked_by: [4] }));
+    expect(r.status).toBe('failed');
+    expect(r.error).toContain('The Classifier agent said this ticket waits for #4, but none of those is an open issue in me/app.');
+    expect(fake.tickets.addBlocker).not.toHaveBeenCalled();
+    expect(readLog(r.id).map((e) => e.text)).toContain("#4 already waits for this ticket, so Workshop didn't link it as a blocker.");
+  });
+
+  it('fails readably when the setting is turned off before the run publishes', async () => {
+    const id = classify();
+    const follow = fake.env.follow;
+    fake.env.follow = async (cid: string, skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+      await follow(cid, skip, onLine);
+      if (cid.startsWith('run')) run('UPDATE repos SET raise_tickets = 0 WHERE id = 1');
+    };
+    const r = await settle(id);
+    expect(r.status).toBe('failed');
+    expect(r.error).toContain("The Classifier agent asked Workshop to open prerequisite tickets, but this repository doesn't let agents open tickets");
+    expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+    expect(fake.tickets.addBlocker).not.toHaveBeenCalled();
+  });
+
+  it('links existing numbers and new prerequisites together', async () => {
+    const r = await settle(classify({ blocked_by: [2] }));
+    expect(r.summary).toBe('Waiting for #2 and 1 new ticket: Needs save modifiers.');
+    expect(fake.tickets.addBlocker.mock.calls.map((c: unknown[]) => c[2])).toEqual([2, 41]);
+    expect(blockedBy()).toBe('["#2","#41"]');
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('wait for #2 and the prerequisite tickets listed below'));
+  });
+
+  it('nominates the prerequisite of a nominated ticket', async () => {
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.nominated]));
+    await settle(classify());
+    expect(fake.tickets.createTicket.mock.calls[0][1].labels).toEqual([label.raised, label.nominated]);
+  });
+
+  it.each([
+    ['with the setting off', () => run('UPDATE repos SET raise_tickets = 0 WHERE id = 1')],
+    ['on a raised ticket', () => run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.raised, label.size('l'), label.stage('design')]))],
+  ])("doesn't offer it %s", async (_what, setUp) => {
+    setUp();
+    await settle(classify({ raise_blockers: undefined, blocked_by: [2] }));
+    expect(JSON.parse(file(fake.env, '.workshop/schema.json')).properties.raise_blockers).toBeUndefined();
+    expect(file(fake.env, '.workshop/prompt.md')).not.toContain('raise_blockers');
+    run('DELETE FROM runs');
+    run("UPDATE tickets SET blocked_by = '[]' WHERE id = 1");
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Done.' })], publish: [line({ before: 'aaa', after: 'bbb', ahead: 1 })] });
+    await settle(go('design'));
+    const schema = JSON.parse(file(fake.env, '.workshop/schema.json'));
+    expect(schema.properties.outcome.enum).not.toContain('blocked');
+    expect(schema.properties.raise_blockers).toBeUndefined();
+    expect(file(fake.env, '.workshop/system.md')).not.toContain('raise_blockers');
+  });
+
+  it.each(['design', 'implement'] as const)('%s blocked pushes the work, keeps the stage and links the prerequisites', async (agent) => {
+    const labels = [label.size('l'), label.stage(agent)];
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(labels));
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'blocked', summary: 'Needs save modifiers first.', raise_blockers: [prerequisite] })],
+      publish: [line({ before: 'aaa', after: 'bbb', ahead: 1 })],
+    });
+    const r = await settle(go(agent));
+    expect(r.status).toBe('succeeded');
+    expect(JSON.parse(file(fake.env, '.workshop/schema.json')).properties.outcome.enum).toContain('blocked');
+    expect(file(fake.env, '.workshop/system.md')).toContain('Return "blocked" with that work under "raise_blockers"');
+    expect(fake.env.started.map((s: StepSpec) => s.cmd[0])).toEqual(['prepare', 'run', 'publish']);
+    expect(fake.tickets.setLabels).toHaveBeenLastCalledWith(expect.anything(), 3, [], [label.running]);
+    expect(ticketLabels()).toEqual(labels);
+    expect(fake.tickets.addBlocker).toHaveBeenCalledWith(expect.anything(), 3, 41);
+    expect(blockedBy()).toBe('["#41"]');
+    expect(fake.tickets.createTicket.mock.calls[0][1].body).toContain(`Workshop's ${agent === 'design' ? 'Design' : 'Implementation'} agent raised this`);
+    expect(getTicket(1)!.handoff).toBeNull();
+    expect(getTicket(1)!.failures).toBe(0);
+  });
+});
+
 describe('pushing to the default branch', () => {
   const labels = () => JSON.parse(getTicket(1)!.labels);
   const state = (ahead: number, behind: number, subjects = ['app: fix the thing', 'Address the review']) => vi.fn(async () => ({ ahead, behind, subjects }));

@@ -66,12 +66,14 @@ export const MAX_ATTEMPTS = 2;
 
 export const rescueOf = (t: TicketRow): Rescue | null => (t.rescue ? JSON.parse(t.rescue) : null);
 export const handoffOf = (t: TicketRow): Handoff | null => (t.handoff ? JSON.parse(t.handoff) : null);
-/** The tickets Workshop opened for what this ticket's agents noticed, and the run that reported each. */
+/** The tickets Workshop opened for what this ticket's agents noticed or needed first, and the run that reported each. */
 export interface Raised {
   number: number;
   url: string;
   title: string;
   runId: string;
+  /** Raised as a prerequisite this ticket waits for, not as noticed work. */
+  blocker?: boolean;
 }
 export const raisedOf = (t: TicketRow): Raised[] => (t.raised ? JSON.parse(t.raised) : []);
 export const reworkOf = (t: TicketRow): Rework | null => (t.rework ? JSON.parse(t.rework) : null);

@@ -22,6 +22,7 @@ import {
   editLabels,
   getRepo,
   getTicket,
+  blockersOf,
   handoffOf,
   isAllowedAuthor,
   labelsOf,
@@ -29,6 +30,7 @@ import {
   markRunning,
   MAX_ATTEMPTS,
   raisedOf,
+  refKey,
   repoRef,
   rescueOf,
   reworkOf,
@@ -42,7 +44,7 @@ import {
 import { imageFor, label, moveTo, parseLabels, REPO_IMAGE_DIR, repoImageTag } from '../workflow/labels.ts';
 import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
 import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, protocolText, publishes, taskPrompt } from '../workflow/prompts.ts';
-import { MAX_NOTICED, parseResult, schemaFor, type AgentResult, type Handoff, type Rescue, type WorkResult } from '../workflow/schemas.ts';
+import { BLOCKING_AGENTS, MAX_NOTICED, parseResult, schemaFor, type AgentResult, type Handoff, type Noticed, type Rescue, type WorkResult } from '../workflow/schemas.ts';
 import { planTransition, type Plan } from '../workflow/transitions.ts';
 import { check } from '../http/util.ts';
 import { ALLOWANCE_MAX_AGE_MS, formatTime, isRateLimited, isTransient, joinRefs, PUBLISH_GIVE_UP_MS, publishRetryMinutes, thresholdBlock } from './gates.ts';
@@ -234,7 +236,11 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
     MAX_BUDGET_USD: r.billing === 'api' ? String(getSettings().apiRunCapUsd) : '',
     RESUME: r.resumes > 0 ? '1' : '',
   };
-  const files: Record<string, string | Buffer> = { '.workshop/': '', '.workshop/schema.json': JSON.stringify(schemaFor(r.agent, { noticed: mayRaise(ctx.repo, ctx.ticket, r.agent) })) };
+  const blockers = mayRaiseBlockers(ctx.repo, ctx.ticket, r.agent);
+  const files: Record<string, string | Buffer> = {
+    '.workshop/': '',
+    '.workshop/schema.json': JSON.stringify(schemaFor(r.agent, { noticed: mayRaise(ctx.repo, ctx.ticket, r.agent), blockers })),
+  };
   if (r.resumes === 0) {
     const t = ctx.ticket;
     const repo = repoRef(ctx.repo);
@@ -267,7 +273,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
         : undefined;
     const imageLabels: Record<string, string> = await ctx.env.imageLabels(ctx.image).catch(() => ({}));
     const environment = environmentText(capabilitiesOf(imageLabels), imageLabels[ENVIRONMENT_LABEL]);
-    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch, publishes: publishes(r.agent), noticed: mayRaise(ctx.repo, t, r.agent) })}\n\n${environment}`;
+    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch, publishes: publishes(r.agent), noticed: mayRaise(ctx.repo, t, r.agent), blockers: blockers && BLOCKING_AGENTS.includes(r.agent) })}\n\n${environment}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
       mode: r.mode,
@@ -280,6 +286,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
       omittedComments: comments.length - included.length,
       review: review.map((x) => ({ ...x, body: local(x.body) })),
       openTickets,
+      raiseBlockers: blockers && r.agent === 'classifier',
       ui: Boolean(t.ui),
       media: stored.map((m) => ({ name: m.name, source: m.source, runId: m.run_id, caption: m.caption })),
       rescue: r.agent === 'merge' && parseLabels(labels).stage === 'reconcile' && rescue ? { branch: rescue.branch, agent: rescue.agent, summary: rescue.result.summary } : undefined,
@@ -319,7 +326,10 @@ const summarize = (r: AgentResult) => {
       : r.decision === 'reject'
         ? 'Declined'
         : r.decision === 'blocked'
-          ? `Waiting for ${joinRefs((r.blocked_by ?? []).map((n) => `#${n}`))}`
+          ? `Waiting for ${joinRefs([
+              ...(r.blocked_by ?? []).map((n) => `#${n}`),
+              ...(r.raise_blockers?.length ? [`${r.raise_blockers.length} new ticket${r.raise_blockers.length === 1 ? '' : 's'}`] : []),
+            ])}`
           : 'Asked questions';
   return `${what}: ${r.reason}`;
 };
@@ -585,6 +595,13 @@ interface PublishState {
  */
 const mayRaise = (repo: RepoRow, t: TicketRow, agent: AgentName) => Boolean(repo.raise_tickets) && agent !== 'classifier' && !labelsOf(t).includes(label.raised);
 
+/**
+ * Whether this run may open prerequisite tickets its ticket waits for: the Classifier and `BLOCKING_AGENTS`, under the
+ * same setting, and again not on a ticket that was itself raised, so prerequisites can't chain.
+ */
+const mayRaiseBlockers = (repo: RepoRow, t: TicketRow, agent: AgentName) =>
+  Boolean(repo.raise_tickets) && (agent === 'classifier' || BLOCKING_AGENTS.includes(agent)) && !labelsOf(t).includes(label.raised);
+
 const sameTitle = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
 const MAX_RAISED_TITLE = 200;
 const MAX_RAISED_BODY = 20_000;
@@ -608,8 +625,52 @@ async function raiseNoticed(ctx: Ctx, t: TicketRow, result: AgentResult): Promis
     const made = await source.createTicket(repoRef(ctx.repo), { title, body, labels: [label.raised] });
     run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: made.number, url: made.url, title, runId: r.id }]), t.id);
   }
-  return raisedOf(getTicket(t.id)!).filter((x) => x.runId === r.id);
+  // Prerequisites are listed on their own.
+  return raisedOf(getTicket(t.id)!).filter((x) => x.runId === r.id && !x.blocker);
 }
+
+interface Prerequisite {
+  number: number;
+  title: string;
+  /** An open ticket that already had this title, rather than one Workshop opened. */
+  existing: boolean;
+}
+
+/**
+ * Opens (or finds) a ticket for each prerequisite the agent says its ticket waits for. A prerequisite this ticket
+ * already raised with the same title, in this run or an earlier one, is reused, so a retried publish or a stage
+ * run again doesn't open it twice; so is an open ticket with the same title. Each new one is recorded as soon as it exists.
+ */
+async function raiseBlockers(ctx: Ctx, t: TicketRow, wanted: Noticed[]): Promise<Prerequisite[]> {
+  const r = ctx.run;
+  // The setting as it is now: it may have been turned off since the run started.
+  if (!mayRaiseBlockers(getRepo(ctx.repo.id) ?? ctx.repo, t, r.agent)) return [];
+  const source = sourceFor(ctx.repo);
+  const made: Prerequisite[] = [];
+  for (const n of wanted.slice(0, MAX_NOTICED)) {
+    const title = n.title.trim().replace(/\s+/g, ' ').slice(0, MAX_RAISED_TITLE);
+    const before = raisedOf(getTicket(t.id)!);
+    const earlier = before.find((x) => x.blocker && sameTitle(x.title, title));
+    if (earlier) {
+      made.push({ number: earlier.number, title: earlier.title, existing: false });
+      continue;
+    }
+    const open = all<{ number: number; title: string }>("SELECT number, title FROM tickets WHERE repo_id = ? AND state = 'open' AND id != ?", t.repo_id, t.id).find((x) => sameTitle(x.title, title));
+    if (open) {
+      made.push({ number: open.number, title: open.title, existing: true });
+      continue;
+    }
+    const body = `${n.body.trim().slice(0, MAX_RAISED_BODY)}\n\n---\n_Workshop's ${AGENT_INFO[r.agent].label} agent raised this as a prerequisite of #${t.number}, which waits until this ticket is closed._`;
+    const labels = [label.raised, ...(labelsOf(t).includes(label.nominated) ? [label.nominated] : [])];
+    const ticket = await source.createTicket(repoRef(ctx.repo), { title, body, labels });
+    run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: ticket.number, url: ticket.url, title, runId: r.id, blocker: true }]), t.id);
+    made.push({ number: ticket.number, title, existing: false });
+  }
+  return made.filter((m, i) => m.number !== t.number && made.findIndex((x) => x.number === m.number) === i);
+}
+
+const blockersLine = (made: Prerequisite[]) =>
+  made.length ? `Prerequisite tickets this one waits for:\n${made.map((m) => `- #${m.number} ${m.title}${m.existing ? ' (already open)' : ''}`).join('\n')}` : '';
 
 const raisedLine = (raised: Raised[]) =>
   raised.length ? `Noticed outside this ticket, and opened as ${raised.length === 1 ? 'its own ticket' : 'their own tickets'}:\n${raised.map((x) => `- #${x.number} ${x.title}`).join('\n')}` : '';
@@ -733,16 +794,37 @@ async function publishRun(ctx: Ctx) {
       run('UPDATE tickets SET handoff = ? WHERE id = ?', JSON.stringify(handoff), t.id);
     });
   }
-  if (plan.addBlockers) {
-    const addBlockers = plan.addBlockers;
+  let made: Prerequisite[] = [];
+  if (plan.addBlockers || plan.raiseBlockers) {
+    const name = AGENT_INFO[r.agent].label;
+    // Safe to repeat: tickets already raised are reused. Outside the step, because the comment lists them.
+    made = plan.raiseBlockers ? await raiseBlockers(ctx, t, plan.raiseBlockers) : [];
+    const numbers = plan.addBlockers ?? [];
     await step('blockers', async () => {
+      if (plan.raiseBlockers && !made.length && !numbers.length) {
+        throw new Error(`The ${name} agent asked Workshop to open prerequisite tickets, but this repository doesn't let agents open tickets (or this ticket was itself raised by an agent).`);
+      }
+      const wanted = [...new Set([...numbers, ...made.map((m) => m.number)])].filter((n) => n !== t.number);
+      // Linking a ticket that already waits for this one would leave both waiting for ever.
+      const self = refKey(`#${t.number}`, ctx.repo.full_name);
+      const waiting = new Set(
+        all<TicketRow>("SELECT * FROM tickets WHERE repo_id = ? AND id != ?", t.repo_id, t.id)
+          .filter((o) => blockersOf(o).some((b) => refKey(b, ctx.repo.full_name) === self))
+          .map((o) => o.number),
+      );
       const source = sourceFor(ctx.repo);
       const links = [];
-      for (const n of addBlockers.filter((n) => n !== t.number)) links.push(await source.addBlocker(repo, t.number, n));
+      for (const n of wanted) {
+        if (waiting.has(n)) {
+          warn(r.id, `#${n} already waits for this ticket, so Workshop didn't link it as a blocker.`);
+          continue;
+        }
+        links.push(await source.addBlocker(repo, t.number, n));
+      }
       const open = links.filter((l) => l.state === 'open');
-      // Nothing open would hold nothing, and the Classifier would run again straight away.
+      // Nothing open would hold nothing, and the agent would run again straight away.
       if (!open.length) {
-        throw new Error(`The Classifier said this ticket waits for ${joinRefs(addBlockers.map((n) => `#${n}`))}, but none of those is an open issue in ${ctx.repo.full_name}.`);
+        throw new Error(`The ${name} agent said this ticket waits for ${joinRefs(wanted.map((n) => `#${n}`))}, but none of those is an open issue in ${ctx.repo.full_name}.`);
       }
       setBlockers(t, open.map((l) => linkRef(l, ctx.repo)));
       addLinks(t, links);
@@ -769,7 +851,7 @@ async function publishRun(ctx: Ctx) {
   if (plan.clearRescue) run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
   const raised = await raiseNoticed(ctx, t, result);
   await step('labels', () => editLabels(t, plan.add, [...plan.remove, label.running]));
-  const comment = [plan.comment, raisedLine(raised)].filter(Boolean).join('\n\n');
+  const comment = [plan.comment, blockersLine(made), raisedLine(raised)].filter(Boolean).join('\n\n');
   if (comment) await step('comment', () => sourceFor(ctx.repo).comment(repo, t.number, comment));
   // The handoff goes last too, so a retry after a partial failure still has the Implementation summary.
   run(`UPDATE tickets SET failures = 0${plan.rework === null ? ', rework = NULL' : ''}${plan.openPr || plan.noPr ? ', handoff = NULL' : ''} WHERE id = ?`, t.id);
