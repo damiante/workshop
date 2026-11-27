@@ -420,7 +420,7 @@ const paths: Record<string, Record<string, Op>> = {
   '/refresh': {
     post: {
       summary:
-        "Runs the checks Workshop's timer runs, now: syncs tickets from GitHub, re-reads the Claude usage of subscriptions that are over your limits or haven't been checked recently, then starts or resumes whatever is ready. Answers at once; the checks finish in the background.",
+        "Runs the checks Workshop's timer runs, now: syncs tickets from GitHub, re-reads the Claude usage of subscriptions that are over your limits or haven't been checked recently (waiting up to about 2.5 minutes for those checks), then starts or resumes agents in every free slot that a ready ticket fits. Answers at once; the checks finish in the background.",
       status: '202',
       errors: [403],
     },
