@@ -375,6 +375,55 @@ export interface WindowProjection {
   over: boolean;
 }
 
+export interface Burn {
+  usd: number;
+  tokens: number;
+}
+
+/** Last 5 hours, last 24 hours, and the average per day over the last 7 days (or since first use). */
+export interface BurnRate {
+  fiveHours: Burn;
+  day: Burn;
+  perDay: Burn;
+}
+
+/** One billing's share of the backlog and when it finishes. */
+export interface BacklogPool {
+  /** Expected spend left: token-equivalent for subscriptions. */
+  usd: number;
+  tokens: number;
+  /** The pace the projection uses: the last 7 days' average. */
+  perHourUsd: number;
+  finishAt: number | null;
+  /** At the pace alone, ignoring limits. */
+  unlimitedAt: number | null;
+  /** The limit that holds the work back, or null when the pace alone decides. */
+  limitedBy: 'five-hour' | 'weekly' | 'daily' | null;
+  /** Why finishAt is null. */
+  reason: 'no-pace' | 'no-subscription' | 'api-off' | 'beyond' | null;
+  /** [time, fraction of this work left], hourly from now. */
+  curve: [number, number][];
+  /** Windows the projection ignores because they can't be sized yet, e.g. "Claude-1 5-hour". */
+  unsized: string[];
+  /** Subscriptions in the pool that don't report usage. */
+  unmetered: string[];
+}
+
+export interface BacklogProjection {
+  tickets: number;
+  /** In pipeline order; 'new' is waiting to be classified. */
+  byStage: { stage: Stage | 'new'; count: number }[];
+  /** Tickets with nothing to estimate from; counted but not costed. */
+  unestimated: number;
+  /** Finished tickets the estimate comes from. */
+  basis: number;
+  /** Null when no work of that billing is left. */
+  subscription: BacklogPool | null;
+  api: BacklogPool | null;
+  /** The later pool's finishAt; null if either pool can't finish. */
+  finishAt: number | null;
+}
+
 export interface AllowanceHistory {
   connectionId: number;
   connectionName: string;
@@ -387,6 +436,8 @@ export interface AllowanceHistory {
   /** Null without a reading from the current window. */
   fiveHour: WindowProjection | null;
   sevenDay: WindowProjection | null;
+  /** This connection's subscription use. */
+  burn: BurnRate;
 }
 
 export interface UsageHistory {
@@ -402,9 +453,11 @@ export interface UsageHistory {
   allowance: AllowanceHistory[];
   projection: {
     /** `capAt`: when today's API spend reaches the daily limit at today's pace; null when it doesn't today or the limit is $0. */
-    api: { todayUsd: number; dailyCapUsd: number; capAt: number | null; perDayUsd: number; monthToDateUsd: number; monthEndUsd: number };
+    api: { todayUsd: number; dailyCapUsd: number; capAt: number | null; perDayUsd: number; monthToDateUsd: number; monthEndUsd: number; burn: BurnRate };
     /** Token-equivalent; subscriptions aren't billed per token. */
-    subscription: { perDayUsd: number; perDayTokens: number; monthToDateUsd: number; monthEndUsd: number };
+    subscription: { perDayUsd: number; perDayTokens: number; monthToDateUsd: number; monthEndUsd: number; burn: BurnRate };
+    /** Open tickets, what they should cost and when they finish at the last 7 days' pace. */
+    backlog: BacklogProjection;
   };
 }
 

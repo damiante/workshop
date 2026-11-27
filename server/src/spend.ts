@@ -1,10 +1,26 @@
+import { getAgent } from './agents.ts';
 import { allowanceSamples, allowanceViews, apiSpendSince } from './allowance.ts';
-import type { AllowanceHistory, LifetimeSpend, SpendSeries, SpendTotals, UsageHistory, UsageRange } from './api-types.ts';
+import type { AgentName, AllowanceHistory, BacklogPool, BacklogProjection, BurnRate, LifetimeSpend, SpendSeries, SpendTotals, Stage, UsageHistory, UsageRange } from './api-types.ts';
 import { all, one, run } from './db.ts';
-import { capAt, FIVE_HOURS, monthEnd, SEVEN_DAYS, windowProjection } from './projection.ts';
+import {
+  BACKLOG_HISTORY,
+  capAt,
+  costTable,
+  drain,
+  FIVE_HOURS,
+  monthEnd,
+  SEVEN_DAYS,
+  ticketEstimate,
+  windowCapacity,
+  windowProjection,
+  type DrainWindow,
+} from './projection.ts';
+import { getConnection } from './providers/index.ts';
 import type { RunRow } from './runs.ts';
 import { startOfDay } from './scheduler/gates.ts';
 import { getSettings } from './settings.ts';
+import { getRepo, isAllowedAuthor, labelsOf, openTicketsSql, ticketInScope, type TicketRow } from './tickets.ts';
+import { parseLabels } from './workflow/labels.ts';
 
 /** Adds one `claude` invocation's result to the ledger and to the run's own totals (a resumed run sums its invocations). */
 export function recordSpend(r: RunRow, res: { inputTokens?: number; outputTokens?: number; costUsd?: number }) {
@@ -179,6 +195,47 @@ export function usageHistory(range: UsageRange, timeZone: string, now = Date.now
     return `${c.connection ?? 'Unknown'} (${c.billing === 'api' ? 'API key' : 'subscription'})`;
   };
 
+  // Projections don't depend on the range: this month so far, and the pace over the last 7 days.
+  const dayStart = startOfDay(now, timeZone);
+  const dayFraction = Math.min(1, (now - dayStart) / DAY);
+  const recent = all<SpendRow>('SELECT * FROM spend WHERE ts >= ? AND ts <= ?', now - 32 * DAY, now);
+  const firstApi = one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE billing = 'api'")?.ts ?? now;
+  const firstSubscription = one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE billing != 'api'")?.ts ?? now;
+  const sum = (subset: SpendRow[], f: (r: SpendRow) => number) => subset.reduce((n, r) => n + f(r), 0);
+  /** A billing or connection used for under 7 days averages over the days since its first use (at least 1). */
+  const paceDaysSince = (first: number) => Math.min(7, Math.max(1, (now - first) / DAY));
+  const burn = (subset: SpendRow[], first: number): BurnRate => {
+    const since = (ms: number) => {
+      const s = subset.filter((r) => r.ts >= now - ms);
+      return { usd: sum(s, (r) => r.cost_usd), tokens: sum(s, (r) => r.input_tokens + r.output_tokens) };
+    };
+    const week = since(SEVEN_DAYS);
+    const days = paceDaysSince(first);
+    return { fiveHours: since(FIVE_HOURS), day: since(DAY), perDay: { usd: week.usd / days, tokens: week.tokens / days } };
+  };
+  const pace = (billing: string) => {
+    const first = billing === 'api' ? firstApi : firstSubscription;
+    const paceDays = paceDaysSince(first);
+    const mine = recent.filter((r) => billingOf(r) === billing);
+    const week = mine.filter((r) => r.ts >= now - SEVEN_DAYS);
+    const perDayUsd = sum(week, (r) => r.cost_usd) / paceDays;
+    const monthToDateUsd = sum(
+      mine.filter((r) => monthOf(r.ts) === thisMonth),
+      (r) => r.cost_usd,
+    );
+    return {
+      perDayUsd,
+      perDayTokens: sum(week, (r) => r.input_tokens + r.output_tokens) / paceDays,
+      monthToDateUsd,
+      monthEndUsd: monthEnd(monthToDateUsd, perDayUsd, today, dayFraction),
+      burn: burn(mine, first),
+    };
+  };
+  const api = pace('api');
+  const subscription = pace('subscription');
+  const todayUsd = apiSpendSince(dayStart);
+  const dailyCapUsd = getSettings().apiDailyCapUsd;
+
   const allowance: AllowanceHistory[] = allowanceViews().map((v) => ({
     connectionId: v.connectionId,
     connectionName: v.connectionName,
@@ -189,31 +246,12 @@ export function usageHistory(range: UsageRange, timeZone: string, now = Date.now
     unknown: v.unknown,
     fiveHour: windowProjection(v.fiveHour, FIVE_HOURS, v.limits.fiveHour, v.sampledAt, now),
     sevenDay: windowProjection(v.sevenDay, SEVEN_DAYS, v.limits.weekly, v.sampledAt, now),
+    burn: burn(
+      recent.filter((r) => r.connection_id === v.connectionId && r.billing !== 'api'),
+      one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE connection_id = ? AND billing != 'api'", v.connectionId)?.ts ?? now,
+    ),
   }));
-
-  // Projections don't depend on the range: this month so far, and the pace over the last 7 days.
-  const dayStart = startOfDay(now, timeZone);
-  const dayFraction = Math.min(1, (now - dayStart) / DAY);
-  const recent = all<SpendRow>('SELECT * FROM spend WHERE ts >= ? AND ts <= ?', now - 32 * DAY, now);
-  const firstApi = one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE billing = 'api'")?.ts ?? now;
-  const firstSubscription = one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE billing != 'api'")?.ts ?? now;
-  const sum = (subset: SpendRow[], f: (r: SpendRow) => number) => subset.reduce((n, r) => n + f(r), 0);
-  const pace = (billing: string) => {
-    // A billing used for under 7 days averages over the days since its first use (at least 1).
-    const paceDays = Math.min(7, Math.max(1, (now - (billing === 'api' ? firstApi : firstSubscription)) / DAY));
-    const mine = recent.filter((r) => billingOf(r) === billing);
-    const week = mine.filter((r) => r.ts >= now - SEVEN_DAYS);
-    const perDayUsd = sum(week, (r) => r.cost_usd) / paceDays;
-    const monthToDateUsd = sum(
-      mine.filter((r) => monthOf(r.ts) === thisMonth),
-      (r) => r.cost_usd,
-    );
-    return { perDayUsd, perDayTokens: sum(week, (r) => r.input_tokens + r.output_tokens) / paceDays, monthToDateUsd, monthEndUsd: monthEnd(monthToDateUsd, perDayUsd, today, dayFraction) };
-  };
-  const api = pace('api');
-  const subscription = pace('subscription');
-  const todayUsd = apiSpendSince(dayStart);
-  const dailyCapUsd = getSettings().apiDailyCapUsd;
+  const nextMidnight = startOfDay(dayStart + 36 * 3600_000, timeZone);
 
   return {
     range,
@@ -225,9 +263,113 @@ export function usageHistory(range: UsageRange, timeZone: string, now = Date.now
     byConnection: seriesOf(rows, buckets, bucketOf, dimensions(timeZone).connection, connectionName),
     allowance,
     projection: {
-      api: { todayUsd, dailyCapUsd, capAt: capAt(todayUsd, dailyCapUsd, dayStart, now), perDayUsd: api.perDayUsd, monthToDateUsd: api.monthToDateUsd, monthEndUsd: api.monthEndUsd },
+      api: { todayUsd, dailyCapUsd, capAt: capAt(todayUsd, dailyCapUsd, dayStart, now), perDayUsd: api.perDayUsd, monthToDateUsd: api.monthToDateUsd, monthEndUsd: api.monthEndUsd, burn: api.burn },
       subscription,
+      backlog: backlog(now, allowance, {
+        subscriptionPerHour: subscription.perDayUsd / 24,
+        apiPerHour: api.perDayUsd / 24,
+        apiWindow: { kind: 'daily', left: Math.max(0, dailyCapUsd - todayUsd), perWindow: dailyCapUsd, resetsAt: nextMidnight, length: DAY },
+      }),
     },
+  };
+}
+
+/** The order `byStage` lists stages in: the pipeline's. */
+const STAGE_ORDER: (Stage | 'new')[] = ['new', 'reclassify', 'design', 'design-review', 'implement', 'code-review', 'merge', 'reconcile'];
+
+/**
+ * Open tickets, what they should cost and when they finish. Each is costed at what finished tickets of its size spent
+ * on the stages it has left, split by each agent's current billing, then drained at the last 7 days' pace.
+ */
+function backlog(
+  now: number,
+  allowance: AllowanceHistory[],
+  o: { subscriptionPerHour: number; apiPerHour: number; apiWindow: DrainWindow },
+): BacklogProjection {
+  const open = all<TicketRow>(openTicketsSql).flatMap((t) => {
+    const repo = getRepo(t.repo_id)!;
+    if (!isAllowedAuthor(t.author) || !ticketInScope(t, repo)) return [];
+    const state = parseLabels(labelsOf(t));
+    if (state.needsInfo || state.skip || state.failed || state.stage === 'pr-review') return [];
+    return [state];
+  });
+
+  // One row per finished ticket and agent: closed, with an Implementation run in the window.
+  const history = all<{ ticket: number; labels: string; agent: AgentName; usd: number; tokens: number }>(
+    `SELECT t.id AS ticket, t.labels, s.agent, SUM(s.cost_usd) AS usd, SUM(s.input_tokens + s.output_tokens) AS tokens
+     FROM spend s JOIN repos r ON r.full_name = s.repo JOIN tickets t ON t.repo_id = r.id AND t.number = s.ticket
+     WHERE t.state = 'closed' AND s.ts >= ? AND s.agent IS NOT NULL GROUP BY t.id, s.agent`,
+    now - BACKLOG_HISTORY,
+  );
+  const implemented = new Set(history.filter((h) => h.agent === 'implement').map((h) => h.ticket));
+  const table = costTable(
+    history.filter((h) => implemented.has(h.ticket)).map((h) => ({ ticket: h.ticket, size: parseLabels(JSON.parse(h.labels)).size, agent: h.agent, usd: h.usd, tokens: h.tokens })),
+  );
+
+  const billingOf = new Map<AgentName, string>();
+  const left = { subscription: { usd: 0, tokens: 0 }, api: { usd: 0, tokens: 0 } };
+  let unestimated = 0;
+  const counts = new Map<Stage | 'new', number>();
+  for (const state of open) {
+    const key = state.stage ?? 'new';
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+    const estimate = ticketEstimate(table, state.size, state.stage);
+    if (!estimate) {
+      unestimated++;
+      continue;
+    }
+    for (const [agent, spent] of Object.entries(estimate) as [AgentName, { usd: number; tokens: number }][]) {
+      if (!billingOf.has(agent)) billingOf.set(agent, getAgent(agent).billing);
+      const pool = billingOf.get(agent) === 'api' ? left.api : left.subscription;
+      pool.usd += spent.usd;
+      pool.tokens += spent.tokens;
+    }
+  }
+
+  // Subscriptions, in the order launches pick them; paused ones take no work.
+  const unsized: string[] = [];
+  const unmetered: string[] = [];
+  const accounts: DrainWindow[][] = [];
+  for (const a of allowance) {
+    if (getConnection(a.connectionId)?.paused) continue;
+    const windows: DrainWindow[] = [];
+    if (a.unknown) unmetered.push(a.connectionName);
+    else {
+      const sized = (p: typeof a.fiveHour, limit: number, kind: 'five-hour' | 'weekly', length: number, label: string) => {
+        const spent = p
+          ? (one<{ usd: number | null }>("SELECT SUM(cost_usd) AS usd FROM spend WHERE connection_id = ? AND billing != 'api' AND ts >= ?", a.connectionId, p.resetsAt - length)?.usd ?? 0)
+          : 0;
+        const w = windowCapacity(p, limit, spent, kind, length);
+        if (w) windows.push(w);
+        else unsized.push(`${a.connectionName} ${label}`);
+      };
+      sized(a.fiveHour, a.limits.fiveHour, 'five-hour', FIVE_HOURS, '5-hour');
+      sized(a.sevenDay, a.limits.weekly, 'weekly', SEVEN_DAYS, 'weekly');
+    }
+    if (a.blockedUntil) windows.push({ kind: 'limit', left: 0, perWindow: Infinity, resetsAt: a.blockedUntil, length: Infinity });
+    accounts.push(windows);
+  }
+
+  const pool = (work: { usd: number; tokens: number }, perHour: number, accts: DrainWindow[][], blocked: BacklogPool['reason'], extra: Pick<BacklogPool, 'unsized' | 'unmetered'>): BacklogPool | null => {
+    if (work.usd <= 0 && work.tokens <= 0) return null;
+    const base = { usd: work.usd, tokens: work.tokens, perHourUsd: perHour, ...extra };
+    const unlimitedAt = perHour > 0 ? Math.round(now + (work.usd / perHour) * 3600_000) : null;
+    if (blocked) return { ...base, finishAt: null, unlimitedAt, limitedBy: null, reason: blocked, curve: [] };
+    if (perHour <= 0) return { ...base, finishAt: null, unlimitedAt: null, limitedBy: null, reason: 'no-pace', curve: [] };
+    const d = drain(work.usd, perHour, accts, now);
+    return { ...base, finishAt: d.finishAt, unlimitedAt: d.unlimitedAt, limitedBy: d.limitedBy, reason: d.finishAt === null ? 'beyond' : null, curve: d.curve };
+  };
+  const subscription = pool(left.subscription, o.subscriptionPerHour, accounts, accounts.length === 0 ? 'no-subscription' : null, { unsized, unmetered });
+  const api = pool(left.api, o.apiPerHour, [[o.apiWindow]], o.apiWindow.perWindow <= 0 ? 'api-off' : null, { unsized: [], unmetered: [] });
+  const pools = [subscription, api].filter((p) => p !== null);
+  return {
+    tickets: open.length,
+    byStage: STAGE_ORDER.filter((s) => counts.has(s)).map((stage) => ({ stage, count: counts.get(stage)! })),
+    unestimated,
+    basis: table.all.tickets,
+    subscription,
+    api,
+    finishAt: pools.length && pools.every((p) => p.finishAt !== null) ? Math.max(...pools.map((p) => p.finishAt!)) : null,
   };
 }
 

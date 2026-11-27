@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { seedAgents, updateAgent } from '../src/agents.ts';
 import { all, initDb, MIGRATIONS, one, run } from '../src/db.ts';
 import { initCrypto } from '../src/crypto.ts';
 import { createConnection } from '../src/providers/index.ts';
@@ -217,5 +218,136 @@ describe('usageHistory', () => {
     expect(a).toMatchObject({ connectionName: 'Claude-9', sampledAt: now, unknown: false, limits: { fiveHour: 70, weekly: 80 } });
     expect(a.fiveHour).toMatchObject({ pct: 20, ratePerHour: 10, limitAt: null, over: false });
     expect(a.sevenDay).toMatchObject({ pct: 50, limitAt: now + Math.round(50.4 * H) });
+  });
+});
+
+describe('usageHistory burn rates and backlog', () => {
+  const H = 3600_000;
+  const now = Date.parse('2026-11-26T12:00:00Z');
+  let repo: number;
+  let claude: number;
+  const ticketAt = (number: number, state: 'open' | 'closed', labels: string[]) =>
+    run(
+      "INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, ?, 't', '', 'u', 'me', ?, ?, '2026-11-01T00:00:00Z')",
+      repo,
+      number,
+      state,
+      JSON.stringify(labels),
+    );
+  const spend = (ticket: number, agent: string, cost: number, ts = now - 2 * 86400_000, o: { billing?: string; conn?: number | null } = {}) =>
+    run(
+      "INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd, repo, agent, ticket, connection_id) VALUES (?, ?, 'opus', ?, ?, 0, ?, 'me/backlog', ?, ?, ?)",
+      `${ticket}-${agent}-${ts}`,
+      ts,
+      o.billing ?? 'subscription',
+      cost * 100,
+      cost,
+      agent,
+      ticket,
+      o.conn ?? null,
+    );
+  const probe = (conn: number, five: number | null, week: number | null) =>
+    run(
+      "INSERT INTO allowance_samples (connection_id, ts, source, five_hour, five_hour_resets, seven_day, seven_day_resets) VALUES (?, ?, 'probe', ?, ?, ?, ?)",
+      conn,
+      now,
+      five,
+      now + 3 * H,
+      week,
+      now + 84 * H,
+    );
+
+  beforeAll(() => {
+    seedAgents();
+    initCrypto('test-secret-key');
+    saveSettings({ authors: ['me'], apiDailyCapUsd: 20 });
+    run('DELETE FROM spend');
+    run("DELETE FROM tickets WHERE state = 'open'");
+    run("DELETE FROM connections WHERE kind = 'model'");
+    const vcs = one<{ id: number }>("SELECT id FROM connections WHERE kind = 'vcs'")!.id;
+    repo = Number(
+      run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled) VALUES (?, ?, 'me/backlog', 'main', 'u', 1)", vcs, vcs).lastInsertRowid,
+    );
+    claude = createConnection('model', 'anthropic', 'Claude-1', {}, { oauthToken: 't' });
+    // Three finished M tickets: implement $6 and code review $3 each, and one design run of $9.
+    for (const n of [1, 2, 3]) {
+      ticketAt(n, 'closed', ['workshop/size:m']);
+      spend(n, 'implement', 6, undefined, { conn: claude });
+      spend(n, 'code-review', 3, undefined, { conn: claude });
+    }
+    spend(1, 'design', 9, undefined, { conn: claude });
+    ticketAt(4, 'closed', ['workshop/size:m']); // closed without being implemented: not finished
+    spend(4, 'design', 100, now - 3 * 86400_000);
+    ticketAt(10, 'open', ['workshop/size:m', 'workshop/stage:implement']);
+    ticketAt(11, 'open', []);
+    ticketAt(12, 'open', ['workshop/size:m', 'workshop/stage:design']);
+    ticketAt(13, 'open', ['workshop/size:m', 'workshop/stage:pr-review']);
+    ticketAt(14, 'open', ['workshop/size:m', 'workshop/stage:implement', 'workshop/needs-info']);
+    ticketAt(15, 'open', ['workshop/size:m', 'workshop/stage:implement', 'workshop/failed']);
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 16, 't', '', 'u', 'stranger', 'open', '[]', 'x')", repo);
+    spend(99, 'implement', 2, now - 2 * H, { billing: 'api' });
+    spend(98, 'implement', 1, now - 2 * H, { conn: claude });
+  });
+
+  it('gives burn rates per connection and per billing', () => {
+    const h = usageHistory('7d', 'UTC', now);
+    const a = h.allowance.find((x) => x.connectionId === claude)!;
+    // $28 three days of the week ago plus $1 in the last 5 hours, on a connection first used 3 days ago.
+    expect(a.burn.fiveHours).toEqual({ usd: 1, tokens: 100 });
+    expect(a.burn.day.usd).toBe(1);
+    expect(a.burn.perDay.usd).toBeCloseTo(37 / 2);
+    expect(h.projection.api.burn.fiveHours).toEqual({ usd: 2, tokens: 200 });
+    expect(h.projection.subscription.burn.perDay.usd).toBeCloseTo(137 / 3);
+  });
+
+  it('counts and costs the open tickets from finished ones', () => {
+    const b = usageHistory('7d', 'UTC', now).projection.backlog;
+    expect(b.tickets).toBe(3);
+    expect(b.byStage).toEqual([
+      { stage: 'new', count: 1 },
+      { stage: 'design', count: 1 },
+      { stage: 'implement', count: 1 },
+    ]);
+    expect(b.basis).toBe(3);
+    expect(b.unestimated).toBe(0);
+    // implement: 6 + 3; design: 3 + 6 + 3; new: the same plus a classifier never seen ($0).
+    expect(b.subscription!.usd).toBeCloseTo(9 + 12 + 12);
+    expect(b.api).toBeNull();
+  });
+
+  it("splits by each agent's current billing", () => {
+    updateAgent('implement', { billing: 'api' });
+    try {
+      const b = usageHistory('7d', 'UTC', now).projection.backlog;
+      expect(b.api!.usd).toBeCloseTo(18);
+      expect(b.subscription!.usd).toBeCloseTo(15);
+      expect(b.api!.perHourUsd).toBeCloseTo(2 / 24);
+      expect(b.finishAt).toBe(Math.max(b.api!.finishAt!, b.subscription!.finishAt!));
+    } finally {
+      updateAgent('implement', { billing: 'subscription' });
+    }
+  });
+
+  it('runs an unmetered subscription at the pace alone and names it', () => {
+    probe(claude, null, null);
+    const b = usageHistory('7d', 'UTC', now).projection.backlog;
+    expect(b.subscription).toMatchObject({ unmetered: ['Claude-1'], unsized: [], limitedBy: null, reason: null });
+    expect(b.subscription!.finishAt).toBe(b.subscription!.unlimitedAt);
+  });
+
+  it('sizes windows it has readings for and lists the ones it ignores', () => {
+    probe(claude, 2, 40); // 5-hour too low to size; weekly: $38 since it began bought 40%
+    const b = usageHistory('7d', 'UTC', now).projection.backlog;
+    expect(b.subscription).toMatchObject({ unmetered: [], unsized: ['Claude-1 5-hour'] });
+    expect(b.subscription!.finishAt).not.toBeNull();
+  });
+
+  it('has no subscription to run on when every one is paused', () => {
+    run('UPDATE connections SET paused = 1 WHERE id = ?', claude);
+    try {
+      expect(usageHistory('7d', 'UTC', now).projection.backlog.subscription).toMatchObject({ reason: 'no-subscription', finishAt: null });
+    } finally {
+      run('UPDATE connections SET paused = 0 WHERE id = ?', claude);
+    }
   });
 });

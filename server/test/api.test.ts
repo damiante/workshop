@@ -233,6 +233,13 @@ describe('usage history', () => {
       expect(res.body.buckets).toHaveLength(n);
     }
   });
+
+  it('includes burn rates and the backlog projection', async () => {
+    const res = await request(app).get('/api/usage/history?range=7d').set('cookie', cookie);
+    expect(res.body.projection.backlog).toMatchObject({ tickets: expect.any(Number), byStage: expect.any(Array), basis: expect.any(Number) });
+    expect(res.body.projection.subscription.burn).toMatchObject({ fiveHours: { usd: 0, tokens: 0 } });
+    for (const a of res.body.allowance) expect(a.burn).toHaveProperty('perDay');
+  });
 });
 
 describe('lifetime usage', () => {

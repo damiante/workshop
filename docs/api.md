@@ -41,7 +41,7 @@ curl -X PUT $WORKSHOP/api/usage/limits/3 -H "Authorization: Bearer $TOKEN" \
 # Lifetime token use and token-equivalent cost, by billing, model, project and month
 curl $WORKSHOP/api/usage/lifetime -H "Authorization: Bearer $TOKEN"
 
-# Usage over time with projections: range 7d, 30d (default), 90d or all
+# Usage over time with projections, burn rates, and when open tickets should finish and what they should cost: range 7d, 30d (default), 90d or all
 curl "$WORKSHOP/api/usage/history?range=7d" -H "Authorization: Bearer $TOKEN"
 
 # Start an agent on a ticket now (ticket id from GET /api/tickets)

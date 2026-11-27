@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runStatus, tokens } from '../src/format.ts';
+import { clock, runStatus, tokens, when } from '../src/format.ts';
 
 describe('runStatus', () => {
   it('tells the reasons a run is paused apart', () => {
@@ -18,5 +18,15 @@ describe('tokens', () => {
     expect(tokens(134_700_000)).toBe('134.7M tokens');
     expect(tokens(1_045_400_000)).toBe('1.05B tokens');
     expect(tokens(1_040_000_000)).toBe('1.04B tokens');
+  });
+});
+
+describe('when', () => {
+  it('is a clock time within 6 days and has the date further out', () => {
+    const now = Date.now();
+    expect(when(now + 3600_000, now)).toBe(clock(now + 3600_000));
+    const far = new Date(now + 20 * 86400_000);
+    expect(when(far.getTime(), now)).toContain(String(far.getDate()));
+    expect(when(far.getTime(), now)).not.toBe(clock(far.getTime()));
   });
 });

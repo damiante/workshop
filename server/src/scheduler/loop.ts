@@ -12,7 +12,7 @@ import { appendLog, deleteLog, getRun, RUNNING_SQL, type RunRow } from '../runs.
 import { check } from '../http/util.ts';
 import { sweepExpiredTokens } from '../http/tokens.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, inScope, isUnclassified, localTime, modeBlock, pickHost, priorityBlock, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
@@ -173,8 +173,6 @@ async function syncRepos() {
     }
   }
 }
-
-const openTicketsSql = `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE r.enabled = 1 AND t.state = 'open'`;
 
 /** Clears hand pushes that are finished or no longer eligible, and priority on closed tickets. */
 export function settleManual() {

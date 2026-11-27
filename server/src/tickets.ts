@@ -64,6 +64,9 @@ export const reworkOf = (t: TicketRow): Rework | null => (t.rework ? JSON.parse(
 
 export const repoRef = (r: RepoRow): RepoRef => ({ fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url });
 
+/** Open tickets in enabled repositories, as `t`; append ORDER BY as needed. */
+export const openTicketsSql = `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE r.enabled = 1 AND t.state = 'open'`;
+
 export const getRepo = (id: number) => one<RepoRow>('SELECT * FROM repos WHERE id = ?', id);
 export const getTicket = (id: number) => one<TicketRow>('SELECT * FROM tickets WHERE id = ?', id);
 export const labelsOf = (t: TicketRow): string[] => JSON.parse(t.labels);

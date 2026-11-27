@@ -55,6 +55,10 @@ export function ago(ms: number | null, now = Date.now()) {
 export const clock = (ms: number) =>
   new Date(ms).toLocaleString([], Math.abs(ms - Date.now()) < 20 * 3600_000 ? { hour: '2-digit', minute: '2-digit' } : { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 
+/** A time that may be weeks away: `clock` within 6 days, otherwise with the date, e.g. "Mon 7 Dec, 14:00". */
+export const when = (ms: number, now = Date.now()) =>
+  Math.abs(ms - now) < 6 * 86400_000 ? clock(ms) : new Date(ms).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+
 export const money = (usd: number | null) => (usd === null ? null : `$${usd.toFixed(2)}`);
 
 export function tokens(n: number | null) {

@@ -5,7 +5,7 @@ import { useApi, useNow } from '../api.ts';
 import { Bars, Legend, LineChart, StackedColumns } from '../components/Chart.tsx';
 import { ErrorNote, Panel } from '../components/ui.tsx';
 import { money, tokens } from '../format.ts';
-import { projectionLines } from '../projections.ts';
+import { projectionSections, type Cell } from '../projections.ts';
 
 const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 const OTHER_COLOR = 'var(--series-other)';
@@ -96,21 +96,138 @@ function LifetimeUsage() {
   );
 }
 
+/** Cost with tokens on a second line. */
+function CellText({ cell }: { cell: Cell }) {
+  return (
+    <>
+      {cell.cost}
+      <span className="cell-sub small muted">{cell.tokens}</span>
+    </>
+  );
+}
+
+/** Only worth a chart when the work takes long enough to show where limits hold it back. */
+const BURN_DOWN_MIN_SPAN = 2 * 3600_000;
+
+function BurnDown({ data, now }: { data: UsageHistory; now: number }) {
+  const { subscription, api } = data.projection.backlog;
+  const pools = [
+    { name: 'Subscriptions', color: SERIES_COLORS[0], pool: subscription },
+    { name: 'API', color: SERIES_COLORS[1], pool: api },
+  ].filter((p) => p.pool && p.pool.curve.length > 1);
+  const span = (curve: [number, number][]) => curve[curve.length - 1][0] - curve[0][0];
+  if (!pools.some((p) => span(p.pool!.curve) > BURN_DOWN_MIN_SPAN)) return null;
+  const series = pools.map((p) => ({ name: p.name, color: p.color, points: p.pool!.curve.map(([t, v]): [number, number] => [t, v * 100]) }));
+  const end = Math.max(...pools.map((p) => p.pool!.finishAt ?? p.pool!.curve[p.pool!.curve.length - 1][0]));
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      {series.length > 1 && <Legend items={series} />}
+      <LineChart start={now} end={end} series={series} marks={[]} label="Share of backlog left until it's done" />
+    </div>
+  );
+}
+
 function Projections({ data, now }: { data: UsageHistory; now: number }) {
-  const lines = projectionLines(data, now);
+  const { backlog, burn, windows, month } = projectionSections(data, now);
+  const empty = !backlog && burn.length === 0 && windows.length === 0 && month.length === 0;
   return (
     <Panel title="Projections">
-      <div className="panel-body stack">
-        {lines.length === 0 ? (
-          <p className="small muted">Nothing to project yet: no subscriptions and no API spend this month.</p>
-        ) : (
-          <ul className="projections">
-            {lines.map((l) => (
-              <li key={l.key}>{l.text}</li>
-            ))}
-          </ul>
+      <div className="panel-body stack projections-section">
+        {empty && <p className="small muted">Nothing to project yet: no subscriptions and no API spend this month.</p>}
+        {backlog && (
+          <>
+            <h3>Backlog</h3>
+            <p>{backlog.lead}</p>
+            {backlog.rows.length > 0 && (
+              <div className="table-wrap">
+                <table className="spend-table">
+                  <thead>
+                    <tr>
+                      <th>Billing</th>
+                      <th className="num">Left</th>
+                      <th className="num">Pace</th>
+                      <th className="num">Finishes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {backlog.rows.map((r) => (
+                      <tr key={r.key}>
+                        <td>{r.billing}</td>
+                        <td className="num">
+                          <CellText cell={r.left} />
+                        </td>
+                        <td className="num">{r.pace}</td>
+                        <td className="num">{r.finishes}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {backlog.notes.length > 0 && (
+              <ul className="projections">
+                {backlog.notes.map((n) => (
+                  <li key={n}>{n}</li>
+                ))}
+              </ul>
+            )}
+            <BurnDown data={data} now={now} />
+            {backlog.detail && <p className="small muted">{backlog.detail}</p>}
+          </>
         )}
-        <p className="small muted">Projections assume the same pace continues. Workshop stops starting agents at your limits, so real use levels off there.</p>
+        {burn.length > 0 && (
+          <>
+            <h3>Burn rate</h3>
+            <div className="table-wrap">
+              <table className="spend-table">
+                <thead>
+                  <tr>
+                    <th>Connection</th>
+                    <th className="num">Last 5 hours</th>
+                    <th className="num">Last 24 hours</th>
+                    <th className="num">A day (last 7 days)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {burn.map((r) => (
+                    <tr key={r.key}>
+                      <td>{r.name}</td>
+                      {r.cells.map((c, i) => (
+                        <td key={i} className="num">
+                          <CellText cell={c} />
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+        {windows.length > 0 && (
+          <>
+            <h3>Subscription windows</h3>
+            <ul className="projections">
+              {windows.map((l) => (
+                <li key={l.key}>{l.text}</li>
+              ))}
+            </ul>
+          </>
+        )}
+        {month.length > 0 && (
+          <>
+            <h3>This month</h3>
+            <ul className="projections">
+              {month.map((l) => (
+                <li key={l.key}>{l.text}</li>
+              ))}
+            </ul>
+          </>
+        )}
+        <p className="small muted">
+          Projections assume the same pace continues. Workshop stops starting agents at your limits, so real use levels off there. Backlog estimates use what finished tickets of the same size spent on
+          the stages left.
+        </p>
       </div>
     </Panel>
   );
