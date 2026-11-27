@@ -42,13 +42,16 @@ Outcome: Workshop stores every "blocked by" edge it sees, open and closed. A new
   - add `title?: string` to `IssueLike`, and have `toLink` copy it.
 - `server/src/tickets.ts`:
   - `links_checked_at: number | null` on `TicketRow`;
-  - `setLinks(t, links: TicketLink[])`: in a `BEGIN`/`COMMIT` (as in `spend.ts`), replace the ticket's rows and set `links_checked_at = Date.now()`. Call `publish('tickets')` only if the rows changed;
-  - `addLinks(t, links)`: upsert without deleting, for the Classifier path;
+  - `setLinks(t, links: TicketLink[]): boolean`: in a `BEGIN`/`COMMIT` (as in `spend.ts`), replace the ticket's rows and set `links_checked_at = Date.now()`. Returns whether the rows changed; it doesn't publish, so a backfill of 20 tickets causes one refresh, not 20;
+  - `addLinks(t, links)`: upsert without deleting, for the Classifier path. It leaves `links_checked_at` alone (the list isn't known to be complete) and calls `publish('tickets')` if anything changed;
   - `linkCount(ticketId)`;
   - `dependencyGraphs(): DependencyGraph[]`, which builds the API view (below).
 - `server/src/scheduler/sync.ts` (`syncBlockers`):
-  - after every `source.blockers()` call, also call `setLinks(t, links)` with the full list, unfiltered;
+  - after every `source.blockers()` call, in every group, also call `setLinks(t, links)` with the full list, unfiltered. The rest of the loop body (`setBlockers` with the open ones, `blockers_checked_at`) stays the same for all groups, so one loop serves them all;
   - append the two new target groups after the existing ones, de-duplicated by ticket id: listed tickets with a changed count (any state, rows that exist), then the backfill batch;
+  - when a read in the changed-count group fails (any error, including the rate limit), set that ticket's `links_checked_at = NULL`. The sync still completes and `since` moves on, so the ticket won't be listed again; clearing the column hands it to the backfill, which retries it on a later sync;
+  - backfill order: open before closed, then newest first (`ORDER BY state = 'closed', number DESC`);
+  - call `publish('tickets')` once at the end if any `setLinks` call changed rows;
   - the `fresh` group stays first, so the rate-limit return value `i >= fresh.length` keeps its meaning. A failure in a new group only logs, like held re-reads. Update the function's doc comment.
 - `server/src/scheduler/runner.ts` (`blockers` step): after `setBlockers`, call `addLinks(t, links)` with every link `addBlocker` returned. The graph then shows the Classifier's links straight away. The step stays idempotent.
 - `server/src/http/api.ts`: `apiRouter.get('/dependencies', …)` returns `dependencyGraphs()`.
@@ -57,11 +60,13 @@ Outcome: Workshop stores every "blocked by" edge it sees, open and closed. A new
 
 ### Client
 
-- `client/src/graph.ts` (pure, tested): `layoutGraph(graph, { hideClosed })`. It returns positioned nodes, edge paths and an overall size, plus `nodeStatus(node)`, which gives `{ tone, text }` for a node.
+- `client/src/graph.ts` (pure, tested): `layoutGraph(graph, { hideClosed })`. It returns positioned nodes, edge paths and an overall size, plus `nodeStatus(node)`, which gives `{ tone, text }` for a node. Cycles (GitHub may allow them, and stale data can make them) are broken before layering by dropping back edges found in a depth-first walk in node order; the dropped edges are still drawn, just not used for columns.
+- `client/src/pages/Tickets.tsx`: `TicketStatus` and `nodeStatus` must agree. Move `TicketStatus`'s order into a pure `ticketStatus(t): { tone, text } | null` in `client/src/format.ts`, have `TicketStatus` render it, and build `nodeStatus` on it, so the two pages can't drift.
 - `client/src/pages/Dependencies.tsx`: route `dependencies`, with the repo chosen by `?repo=<id>`. The default is the first repo that has any edges.
   - Header: `<h1>Dependencies</h1>`, a repo `<select>`, and a checkbox "Hide closed tickets" (off by default).
   - One sentence of progress: "5 of 9 tickets in these trees are closed."
   - The SVG sits in a `.graph-wrap` panel that scrolls sideways itself, like `.table-wrap`, so the page never does.
+  - An unknown or disabled `?repo` falls back to the default, so an old link never shows a blank page.
   - Empty state: "No tickets in me/app depend on others. Links you add on GitHub with "Blocked by" show up here after the next sync."
   - Live through `useApi<DependencyGraph[]>('/dependencies', ['tickets', 'runs'])`.
 - `client/src/main.tsx`: register the route.
@@ -74,14 +79,13 @@ Outcome: Workshop stores every "blocked by" edge it sees, open and closed. A new
 - Line 2: the title, cut to fit with an ellipsis, with the full title in an SVG `<title>`.
 - Line 3: a status dot and words from `nodeStatus`, checked in this order:
   1. closed → "Closed" (`ok`);
-  2. active run → "Agent working" (`running`);
-  3. failed → "Stopped after failures" (`error`);
-  4. needs info → "Waiting for your answer" (`attention`);
-  5. any open blocker → "Waiting for #2, #5" (`attention`);
-  6. not in Workshop → "Not in Workshop" (`idle`);
-  7. otherwise the stage from `STAGE_TEXT`, or "To classify".
+  2. not in Workshop → "Not in Workshop" (`idle`);
+  3. `ticketStatus(t)`, the Tickets page's order: active run → "Agent working" (`running`), failed → "Stopped after failures" (`error`), needs info → "Waiting for your answer" (`attention`), skipped → "Skipped" (`idle`);
+  4. `attention === 'review'` → "Waiting for your review" (`attention`);
+  5. any open blocker → the server's `t.next`, which already reads "Depends on #2 and #5" (`attention`). Don't rebuild the wording on the client;
+  6. otherwise the stage from `STAGE_TEXT`, or "To classify" (`idle`).
 
-Closed nodes are drawn at reduced opacity, with text still AA against `--surface`. A Workshop node is an SVG `<a>` to `/tickets/:id` (client-side navigation via `useNavigate` on click and Enter). An external node opens its GitHub URL in a new tab.
+Closed nodes are drawn at reduced opacity, with text still AA against `--surface`. A Workshop node is an SVG `<a>` to `/tickets/:id` (client-side navigation via `useNavigate` on click and Enter). An external node opens its GitHub URL in a new tab (`target="_blank" rel="noopener noreferrer"`). Each node link has an `aria-label` with its ref, title and status (for example "#12 Add login, Agent working"), a visible focus ring, and tab order follows the layout (column, then row). The `<svg>` has `role="group"` and an `aria-label` naming the repo.
 
 **Edges:** a cubic curve from the blocker's right edge to the dependent's left edge, with an arrowhead. Use `--muted` while the blocker is open and `--line` once it's closed.
 
@@ -113,7 +117,8 @@ export interface DependencyGraph {
 `dependencyGraphs()` works per enabled repo:
 
 - **Edges:** every `ticket_links` row whose ticket is in that repo.
-- **Nodes:** each ticket that appears in any of those edges, as either end. A blocker that is a Workshop ticket row in the same repo uses that row (its `state` and a `ticketView`). Otherwise the node is built from the link's stored fields, with `ticket: null`.
+- **Nodes:** each ticket that appears in any of those edges, as either end. A blocker that is a Workshop ticket row, matched by repo full name (case-insensitive) and number in *any* enabled repo, uses that row (its `state` and a `ticketView`), so a blocker in another enrolled repo links to its Workshop page and shows a live state. Otherwise the node is built from the link's stored fields, with `ticket: null`.
+- **Queries:** load the repo's links and the matching ticket rows in one query each, not one per node; `ticketView` already costs a few lookups per ticket.
 - **Sorting:** nodes by number, then edges.
 - **Repos with no edges:** still listed, with empty arrays, so the picker shows every repo.
 
@@ -123,13 +128,15 @@ export interface DependencyGraph {
   - a held ticket whose blocker closes keeps the edge in `ticket_links` with state `closed`, while `blocked_by` becomes `[]`;
   - a listed ticket with `openBlockers: 0, totalBlockers: 1` and no stored links is read, and its edge is stored;
   - a matching count is not read again;
+  - a failed read in the changed-count group clears `links_checked_at`, and the next sync's backfill reads it;
+  - one sync that changes links publishes `tickets` once;
   - the backfill reads at most `LINK_BACKFILL_PER_SYNC` never-read tickets, closed ones included, and sets `links_checked_at`;
   - a rate limit during backfill still returns complete (`synced_at` advances);
   - the Classifier's `blocked` result writes the link rows.
 - `server/test/api.test.ts`: `GET /api/dependencies` returns:
   - nodes for both ends;
   - a `ticket: null` external node with the stored title;
-  - the blocker's state from its ticket row;
+  - the blocker's state from its ticket row, including a blocker in another enabled repo (`ticket` set);
   - empty arrays for a repo without links;
   - 401 without a session.
 
@@ -140,8 +147,8 @@ export interface DependencyGraph {
   - disconnected groups are stacked without overlapping;
   - `hideClosed` drops closed nodes and their edges;
   - barycenter ordering;
-  - `nodeStatus` follows its precedence order.
-- Run `npm run typecheck` and `npm test`. Then check the page with Playwright at desktop and phone (375px) widths, in both themes, against a seeded database. Save screenshots to `/work/media/`.
+  - `nodeStatus` follows its precedence order, and agrees with `ticketStatus` for open Workshop tickets.
+- Run `npm run typecheck` and `npm test`. Then check the page with Playwright at desktop and phone (375px) widths, in both themes, against a seeded database. There's no seed tool: write a throwaway script outside the repo that runs the migrations on a database in a temporary `DATA_DIR` and inserts a repo (enabled), a few tickets (open, closed, running, needs info) and `ticket_links` rows, including a diamond, a cross-repo blocker and a blocker not in Workshop. Sync will fail for the fake repo; that only logs. Save screenshots to `/work/media/`.
 
 ## Risks and open questions
 
@@ -149,4 +156,27 @@ export interface DependencyGraph {
 - **Adding a dependency on GitHub is assumed to bump the issue's `updated_at`**, so `since` lists it. If it doesn't, such links show up only when the ticket next changes.
 - **Rate limits:** the backfill adds at most 20 requests per repo per sync. It ends once every ticket has `links_checked_at`. A large existing backlog takes a few hours to fill in, so the page may look incomplete for that time after the upgrade.
 - **External blockers' state goes stale:** another repo's ticket, or one by an author Workshop doesn't work for, shows the state from the last read. That read is refreshed whenever the dependent ticket is re-read.
+- **Not every past ticket can be shown.** Enrolment lists open issues only, so tickets closed before the repo was enrolled have no row. They still appear as closed blocker nodes when a tracked ticket links to them, but links *between* two such old tickets are never read. Tickets by authors Workshop doesn't work for have no row either, so they appear only as blockers. Reading every closed issue once would fix this but costs one request per issue; leave it out unless asked.
+- **`total_blocked_by` isn't documented by GitHub.** Community reports confirm the field exists next to `blocked_by` and counts closed links too, and one reports a zero summary on an issue that had blockers. The design never treats a count as proof of "no links": the backfill reads every ticket once regardless, and the count only adds reads.
+- **Removing a link on GitHub** may not bump `updated_at`. The stale edge stays until the ticket is next re-read (any listed change with a count mismatch, a held re-read, or a Classifier run).
 - **Large graphs:** there's no virtualisation. A repo with hundreds of linked tickets gives a big SVG inside a scrolling panel, which is acceptable for now.
+
+## Review
+
+Design review against the code on `main` (`server/src/scheduler/sync.ts`, `server/src/tickets.ts`, `server/src/providers/github/index.ts`, `client/src/pages/Tickets.tsx`).
+
+1. **A failed read in the changed-count group is lost for good.** `syncBlockers` returns true for failures after `fresh`, so `synced_at` advances and the ticket isn't listed again. Its stored count stays wrong until something else changes it. *Fix:* clear `links_checked_at` on failure so the backfill retries it. **Adopted.**
+2. **`setLinks` publishing per ticket** would send up to 20+ `tickets` refreshes per sync, each refetching every graph and the ticket lists. *Fix:* `setLinks` returns whether it changed anything, and `syncBlockers` publishes once. `addLinks` (Classifier path, one ticket) publishes itself. **Adopted.**
+3. **`nodeStatus` copied the Tickets page's status order and missed parts of it.** "Skipped" and "Waiting for your review" were missing, and "Waiting for #2, #5" rebuilt wording that `ticketView` already produces as `next` ("Depends on …"). *Fix:* pull `TicketStatus`'s order into a pure `ticketStatus` in `format.ts`, used by both pages, and use `t.next` for the blocked line. **Adopted.**
+4. **Blockers in another enrolled repo showed as "Not in Workshop"** with stale state, because only same-repo rows were matched. *Fix:* match blocker rows by full name and number across every enabled repo. **Adopted.**
+5. **The backfill order wasn't specified in SQL, and neither was which groups run `setBlockers`.** *Fix:* every group uses the same loop body, and the backfill order is written out. **Adopted.**
+6. **Cycle handling wasn't defined**, only tested for "doesn't loop forever". *Fix:* drop back edges found in a depth-first walk before layering, but still draw them. **Adopted.**
+7. **Accessibility of the SVG:** there were no labels, focus or tab order for node links. *Fix:* each node gets an `aria-label`, a focus ring and tab order by layout, and the SVG gets `role="group"`. External links get `rel="noopener noreferrer"`. **Adopted.**
+8. **A stale `?repo` link** (repo disabled or removed) gave no defined result. *Fix:* fall back to the default repo. **Adopted.**
+9. **Gap against the ticket ("past/completed ones too").** Enrolment lists open issues only, so tickets closed before enrolment have no row. Links between two such tickets are never read. *Fix considered:* a one-time read of every closed issue's links. It costs one request per closed issue and adds a lot for little gain, since those tickets still appear whenever a tracked ticket links to them. **Not adopted.** Stated as a limitation in Risks instead.
+10. **`total_blocked_by` is undocumented.** Community reports confirm it exists and counts closed links. One reports a zero summary on an issue that had blockers. *Fix:* nothing treats a count as proof of "no links". The backfill reads every row once regardless, and the count only adds reads. **Adopted** (no design change beyond the Risks note).
+11. **Removed links may not bump `updated_at`.** *Fix considered:* a slow rotation that re-reads every ticket's links. At a 3-minute poll that's a steady extra request load per repo, for a cosmetic problem. **Not adopted.** Noted in Risks.
+12. **"Seeded database" for the Playwright check** had no mechanism, because the repo has no seed tool. *Fix:* a throwaway script, kept outside the repo, that migrates a temporary `DATA_DIR` and inserts fixture rows. **Adopted.**
+13. **Per-node queries in `dependencyGraphs()`** would scale badly. *Fix:* one query for links and one for matching ticket rows per repo. **Adopted.**
+
+Checked and fine as designed: `listChanged` reads `issue_dependencies_summary` already, so `total_blocked_by` costs nothing extra. `foreign_keys = ON` is set, so `ON DELETE CASCADE` works. `addBlocker` returns the full issue, so `toLink` can copy its title. The `fresh`-first ordering keeps the rate-limit return meaning.
