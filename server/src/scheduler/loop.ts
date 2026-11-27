@@ -22,6 +22,8 @@ import { abortRun, cancelPause, drive, isDriving, launch, onRunSettled, resume, 
 import { syncRepo } from './sync.ts';
 
 const TICK_MS = 60_000;
+/** How long Refresh waits for its allowance checks: a check gives up after 120 s of output, plus time to start it. */
+const REFRESH_PROBE_WAIT_MS = 150_000;
 const HOST_FAILURES_BEFORE_ALERT = 3;
 
 let ticking = false;
@@ -30,7 +32,7 @@ let lastCleanup = 0;
 let clock: ClockState | null = null;
 const lastSync = new Map<number, number>();
 const hostFailures = new Map<number, number>();
-const probing = new Set<number>();
+const probing = new Map<number, ReturnType<typeof readAllowance>>();
 const probeFailedAt = new Map<number, number>();
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -60,7 +62,8 @@ export function syncSoon() {
 /**
  * Runs the checks the timer runs, now: syncs every repository, re-reads the usage of subscriptions
  * that are over their limits or unchecked (even one whose last check just failed), then ticks. A usage limit Claude
- * reported keeps its reset time. Resolves when those allowance checks have settled.
+ * reported keeps its reset time. Waits (up to REFRESH_PROBE_WAIT_MS) for those allowance checks, then runs
+ * another allocation pass with the new readings, and resolves after it.
  */
 export async function refreshNow() {
   lastSync.clear();
@@ -70,8 +73,23 @@ export async function refreshNow() {
   const checks = allowanceViews()
     .filter((a) => !a.blockedUntil && allowanceBlock(a, s, now))
     .map((a) => probeAllowance(a.connectionId, true).catch(() => {}));
-  kick();
-  await Promise.all(checks);
+  kick(); // sync and fill slots with what's already startable while the checks run
+  if (!checks.length) return;
+  await withTimeout(Promise.all(checks), REFRESH_PROBE_WAIT_MS).catch(() => {});
+  await tick(); // allocate again with the new readings (a running tick re-runs instead)
+}
+
+/** Starts the best ready candidate again and again, until no ready one fits a free slot. Returns the last queue built. */
+export function allocate(s: Settings, now: number): Candidate[] {
+  const tried = new Set<number>();
+  for (;;) {
+    // Rebuilt after every start: launch() records the run at once, so host loads count the slot just taken.
+    const queue = buildQueue(s, now);
+    const next = queue.find((c) => !c.blockedBy && !tried.has(c.ticket.id));
+    if (!next) return queue;
+    tried.add(next.ticket.id);
+    startCandidate(next);
+  }
 }
 
 export async function tick() {
@@ -84,9 +102,7 @@ export async function tick() {
     await checkHosts();
     reattachRuns();
     // What's already known to be ready starts first, so a slow or rate-limited GitHub sync can't leave hosts idle.
-    const early = buildQueue(getSettings(), Date.now());
-    const ready = early.find((c) => !c.blockedBy);
-    if (ready) startCandidate(ready);
+    const early = allocate(getSettings(), Date.now());
     probeStale(early); // before the sync too, so a long one doesn't leave readings stale and launches waiting
     await syncRepos();
     settleManual();
@@ -94,9 +110,7 @@ export async function tick() {
     const now = Date.now();
     await mergeApproved(s.mode === 'paused');
     resumePaused(s, now);
-    const queue = buildQueue(s, now);
-    const next = queue.find((c) => !c.blockedBy);
-    if (next) startCandidate(next);
+    const queue = allocate(s, now);
     probeStale(queue);
     if (now - lastCleanup > 24 * 3600_000) {
       lastCleanup = now;
@@ -304,6 +318,8 @@ export interface Candidate {
   bypassLimits: boolean;
   /** Refs of the prioritised tickets that wait on this one; it goes first for them. */
   prioritisedFor: string[];
+  /** Open tickets that wait on this one, directly or through others. */
+  unblocks: number;
 }
 
 function startCandidate(c: Candidate): string | null {
@@ -444,10 +460,11 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const size = agentSize(agent, parseLabels(labelsOf(t)), Boolean(t.ui));
     const hostId = hostFor.get(size)!;
     if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, size, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), prioritisedFor, boosted, priority: stepPriority(step), repoPriority: repo.priority });
+    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, size, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), prioritisedFor, unblocks: graph.unblocks(t, repo), boosted, priority: stepPriority(step), repoPriority: repo.priority });
   }
-  // The sort is stable, so the ticket order setting (from the query) decides ties.
-  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.repoPriority - a.repoPriority || a.priority - b.priority);
+  // Pushed, prioritised, then tickets more open work waits on. The sort is stable, so the ticket
+  // order setting (from the query) decides ties.
+  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.unblocks - a.unblocks || b.repoPriority - a.repoPriority || a.priority - b.priority);
 }
 
 export function queueView(): QueueItem[] {
@@ -461,6 +478,7 @@ export function queueView(): QueueItem[] {
     prioritised: c.prioritised,
     bypassLimits: c.bypassLimits,
     prioritisedFor: c.prioritisedFor,
+    unblocks: c.unblocks,
   }));
 }
 
@@ -475,15 +493,22 @@ export const forgetProbe = (connectionId: number) => probeFailedAt.delete(connec
 /** The last allowance check of this connection failed less than 10 minutes ago. */
 const probeFailing = (connectionId: number, now: number) => now - (probeFailedAt.get(connectionId) ?? 0) < 10 * 60_000;
 
-export async function probeAllowance(connectionId: number, force = false) {
-  if (probing.has(connectionId)) return;
-  if (!force && probeFailing(connectionId, Date.now())) return;
+/** A check already running for this connection is shared: the caller gets its result. */
+export function probeAllowance(connectionId: number, force = false) {
+  if (!force && probeFailing(connectionId, Date.now())) return Promise.resolve(undefined);
+  const running = probing.get(connectionId);
+  if (running) return running;
+  const pending = readAllowance(connectionId).finally(() => probing.delete(connectionId));
+  probing.set(connectionId, pending);
+  return pending;
+}
+
+async function readAllowance(connectionId: number) {
   const conn = getConnection(connectionId);
   if (!conn?.secret.oauthToken) throw new Error('This Claude connection has no subscription token.');
   const hosts = listConnections('environment');
   const host = hosts.find((h) => h.status === 'ok') ?? hosts[0];
   if (!host) throw new Error('Add an agent host first: Workshop checks your allowance by briefly running Claude Code on one.');
-  probing.add(connectionId);
   try {
     const env = environmentOf(host);
     await env.ensureImage(config.agentImage);
@@ -519,8 +544,6 @@ export async function probeAllowance(connectionId: number, force = false) {
     const reason = (e as Error).message.replace(/\.+$/, '');
     raiseAlert('warning', 'allowance-probe', `Couldn't read your Claude usage (${conn.name}): ${reason}. Subscription launches wait until this works.`, `model:${connectionId}`);
     throw e;
-  } finally {
-    probing.delete(connectionId);
   }
 }
 

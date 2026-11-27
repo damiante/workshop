@@ -1001,9 +1001,10 @@ describe('prioritising a ticket', () => {
       expect((await ticket(a)).prioritised).toBe(false);
       expect((await ticket(b)).dependsOn).toEqual([{ ref: '#50', ticketId: a }]);
       expect((await ticket(b)).prioritisedFor).toEqual([]);
-      const queue = (await request(app).get('/api/overview').set('cookie', cookie)).body.queue as { ticketId: number; prioritisedFor: string[] }[];
+      const queue = (await request(app).get('/api/overview').set('cookie', cookie)).body.queue as { ticketId: number; prioritisedFor: string[]; unblocks: number }[];
       expect(queue.some((q) => q.ticketId === a)).toBe(true);
       for (const q of queue) expect(q.prioritisedFor).toEqual(q.ticketId === a ? ['#51'] : []);
+      for (const q of queue) expect(q.unblocks).toBe(q.ticketId === a ? 1 : 0);
       expect((await request(app).put(`/api/tickets/${b}/prioritised`).set('cookie', cookie).send({ prioritised: false })).status).toBe(200);
       expect((await ticket(a)).prioritisedFor).toEqual([]);
     } finally {
