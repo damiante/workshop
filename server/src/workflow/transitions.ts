@@ -12,6 +12,8 @@ export interface Plan {
   addBlockers?: number[];
   /** Prerequisite tickets to open (or find by title) and link as blocking this ticket. */
   raiseBlockers?: Noticed[];
+  /** The agent that asked for `raiseBlockers`: in a reconcile, the one whose rescued work this is, not the Merge agent. */
+  raisedBy?: AgentName;
   createBranch?: boolean;
   /** Push the agent's commits. */
   publish?: boolean;
@@ -143,7 +145,7 @@ export function planTransition(ctx: PlanContext, result: AgentResult): Plan {
   // Keep partial work on the branch so you can see it while answering. The Code reviewer has nothing to keep.
   if (r.outcome === 'needs_info') return { add: [label.needsInfo], remove: [], publish: ctx.agent !== 'code-review', comment: questionsComment(ctx, r.questions) };
   // Partial work is kept, as with needs_info; the stage runs again once the prerequisites close.
-  if (r.outcome === 'blocked') return { ...planWait([], r.raise_blockers ?? [], r.summary), publish: true };
+  if (r.outcome === 'blocked') return { ...planWait(ctx.agent, [], r.raise_blockers ?? [], r.summary), publish: true };
 
   const doc = `[\`${ctx.docPath}\`](${ctx.docUrl})`;
   switch (ctx.agent) {
@@ -235,21 +237,21 @@ function planReconcile(ctx: PlanContext, r: WorkResult): Plan {
 }
 
 /** Park the ticket on existing tickets (`numbers`) and new prerequisite tickets (`raise`), with no label change. */
-function planWait(numbers: number[], raise: Noticed[], reason: string): Plan {
+function planWait(agent: AgentName, numbers: number[], raise: Noticed[], reason: string): Plan {
   const refs = joinRefs(numbers.map((n) => `#${n}`));
   const what = raise.length ? `${numbers.length ? `${refs} and ` : ''}the prerequisite tickets listed below` : refs;
   return {
     add: [],
     remove: [],
     ...(numbers.length ? { addBlockers: numbers } : {}),
-    ...(raise.length ? { raiseBlockers: raise } : {}),
+    ...(raise.length ? { raiseBlockers: raise, raisedBy: agent } : {}),
     comment: `Workshop will wait for ${what} before working on this ticket: ${reason}\n\nIt carries on once they're closed. If it shouldn't wait, remove the link under Relationships and say so in a comment.`,
   };
 }
 
 function planClassifier(ctx: PlanContext, r: ClassifierResult): Plan {
   if (r.decision === 'needs_info') return { add: [label.needsInfo], remove: [], comment: questionsComment(ctx, r.questions) };
-  if (r.decision === 'blocked') return planWait(r.blocked_by ?? [], r.raise_blockers ?? [], r.reason);
+  if (r.decision === 'blocked') return planWait(ctx.agent, r.blocked_by ?? [], r.raise_blockers ?? [], r.reason);
   if (r.decision === 'reject') {
     return {
       add: [label.skip],

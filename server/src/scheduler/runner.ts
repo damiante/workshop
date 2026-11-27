@@ -587,6 +587,8 @@ interface PublishState {
   labels: string[];
   pushed?: Pushed;
   done: string[];
+  /** The prerequisite tickets the blockers step linked, for the comment of a retry. */
+  prerequisites?: Prerequisite[];
 }
 
 /**
@@ -641,16 +643,17 @@ interface Prerequisite {
  * already raised with the same title, in this run or an earlier one, is reused, so a retried publish or a stage
  * run again doesn't open it twice; so is an open ticket with the same title. Each new one is recorded as soon as it exists.
  */
-async function raiseBlockers(ctx: Ctx, t: TicketRow, wanted: Noticed[]): Promise<Prerequisite[]> {
+async function raiseBlockers(ctx: Ctx, t: TicketRow, wanted: Noticed[], agent: AgentName): Promise<Prerequisite[]> {
   const r = ctx.run;
   // The setting as it is now: it may have been turned off since the run started.
-  if (!mayRaiseBlockers(getRepo(ctx.repo.id) ?? ctx.repo, t, r.agent)) return [];
+  if (!mayRaiseBlockers(getRepo(ctx.repo.id) ?? ctx.repo, t, agent)) return [];
   const source = sourceFor(ctx.repo);
   const made: Prerequisite[] = [];
   for (const n of wanted.slice(0, MAX_NOTICED)) {
     const title = n.title.trim().replace(/\s+/g, ' ').slice(0, MAX_RAISED_TITLE);
     const before = raisedOf(getTicket(t.id)!);
-    const earlier = before.find((x) => x.blocker && sameTitle(x.title, title));
+    // A prerequisite first, else a ticket noticed earlier that may not be synced yet.
+    const earlier = before.find((x) => x.blocker && sameTitle(x.title, title)) ?? before.find((x) => sameTitle(x.title, title));
     if (earlier) {
       made.push({ number: earlier.number, title: earlier.title, existing: false });
       continue;
@@ -660,7 +663,7 @@ async function raiseBlockers(ctx: Ctx, t: TicketRow, wanted: Noticed[]): Promise
       made.push({ number: open.number, title: open.title, existing: true });
       continue;
     }
-    const body = `${n.body.trim().slice(0, MAX_RAISED_BODY)}\n\n---\n_Workshop's ${AGENT_INFO[r.agent].label} agent raised this as a prerequisite of #${t.number}, which waits until this ticket is closed._`;
+    const body = `${n.body.trim().slice(0, MAX_RAISED_BODY)}\n\n---\n_Workshop's ${AGENT_INFO[agent].label} agent raised this as a prerequisite of #${t.number}, which waits until this ticket is closed._`;
     const labels = [label.raised, ...(labelsOf(t).includes(label.nominated) ? [label.nominated] : [])];
     const ticket = await source.createTicket(repoRef(ctx.repo), { title, body, labels });
     run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: ticket.number, url: ticket.url, title, runId: r.id, blocker: true }]), t.id);
@@ -796,9 +799,11 @@ async function publishRun(ctx: Ctx) {
   }
   let made: Prerequisite[] = [];
   if (plan.addBlockers || plan.raiseBlockers) {
-    const name = AGENT_INFO[r.agent].label;
-    // Safe to repeat: tickets already raised are reused. Outside the step, because the comment lists them.
-    made = plan.raiseBlockers ? await raiseBlockers(ctx, t, plan.raiseBlockers) : [];
+    const by = plan.raisedBy ?? r.agent;
+    const name = AGENT_INFO[by].label;
+    // Safe to repeat: tickets already raised are reused. Outside the step, because the comment lists them; once
+    // linked they're kept with the publish, so a retry lists the same ones even if the setting changed since.
+    made = state.prerequisites ?? (plan.raiseBlockers ? await raiseBlockers(ctx, t, plan.raiseBlockers, by) : []);
     const numbers = plan.addBlockers ?? [];
     await step('blockers', async () => {
       if (plan.raiseBlockers && !made.length && !numbers.length) {
@@ -814,20 +819,19 @@ async function publishRun(ctx: Ctx) {
       );
       const source = sourceFor(ctx.repo);
       const links = [];
-      for (const n of wanted) {
-        if (waiting.has(n)) {
-          warn(r.id, `#${n} already waits for this ticket, so Workshop didn't link it as a blocker.`);
-          continue;
-        }
-        links.push(await source.addBlocker(repo, t.number, n));
-      }
+      const cycles = wanted.filter((n) => waiting.has(n));
+      for (const n of cycles) warn(r.id, `#${n} already waits for this ticket, so Workshop didn't link it as a blocker.`);
+      for (const n of wanted.filter((n) => !waiting.has(n))) links.push(await source.addBlocker(repo, t.number, n));
       const open = links.filter((l) => l.state === 'open');
+      const refs = (ns: number[]) => joinRefs(ns.map((n) => `#${n}`));
       // Nothing open would hold nothing, and the agent would run again straight away.
-      if (!open.length) {
-        throw new Error(`The ${name} agent said this ticket waits for ${joinRefs(wanted.map((n) => `#${n}`))}, but none of those is an open issue in ${ctx.repo.full_name}.`);
+      if (!open.length && !links.length && cycles.length) {
+        throw new Error(`The ${name} agent said this ticket waits for ${refs(cycles)}, but ${cycles.length === 1 ? 'that ticket already waits' : 'those tickets already wait'} for this one.`);
       }
+      if (!open.length) throw new Error(`The ${name} agent said this ticket waits for ${refs(wanted)}, but none of those is an open issue in ${ctx.repo.full_name}.`);
       setBlockers(t, open.map((l) => linkRef(l, ctx.repo)));
       addLinks(t, links);
+      state.prerequisites = made;
     });
   }
   if (plan.createBranch) {

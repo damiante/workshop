@@ -2766,7 +2766,7 @@ describe('raising blockers', () => {
     insert(4, 'The raised one', '["#3"]');
     const r = await settle(classify({ raise_blockers: undefined, blocked_by: [4] }));
     expect(r.status).toBe('failed');
-    expect(r.error).toContain('The Classifier agent said this ticket waits for #4, but none of those is an open issue in me/app.');
+    expect(r.error).toBe('The Classifier agent said this ticket waits for #4, but that ticket already waits for this one.');
     expect(fake.tickets.addBlocker).not.toHaveBeenCalled();
     expect(readLog(r.id).map((e) => e.text)).toContain("#4 already waits for this ticket, so Workshop didn't link it as a blocker.");
   });
@@ -2783,6 +2783,44 @@ describe('raising blockers', () => {
     expect(r.error).toContain("The Classifier agent asked Workshop to open prerequisite tickets, but this repository doesn't let agents open tickets");
     expect(fake.tickets.createTicket).not.toHaveBeenCalled();
     expect(fake.tickets.addBlocker).not.toHaveBeenCalled();
+  });
+
+  it('raises the prerequisites of a blocked Implementation run once the Merge agent reconciles its rescued push', async () => {
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('l'), label.stage('implement')]));
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'blocked', summary: 'Needs save modifiers first.', raise_blockers: [prerequisite] })],
+      publish: [line({ rescued: 'workshop/3-x-unmerged-abc1234' })],
+    });
+    fake.env.exitCodes.publish = 3;
+    await settle(go());
+    expect(ticketLabels()).toContain(label.stage('reconcile'));
+    expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ outcome: 'done', summary: 'Merged.' })], publish: [line({ before: 'bbb', after: 'ccc', ahead: 2 })] });
+    const r = await settle(go('merge'));
+    expect(r.status).toBe('succeeded');
+    expect(fake.tickets.createTicket.mock.calls[0][1].body).toContain("Workshop's Implementation agent raised this");
+    expect(fake.tickets.addBlocker).toHaveBeenCalledWith(expect.anything(), 3, 41);
+    expect(ticketLabels()).toContain(label.stage('implement'));
+    expect(getTicket(1)!.rescue).toBeNull();
+  });
+
+  it('lists the linked prerequisites on a retried comment even if the setting was turned off meanwhile', async () => {
+    failOnce(fake.tickets.comment, Object.assign(new Error(''), { status: 502 }));
+    const id = classify();
+    await deferred(id);
+    run('UPDATE repos SET raise_tickets = 0 WHERE id = 1');
+    due(id);
+    reattachRuns();
+    expect(await settle(id)).toMatchObject({ status: 'succeeded' });
+    expect(fake.tickets.comment).toHaveBeenLastCalledWith(expect.anything(), 3, expect.stringContaining('- #41 Save outcome modifiers'));
+  });
+
+  it('reuses a ticket this one raised earlier as noticed work', async () => {
+    run('UPDATE tickets SET raised = ? WHERE id = 1', JSON.stringify([{ number: 30, url: 'u', title: 'Save outcome modifiers', runId: 'old' }]));
+    await settle(classify());
+    expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+    expect(fake.tickets.addBlocker).toHaveBeenCalledWith(expect.anything(), 3, 30);
   });
 
   it('links existing numbers and new prerequisites together', async () => {
