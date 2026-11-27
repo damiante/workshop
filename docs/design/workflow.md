@@ -42,7 +42,7 @@ At most one stage label is present. `needs-info`, `skip` and `failed` sit alongs
 | `stage:pr-review` | Nothing: waiting for your review |
 | `stage:merge` | Merge through the API, or the Merge agent if there are conflicts |
 
-When several tickets are ready, tickets other open tickets wait on go first (more waiting work first), so a new prerequisite doesn't stall everything behind it. After that, work already under way goes first: merge, then implementation, code review and re-classification, then design review, design, and new classifications. Oldest first within each group. Agents start one at a time, a scheduler tick apart, so allowance readings catch up between launches.
+When several tickets are ready, tickets other open tickets wait on go first (more waiting work first), so a new prerequisite doesn't stall everything behind it. After that, work already under way goes first: merge, then implementation, code review and re-classification, then design review, design, and new classifications. Oldest first within each group. Each pass starts agents until no ready ticket fits a free slot. Runs that go over a subscription's limits pause at their next turn boundary.
 
 **Repository priority.** Each repository has a priority (a whole number, default 0, higher first). A ticket in a lower-priority repo waits until every open ticket in higher-priority repos has been classified; a ticket the Classifier held for a dependency, or that is skipped, waiting on a question or failed, counts as classified. Repos with equal priority don't hold each other. Once that's satisfied, higher-priority repos' tickets still go first, ahead of the step order above. Hand pushes, prioritised tickets and **Start now** bypass the gate.
 

@@ -26,7 +26,7 @@ const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { connectionPaused, drive, isDriving, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
-const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
+const { allocate, buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, tick } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
@@ -1699,6 +1699,82 @@ describe('agent sizes', () => {
     } finally {
       run('DELETE FROM tickets WHERE number = 9');
     }
+  });
+});
+
+describe('allocation', () => {
+  const script = () => ({ usage: [RATE, result({})], prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'Done.', tests: 'ok' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+  const configure = (slots: number) => run('UPDATE connections SET config = ? WHERE id = ?', JSON.stringify({ mode: 'socket', slots, cpus: 2, memoryGb: 4 }), ids.env);
+  const started = () => all<{ id: string; ticket_id: number }>("SELECT id, ticket_id FROM runs WHERE id NOT LIKE 'busy-%'");
+  const ticketIds = () => all<{ id: number }>('SELECT id FROM tickets ORDER BY id').map((t) => t.id);
+
+  beforeEach(() => {
+    saveSettings({ mode: 'always' });
+    setConnectionStatus(ids.env, 'ok');
+    recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+    updateAgent('implement', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model, billing: 'subscription' });
+    fake.models.models = () => [];
+    fake.tickets.listChanged = async () => [];
+    fake.env = new FakeEnv(script());
+    for (const n of [20, 21, 22]) {
+      run(
+        `INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, ?, 'Ready', '', 'u', 'me', 'open', ?, '2026-10-14T00:00:00Z')`,
+        n,
+        JSON.stringify([label.size('s'), label.stage('implement')]),
+      );
+    }
+  });
+  afterEach(async () => {
+    await new Promise((done) => setTimeout(done, 700)); // let ticks kicked by Refresh and the probes run before cleaning up
+    for (const r of all<{ id: string }>("SELECT id FROM runs WHERE id NOT LIKE 'busy-%'")) await settle(r.id);
+    run('DELETE FROM runs');
+    run('DELETE FROM tickets WHERE number IN (20, 21, 22)');
+    configure(1);
+  });
+
+  it('starts an agent in every free slot in one pass, and holds the rest', async () => {
+    configure(3);
+    const queue = allocate(getSettings(), Date.now());
+    expect(started()).toHaveLength(3);
+    expect(hostLoads().find((h) => h.id === ids.env)!.pools.standard).toEqual({ slots: 3, busy: 3 });
+    expect(queue).toHaveLength(1);
+    expect(queue[0].blockedBy).toBe('Every agent host is busy or offline');
+    expect(ticketIds()).toContain(queue[0].ticket.id);
+  });
+
+  it('fills every free slot on a regular tick', async () => {
+    configure(3);
+    await tick();
+    expect(started()).toHaveLength(3);
+  });
+
+  it('counts slots already in use', () => {
+    configure(3);
+    const other = one<{ id: number }>('SELECT id FROM tickets WHERE number = 22')!.id;
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, environment_id, size, model, billing, status, started_at) VALUES ('busy-standard', ?, 'implement', 1, ?, 'standard', 'm', 'subscription', 'running', 0)", other, ids.env);
+    const queue = allocate(getSettings(), Date.now());
+    expect(started()).toHaveLength(2);
+    expect(hostLoads().find((h) => h.id === ids.env)!.pools.standard).toEqual({ slots: 3, busy: 3 });
+    expect(queue.map((c) => c.blockedBy)).toEqual(['Every agent host is busy or offline']);
+  });
+
+  it('waits on Refresh for the allowance check, then fills the free slots', async () => {
+    configure(2);
+    run('DELETE FROM allowance_samples');
+    forgetProbe(ids.model);
+    expect(buildQueue().every((c) => c.blockedBy === 'Checking allowance')).toBe(true);
+    await refreshNow();
+    expect(fake.env.started.filter((spec: StepSpec) => spec.labels?.['workshop.probe'] === String(ids.model))).toHaveLength(1);
+    expect(started()).toHaveLength(2);
+  });
+
+  it('shares an allowance check that is already running', async () => {
+    run('DELETE FROM allowance_samples');
+    const first = probeAllowance(ids.model, true);
+    const second = probeAllowance(ids.model, true);
+    expect(second).toBe(first);
+    expect(await second).toEqual(await first);
+    expect(fake.env.started.filter((spec: StepSpec) => spec.cmd[0] === 'usage-probe')).toHaveLength(1);
   });
 });
 
