@@ -28,6 +28,8 @@ export interface RemoteTicket {
   createdAt?: string;
   /** How many open tickets block this one. Undefined means the source didn't say. */
   openBlockers?: number;
+  /** How many tickets block this one, open and closed. Undefined means the source didn't say. */
+  totalBlockers?: number;
 }
 
 /** Another ticket this one is linked to. `repo` is the full name. */
@@ -36,6 +38,7 @@ export interface TicketLink {
   number: number;
   state: 'open' | 'closed';
   url: string;
+  title?: string;
 }
 
 /** An image in ticket text: a fetchable URL and the key that identifies it across URL shapes. */

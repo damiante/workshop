@@ -181,6 +181,16 @@ const schemas: Record<string, Schema> = {
     mediaCount: int,
     updatedAt: str,
   }),
+  DependencyNode: object({
+    ref: { ...str, description: '"#12", or "other/repo#5" for a ticket in another repository.' },
+    number: int,
+    title: nullable(str),
+    url: str,
+    state: enumOf('open', 'closed'),
+    ticket: { ...nullable(ref('TicketView')), description: "Null when the ticket isn't in Workshop (another repository, or an author Workshop doesn't work for)." },
+  }),
+  DependencyEdge: { ...object({ blocker: str, ticket: str }), description: '`blocker` must finish before `ticket`; both are node refs.' },
+  DependencyGraph: object({ repoId: int, repo: str, nodes: array(ref('DependencyNode')), edges: array(ref('DependencyEdge')) }),
   MediaItem: object({ name: str, source: str, runId: nullable(str), caption: nullable(str), size: int, createdAt: int, url: str }),
   TicketLifecycle: object({ ticket: ref('TicketView'), runs: array(ref('RunView')), media: array(ref('MediaItem')) }),
   TicketMedia: object({ ticketId: int, ticket: str, title: str, items: array(ref('MediaItem')) }),
@@ -322,6 +332,7 @@ const paths: Record<string, Record<string, Op>> = {
     },
   },
   '/models': { get: { summary: 'Models each Claude connection offers.', ok: array(ref('ModelOption')) } },
+  '/dependencies': { get: { summary: 'Every "blocked by" link Workshop knows of, open and closed, as one graph per enabled repository.', ok: array(ref('DependencyGraph')) } },
   '/tickets': { get: { summary: 'Tickets Workshop knows about.', query: { closed: 'Send 1 to include closed tickets.' }, ok: array(ref('TicketView')) } },
   '/tickets/{id}/launch': {
     post: {

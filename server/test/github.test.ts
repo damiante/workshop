@@ -67,6 +67,18 @@ describe('GitHub blockers', () => {
     const list = await app.listChanged(repo, null);
     expect(list.map((t) => t.openBlockers)).toEqual([1, 0]);
   });
+
+  it('maps the total link count, leaving it undefined when the list has none', async () => {
+    const issue = { number: 3, node_id: 'n', title: 't', body: '', state: 'open', user: { login: 'me' }, labels: [], html_url: 'u', updated_at: 'x' };
+    const { app } = gh({ issues: [{ ...issue, issue_dependencies_summary: { blocked_by: 0, total_blocked_by: 2 } }, { ...issue, number: 4 }] });
+    const list = await app.listChanged(repo, null);
+    expect(list.map((t) => t.totalBlockers)).toEqual([2, undefined]);
+  });
+
+  it("keeps a blocker's title", async () => {
+    const { app } = gh({ blockers: [{ ...link(2), title: 'Expose the API' }] });
+    await expect(app.blockers(repo, 3)).resolves.toMatchObject([{ number: 2, title: 'Expose the API' }]);
+  });
 });
 
 describe('GitHub ensureLabels', () => {

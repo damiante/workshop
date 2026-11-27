@@ -118,6 +118,7 @@ const status = (err: unknown) => (err as { status?: number }).status;
 
 interface IssueLike {
   number: number;
+  title?: string;
   state: string;
   html_url: string;
   repository_url?: string;
@@ -127,7 +128,7 @@ interface IssueLike {
 /** The repo comes from `repository_url` (…/repos/owner/name), or from the issue's page URL. */
 function toLink(i: IssueLike): TicketLink {
   const parts = (i.repository_url ? i.repository_url.split('/').slice(-2) : new URL(i.html_url).pathname.split('/').slice(1, 3)).join('/');
-  return { repo: parts, number: i.number, state: i.state === 'closed' ? 'closed' : 'open', url: i.html_url };
+  return { repo: parts, number: i.number, state: i.state === 'closed' ? 'closed' : 'open', url: i.html_url, ...(i.title !== undefined ? { title: i.title } : {}) };
 }
 
 const MERGEABILITY: Record<string, Mergeability> = {
@@ -245,19 +246,24 @@ export class GitHubApp implements VcsHost, TicketSource {
     });
     return issues
       .filter((i) => !i.pull_request)
-      .map((i) => ({
-        number: i.number,
-        nodeId: i.node_id,
-        title: i.title,
-        body: i.body ?? '',
-        state: i.state === 'closed' ? 'closed' : 'open',
-        author: i.user?.login ?? 'ghost',
-        labels: i.labels.map((l) => (typeof l === 'string' ? l : l.name ?? '')).filter(Boolean),
-        url: i.html_url,
-        updatedAt: i.updated_at,
-        createdAt: i.created_at,
-        openBlockers: (i as { issue_dependencies_summary?: { blocked_by?: number } }).issue_dependencies_summary?.blocked_by ?? 0,
-      }));
+      .map((i) => {
+        const summary = (i as { issue_dependencies_summary?: { blocked_by?: number; total_blocked_by?: number } }).issue_dependencies_summary;
+        return {
+          number: i.number,
+          nodeId: i.node_id,
+          title: i.title,
+          body: i.body ?? '',
+          state: i.state === 'closed' ? 'closed' : 'open',
+          author: i.user?.login ?? 'ghost',
+          labels: i.labels.map((l) => (typeof l === 'string' ? l : l.name ?? '')).filter(Boolean),
+          url: i.html_url,
+          updatedAt: i.updated_at,
+          createdAt: i.created_at,
+          openBlockers: summary?.blocked_by ?? 0,
+          // Left undefined when missing, so it doesn't read as "no links".
+          totalBlockers: summary?.total_blocked_by,
+        };
+      });
   }
 
   async blockers(repo: RepoRef, number: number): Promise<TicketLink[]> {

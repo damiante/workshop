@@ -28,7 +28,7 @@ const { sweepMedia } = await import('../src/media.ts');
 const { connectionPaused, drive, isDriving, launch, PAUSE_GRACE_MS, requestPause, resume } = await import('../src/scheduler/runner.ts');
 const { buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
-const { syncRepo, HELD_CHECKS_PER_SYNC } = await import('../src/scheduler/sync.ts');
+const { syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
@@ -1577,6 +1577,8 @@ describe('dependencies', () => {
     expect(fake.vcs.createBranch).not.toHaveBeenCalled();
     expect(one<{ blocked_by: string; branch: string | null }>('SELECT blocked_by, branch FROM tickets WHERE id = 1')).toEqual({ blocked_by: '["#2"]', branch: null });
     expect(buildQueue().find((c) => c.ticket.id === 1)?.blockedBy).toBe('Depends on #2');
+    expect(all('SELECT blocker_repo, blocker_number, blocker_state FROM ticket_links WHERE ticket_id = 1')).toEqual([{ blocker_repo: 'me/app', blocker_number: 2, blocker_state: 'open' }]);
+    run('DELETE FROM ticket_links');
   });
 
   it('fails readably when none of the named blockers is open', async () => {
@@ -2305,9 +2307,122 @@ describe('sync', () => {
       }
     });
 
+    describe('stored links', () => {
+      const linkRows = (ticketId = 1) => all<{ blocker_number: number; blocker_state: string; blocker_title: string | null }>(
+        'SELECT blocker_number, blocker_state, blocker_title FROM ticket_links WHERE ticket_id = ? ORDER BY blocker_number', ticketId);
+      const checkedAt = (n = 3) => one<{ links_checked_at: number | null }>('SELECT links_checked_at FROM tickets WHERE number = ?', n)?.links_checked_at;
+      const reads = () => (fake.tickets.blockers as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1] as number);
+      const add = (n: number, state = 'open', linksCheckedAt: number | null = null) =>
+        run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, links_checked_at, updated_at) VALUES (1, ?, 'T', '', 'u', 'me', ?, '[]', ?, '2026-10-13T00:00:00Z')", n, state, linksCheckedAt);
+      beforeEach(() => {
+        run('DELETE FROM ticket_links');
+        run('UPDATE tickets SET links_checked_at = 1 WHERE id = 1');
+      });
+      afterEach(() => run('DELETE FROM tickets WHERE number >= 500'));
+
+      it('keeps the link of a held ticket whose blocker closes, as closed', async () => {
+        run(`UPDATE tickets SET blocked_by = '["#2"]' WHERE id = 1`);
+        fake.tickets.listChanged = async () => [];
+        fake.tickets.blockers = vi.fn(async () => [{ ...open(2), state: 'closed', title: 'Expose the API' }]);
+        await syncRepo(repo());
+        expect(held()).toBe('[]');
+        expect(linkRows()).toEqual([{ blocker_number: 2, blocker_state: 'closed', blocker_title: 'Expose the API' }]);
+      });
+
+      it('reads a listed ticket whose link count differs from what is stored, and not again once it matches', async () => {
+        fake.tickets.listChanged = async () => [remote({ labels: [], openBlockers: 0, totalBlockers: 1 })];
+        fake.tickets.blockers = vi.fn(async () => [{ ...open(2), state: 'closed' }]);
+        await syncRepo(repo());
+        expect(reads()).toEqual([3]);
+        expect(linkRows()).toEqual([{ blocker_number: 2, blocker_state: 'closed', blocker_title: null }]);
+        expect(held()).toBe('[]');
+        fake.tickets.blockers = vi.fn(async () => []);
+        await syncRepo(repo());
+        expect(reads()).toEqual([]);
+      });
+
+      it('hands a failed re-read of a changed count to the backfill, which reads it next sync', async () => {
+        fake.tickets.listChanged = async () => [remote({ labels: [], openBlockers: 0, totalBlockers: 1 })];
+        fake.tickets.blockers = vi.fn(async () => {
+          throw new Error('Server Error');
+        });
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await syncRepo(repo());
+        expect(checkedAt()).toBeNull();
+        fake.tickets.listChanged = async () => [];
+        fake.tickets.blockers = vi.fn(async () => [open(2)]);
+        await syncRepo(repo());
+        expect(reads()).toEqual([3]);
+        expect(checkedAt()).toBeGreaterThan(1);
+        expect(linkRows().map((l) => l.blocker_number)).toEqual([2]);
+      });
+
+      it('hands changed counts a rate limit stopped to the backfill', async () => {
+        add(500, 'open', 1);
+        const limited = Object.assign(new Error('API rate limit exceeded'), { status: 429 });
+        fake.tickets.listChanged = async () => [remote({ labels: [], openBlockers: 0, totalBlockers: 1 }), remote({ number: 500, labels: [], totalBlockers: 2 })];
+        fake.tickets.blockers = vi.fn(async () => {
+          throw limited;
+        });
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        await syncRepo(repo());
+        expect(reads()).toEqual([3]);
+        expect(checkedAt(3)).toBeNull();
+        expect(checkedAt(500)).toBeNull();
+      });
+
+      it('publishes tickets once for a sync that changes several tickets\' links', async () => {
+        add(500);
+        add(501);
+        fake.tickets.listChanged = async () => [];
+        fake.tickets.blockers = vi.fn(async () => [{ ...open(2), state: 'closed' }]);
+        const topics: string[] = [];
+        const listener = (t: string) => topics.push(t);
+        bus.on('topic', listener);
+        try {
+          await syncRepo(repo());
+        } finally {
+          bus.off('topic', listener);
+        }
+        expect(reads().sort()).toEqual([500, 501]);
+        expect(topics.filter((t) => t === 'tickets')).toHaveLength(1);
+      });
+
+      it('backfills a limited batch of never-read tickets, open first and closed ones included', async () => {
+        for (let n = 500; n < 500 + LINK_BACKFILL_PER_SYNC; n++) add(n, 'closed');
+        add(600);
+        fake.tickets.listChanged = async () => [];
+        fake.tickets.blockers = vi.fn(async (_r: unknown, n: number) => (n === 519 ? [{ ...open(2), state: 'closed' }] : []));
+        await syncRepo(repo());
+        expect(reads()).toHaveLength(LINK_BACKFILL_PER_SYNC);
+        expect(reads()[0]).toBe(600);
+        expect(reads()[1]).toBe(519); // then closed, newest first
+        expect(checkedAt(519)).toBeGreaterThan(1);
+        expect(checkedAt(500)).toBeNull(); // next sync
+        expect(linkRows(one<{ id: number }>('SELECT id FROM tickets WHERE number = 519')!.id).map((l) => l.blocker_state)).toEqual(['closed']);
+        expect(one<{ blocked_by: string }>('SELECT blocked_by FROM tickets WHERE number = 519')?.blocked_by).toBe('[]');
+      });
+
+      it('completes the sync when a rate limit stops the backfill', async () => {
+        add(500);
+        const limited = Object.assign(new Error('API rate limit exceeded'), { status: 429 });
+        fake.tickets.listChanged = async () => [];
+        fake.tickets.blockers = vi.fn(async () => {
+          throw limited;
+        });
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        run("UPDATE repos SET synced_at = '2026-10-13T00:00:00Z' WHERE id = 1");
+        await syncRepo(repo());
+        expect(reads()).toEqual([500]);
+        expect(repo().synced_at).not.toBe('2026-10-13T00:00:00Z');
+        expect(checkedAt(500)).toBeNull();
+      });
+    });
+
     describe('with many held tickets', () => {
+      // Links already read, so the link backfill stays out of these rotations.
       const add = (n: number, blockedBy: string, state = 'open') =>
-        run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (1, ?, 'T', '', 'u', 'me', ?, '[]', ?, '2026-10-13T00:00:00Z')", n, state, blockedBy);
+        run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, links_checked_at, updated_at) VALUES (1, ?, 'T', '', 'u', 'me', ?, '[]', ?, 1, '2026-10-13T00:00:00Z')", n, state, blockedBy);
       const holdOf = (n: number) => one<{ blocked_by: string }>('SELECT blocked_by FROM tickets WHERE number = ?', n)?.blocked_by;
       const checked = () => (fake.tickets.blockers as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1] as number);
       beforeEach(() => {

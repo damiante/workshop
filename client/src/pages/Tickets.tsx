@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 import type { Push, Size, Stage, TicketStatePatch, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Modal, Status } from '../components/ui.tsx';
-import { STAGE_TEXT } from '../format.ts';
+import { STAGE_TEXT, ticketStatus } from '../format.ts';
 
 export const COLUMNS: { title: string; match: (t: TicketView) => boolean }[] = [
   { title: 'To classify', match: (t) => t.stage === null || t.stage === 'reclassify' },
@@ -25,17 +25,10 @@ const FILTERS: { label: string; match: (t: TicketView) => boolean }[] = [
 ];
 
 export function TicketStatus({ t }: { t: TicketView }) {
-  if (t.activeRunId) {
-    return (
-      <Link to={`/runs/${t.activeRunId}`}>
-        <Status tone="running">Agent working</Status>
-      </Link>
-    );
-  }
-  if (t.failed) return <Status tone="error">Stopped after failures</Status>;
-  if (t.needsInfo) return <Status tone="attention">Waiting for your answer</Status>;
-  if (t.skipped) return <Status tone="idle">Skipped</Status>;
-  return null;
+  const status = ticketStatus(t);
+  if (!status) return null;
+  const shown = <Status tone={status.tone}>{status.text}</Status>;
+  return t.activeRunId ? <Link to={`/runs/${t.activeRunId}`}>{shown}</Link> : shown;
 }
 
 function PushControls({ t }: { t: TicketView }) {
@@ -319,7 +312,10 @@ export function Tickets() {
   return (
     <div className="stack">
       <div className="spread">
-        <h1>Tickets</h1>
+        <div className="row">
+          <h1>Tickets</h1>
+          <Link to="/dependencies">Dependencies</Link>
+        </div>
         <button onClick={sync} disabled={syncing}>
           {syncing ? 'Syncing…' : 'Sync now'}
         </button>

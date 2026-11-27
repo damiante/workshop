@@ -44,6 +44,9 @@ curl $WORKSHOP/api/usage/lifetime -H "Authorization: Bearer $TOKEN"
 # Usage over time with projections, burn rates, and when open tickets should finish and what they should cost, and the cost of each ticket: range 24h, 7d, 30d (default), 90d or all
 curl "$WORKSHOP/api/usage/history?range=7d" -H "Authorization: Bearer $TOKEN"
 
+# The dependency graph of each enabled repository: which tickets wait for which, closed ones included
+curl $WORKSHOP/api/dependencies -H "Authorization: Bearer $TOKEN"
+
 # Start an agent on a ticket now (ticket id from GET /api/tickets)
 curl -X POST $WORKSHOP/api/tickets/12/launch -H "Authorization: Bearer $TOKEN"
 
@@ -78,6 +81,10 @@ Usage limits are set per subscription. `PUT /api/settings` with the old global `
 ## Launching
 
 `POST /api/tickets/:id/launch` starts whatever agent the ticket is due next and answers 202 with the run. It ignores the operation mode and operating hours, so it works while Workshop is paused. Every other check still applies: dependencies, a chosen model, the Claude allowance, the API cap and a free agent host. If one blocks the launch you get 409 with the reason.
+
+## Dependencies
+
+`GET /api/dependencies` returns one graph per enabled repository, including repositories with no links. `edges` lists every "blocked by" link Workshop has seen whose waiting ticket is in that repository, open and closed: `blocker` must finish before `ticket`, both as node refs (`#12`, or `other/repo#5` for another repository). `nodes` has both ends of every edge. A node that is a Workshop ticket, in any enabled repository, carries its `ticket` view and current state; any other blocker has `ticket: null` and the state GitHub gave when Workshop last read the link. Links made before Workshop stored them fill in over a few syncs, and a link removed on GitHub may stay until its ticket is next read.
 
 ## Checking now
 

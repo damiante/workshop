@@ -982,6 +982,86 @@ a.turn-no:hover {
   }
 }
 
+/* Dependencies page graph: scrolls sideways inside its panel, never the page. */
+
+.graph-wrap {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+}
+.graph-wrap svg {
+  display: block;
+}
+.graph-box {
+  fill: var(--raised);
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.graph-node:hover .graph-box {
+  stroke: var(--muted);
+}
+.graph-node:focus {
+  outline: none;
+}
+.graph-node:focus-visible .graph-box {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+/* Closed tickets recede, but their text stays --muted, which meets AA on the panel. */
+.graph-node.closed .graph-box {
+  fill: var(--surface);
+  stroke-dasharray: 4 3;
+}
+.graph-node.closed .graph-title,
+.graph-node.closed .graph-ref {
+  fill: var(--muted);
+}
+.graph-ref {
+  font-family: var(--mono);
+  font-size: 12px;
+  fill: var(--muted);
+}
+.graph-title {
+  font-size: 13px;
+  font-weight: 600;
+  fill: var(--text);
+}
+.graph-status {
+  font-size: 12px;
+  fill: var(--muted);
+}
+.graph-dot {
+  fill: var(--muted);
+}
+.graph-dot.ok {
+  fill: var(--ok);
+}
+.graph-dot.attention {
+  fill: var(--attention);
+}
+.graph-dot.error {
+  fill: var(--error);
+}
+.graph-dot.running {
+  fill: var(--ok);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+.graph-edge {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.5;
+}
+.graph-edge.done {
+  stroke: var(--line);
+}
+.graph-arrow {
+  fill: var(--muted);
+}
+.graph-arrow.done {
+  fill: var(--line);
+}
+
 /* Usage page charts */
 
 .filters {

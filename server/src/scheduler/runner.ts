@@ -16,6 +16,7 @@ import { ACTIVE_STATUSES, activity, appendLog, getRun, linesFrom, readLog, type 
 import { getSettings } from '../settings.ts';
 import { recordSpend } from '../spend.ts';
 import {
+  addLinks,
   branchOf,
   docPathOf,
   editLabels,
@@ -736,16 +737,15 @@ async function publishRun(ctx: Ctx) {
     const addBlockers = plan.addBlockers;
     await step('blockers', async () => {
       const source = sourceFor(ctx.repo);
-      const open = [];
-      for (const n of addBlockers.filter((n) => n !== t.number)) {
-        const link = await source.addBlocker(repo, t.number, n);
-        if (link.state === 'open') open.push(link);
-      }
+      const links = [];
+      for (const n of addBlockers.filter((n) => n !== t.number)) links.push(await source.addBlocker(repo, t.number, n));
+      const open = links.filter((l) => l.state === 'open');
       // Nothing open would hold nothing, and the Classifier would run again straight away.
       if (!open.length) {
         throw new Error(`The Classifier said this ticket waits for ${joinRefs(addBlockers.map((n) => `#${n}`))}, but none of those is an open issue in ${ctx.repo.full_name}.`);
       }
       setBlockers(t, open.map((l) => linkRef(l, ctx.repo)));
+      addLinks(t, links);
     });
   }
   if (plan.createBranch) {

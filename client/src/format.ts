@@ -1,4 +1,4 @@
-import type { AgentName, RunStatus, RunView, Stage } from '../../server/src/api-types.ts';
+import type { AgentName, RunStatus, RunView, Stage, TicketView } from '../../server/src/api-types.ts';
 
 export const AGENT_LABEL: Record<AgentName, string> = {
   classifier: 'Classifier',
@@ -32,6 +32,15 @@ export const RUN_STATUS: Record<RunStatus, { label: string; tone: Tone }> = {
 };
 
 export type Tone = 'ok' | 'attention' | 'error' | 'idle' | 'running';
+
+/** What a ticket's status line says on the Tickets page, or null when it has nothing to flag. */
+export function ticketStatus(t: Pick<TicketView, 'activeRunId' | 'failed' | 'needsInfo' | 'skipped'>): { tone: Tone; text: string } | null {
+  if (t.activeRunId) return { tone: 'running', text: 'Agent working' };
+  if (t.failed) return { tone: 'error', text: 'Stopped after failures' };
+  if (t.needsInfo) return { tone: 'attention', text: 'Waiting for your answer' };
+  if (t.skipped) return { tone: 'idle', text: 'Skipped' };
+  return null;
+}
 
 /** A run's status label, telling a pause you made, or a move off a paused subscription, apart from one for usage. */
 export function runStatus(run: Pick<RunView, 'status' | 'pauseReason'>): { label: string; tone: Tone } {

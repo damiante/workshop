@@ -1,4 +1,4 @@
-import type { Push, RepoSelection, RepoView, TicketView } from './api-types.ts';
+import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, TicketView } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import { publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
@@ -46,6 +46,8 @@ export interface TicketRow {
   failures: number;
   blocked_by: string;
   blockers_checked_at: number | null;
+  /** Last full read of its blockers into ticket_links; null means never, and the backfill reads it. */
+  links_checked_at: number | null;
   push: Push | null;
   push_stage: string | null;
   ui: number;
@@ -123,6 +125,103 @@ export function setBlockers(t: TicketRow, refs: string[]) {
   run('UPDATE tickets SET blocked_by = ? WHERE id = ?', value, t.id);
   t.blocked_by = value;
   publish('tickets');
+}
+
+interface LinkRow {
+  ticket_id: number;
+  blocker_repo: string;
+  blocker_number: number;
+  blocker_title: string | null;
+  blocker_url: string;
+  blocker_state: 'open' | 'closed';
+}
+
+const linkKey = (repo: string, number: number) => `${repo.toLowerCase()}#${number}`;
+const linksOf = (ticketId: number) => all<LinkRow>('SELECT * FROM ticket_links WHERE ticket_id = ? ORDER BY blocker_repo, blocker_number', ticketId);
+
+function upsertLink(ticketId: number, l: TicketLink) {
+  run(
+    `INSERT INTO ticket_links (ticket_id, blocker_repo, blocker_number, blocker_title, blocker_url, blocker_state) VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (ticket_id, blocker_repo, blocker_number) DO UPDATE SET
+       blocker_title = COALESCE(excluded.blocker_title, ticket_links.blocker_title), blocker_url = excluded.blocker_url, blocker_state = excluded.blocker_state`,
+    ticketId,
+    l.repo,
+    l.number,
+    l.title ?? null,
+    l.url,
+    l.state,
+  );
+}
+
+/**
+ * Stores the ticket's complete list of blockers, open and closed, and marks it read. Returns whether the stored links
+ * changed. It doesn't publish: a sync reads many tickets and publishes once.
+ */
+export function setLinks(t: TicketRow, links: TicketLink[]): boolean {
+  const before = JSON.stringify(linksOf(t.id));
+  const now = Date.now();
+  run('BEGIN');
+  try {
+    run('DELETE FROM ticket_links WHERE ticket_id = ?', t.id);
+    for (const l of links) upsertLink(t.id, l);
+    run('UPDATE tickets SET links_checked_at = ? WHERE id = ?', now, t.id);
+    run('COMMIT');
+  } catch (err) {
+    run('ROLLBACK');
+    throw err;
+  }
+  t.links_checked_at = now;
+  return JSON.stringify(linksOf(t.id)) !== before;
+}
+
+/** Adds links without removing others, for links Workshop made itself; the list isn't complete, so it isn't marked read. */
+export function addLinks(t: TicketRow, links: TicketLink[]) {
+  const before = JSON.stringify(linksOf(t.id));
+  for (const l of links) upsertLink(t.id, l);
+  if (JSON.stringify(linksOf(t.id)) !== before) publish('tickets');
+}
+
+export const linkCount = (ticketId: number) => one<{ n: number }>('SELECT count(*) AS n FROM ticket_links WHERE ticket_id = ?', ticketId)!.n;
+
+/** One graph per enabled repo: every stored link whose dependent is in it, with both ends as nodes. */
+export function dependencyGraphs(): DependencyGraph[] {
+  const repos = all<RepoRow>('SELECT * FROM repos');
+  const byId = new Map(repos.map((r) => [r.id, r]));
+  return repos
+    .filter((r) => r.enabled)
+    .sort((a, b) => a.full_name.localeCompare(b.full_name))
+    .map((repo) => {
+      const links = all<LinkRow & { number: number }>(
+        'SELECT l.*, t.number FROM ticket_links l JOIN tickets t ON t.id = l.ticket_id WHERE t.repo_id = ?',
+        repo.id,
+      );
+      // Both ends, as Workshop rows in any enabled repo: the dependents, and blockers matched by full name and number.
+      const rows = all<TicketRow>(
+        `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_id
+         WHERE r.enabled = 1 AND (
+           t.id IN (SELECT l.ticket_id FROM ticket_links l JOIN tickets d ON d.id = l.ticket_id WHERE d.repo_id = ?)
+           OR (lower(r.full_name), t.number) IN (
+             SELECT lower(l.blocker_repo), l.blocker_number FROM ticket_links l JOIN tickets d ON d.id = l.ticket_id WHERE d.repo_id = ?))`,
+        repo.id,
+        repo.id,
+      );
+      const refOf = (fullName: string, number: number) => (fullName.toLowerCase() === repo.full_name.toLowerCase() ? `#${number}` : `${fullName}#${number}`);
+      const nodes = new Map<string, DependencyNode>();
+      for (const t of rows) {
+        const r = byId.get(t.repo_id)!;
+        nodes.set(linkKey(r.full_name, t.number), { ref: refOf(r.full_name, t.number), number: t.number, title: t.title, url: t.url, state: t.state, ticket: ticketView(t, r) });
+      }
+      const edges = links.map((l) => {
+        const key = linkKey(l.blocker_repo, l.blocker_number);
+        if (!nodes.has(key)) {
+          nodes.set(key, { ref: refOf(l.blocker_repo, l.blocker_number), number: l.blocker_number, title: l.blocker_title, url: l.blocker_url, state: l.blocker_state, ticket: null });
+        }
+        return { blocker: nodes.get(key)!.ref, ticket: `#${l.number}` };
+      });
+      const sortedNodes = [...nodes.values()].sort((a, b) => a.number - b.number || a.ref.localeCompare(b.ref));
+      edges.sort((a, b) => a.ticket.localeCompare(b.ticket, undefined, { numeric: true }) || a.blocker.localeCompare(b.blocker, undefined, { numeric: true }));
+      return { repoId: repo.id, repo: repo.full_name, nodes: sortedNodes, edges };
+    });
 }
 
 export function repoView(r: RepoRow): RepoView {

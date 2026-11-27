@@ -13,6 +13,7 @@ import { Agents } from './pages/Agents.tsx';
 import { Alerts } from './pages/Alerts.tsx';
 import { Connections } from './pages/Connections.tsx';
 import { Dashboard } from './pages/Dashboard.tsx';
+import { Dependencies } from './pages/Dependencies.tsx';
 import { Login } from './pages/Login.tsx';
 import { Media } from './pages/Media.tsx';
 import { Ticket } from './pages/Ticket.tsx';
@@ -44,6 +45,7 @@ function App() {
           <Route path="tickets" element={<Tickets />} />
           <Route path="tickets/:id" element={<Ticket />} />
           <Route path="tickets/:id/media" element={<Media />} />
+          <Route path="dependencies" element={<Dependencies />} />
           <Route path="runs" element={<Runs />} />
           <Route path="runs/:id" element={<RunView />} />
           <Route path="usage" element={<Usage />} />

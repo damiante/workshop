@@ -2,7 +2,23 @@ import { all, one, run } from '../db.ts';
 import { publish } from '../events.ts';
 import { deleteMedia } from '../media.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, editLabels, getTicket, isAllowedAuthor, labelsOf, linkRef, repoRef, setBlockers, sourceFor, vcsFor, type RepoRow, type TicketRow } from '../tickets.ts';
+import {
+  activeRunId,
+  blockersOf,
+  editLabels,
+  getTicket,
+  isAllowedAuthor,
+  labelsOf,
+  linkCount,
+  linkRef,
+  repoRef,
+  setBlockers,
+  setLinks,
+  sourceFor,
+  vcsFor,
+  type RepoRow,
+  type TicketRow,
+} from '../tickets.ts';
 import type { RemoteTicket } from '../providers/types.ts';
 import { label, moveTo, parseLabels } from '../workflow/labels.ts';
 import { raiseAlert } from '../alerts.ts';
@@ -61,12 +77,20 @@ export async function syncRepo(repo: RepoRow) {
 
 /** Held tickets re-read per repo per sync, beyond those whose blockers look closed or that you prioritised. */
 export const HELD_CHECKS_PER_SYNC = 100;
+/** Tickets whose links were never read, read per repo per sync, so the Dependencies page fills in over time. */
+export const LINK_BACKFILL_PER_SYNC = 20;
 
 /**
  * Open blockers decide whether a ticket is held. The list's count says which tickets not yet held need a look;
  * those are all read, so nothing blocked gets launched. Held tickets are re-read because closing a blocker may not
  * touch their update time, but there can be thousands, so each sync reads first the ones you prioritised or pushed,
  * then those with a blocker Workshop has seen close, then up to HELD_CHECKS_PER_SYNC more, least recently read first.
+ *
+ * Every read also stores the ticket's full list of links (open and closed) for the Dependencies page. Two more groups
+ * are read for that alone: listed tickets whose total link count differs from what's stored, then up to
+ * LINK_BACKFILL_PER_SYNC tickets never read, closed ones included. A failed read of a changed count hands the ticket
+ * to the backfill, since the sync moves on and won't list it again.
+ *
  * A failure for one ticket keeps its stored hold; a rate limit ends the round. Returns false when GitHub's rate limit
  * stopped it before every newly blocked ticket was read, so the next sync lists them again.
  */
@@ -74,10 +98,12 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
   const source = sourceFor(repo);
   const ref = repoRef(repo);
   const fresh: TicketRow[] = [];
+  const recount: TicketRow[] = [];
   for (const t of changed) {
-    if (t.state !== 'open' || !t.openBlockers) continue;
     const row = one<TicketRow>('SELECT * FROM tickets WHERE repo_id = ? AND number = ?', repo.id, t.number);
-    if (row && row.blocked_by === '[]') fresh.push(row);
+    if (!row) continue;
+    if (t.state === 'open' && t.openBlockers && row.blocked_by === '[]') fresh.push(row);
+    else if (t.totalBlockers !== undefined && t.totalBlockers !== linkCount(row.id)) recount.push(row);
   }
   const closed = new Set(
     all<{ ref: string }>("SELECT lower(r.full_name) || '#' || t.number AS ref FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE t.state = 'closed'").map((r) => r.ref),
@@ -88,19 +114,44 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
     repo.id,
   );
   const urgent = held.filter((t) => t.prioritised || t.push || looksFree(t));
-  const targets = [...fresh, ...urgent, ...held.filter((t) => !urgent.includes(t)).slice(0, HELD_CHECKS_PER_SYNC)];
-  for (const [i, t] of targets.entries()) {
-    try {
-      const links = await source.blockers(ref, t.number);
-      // Re-read the row: a Classifier run may have set the hold while the request was in flight.
-      setBlockers(getTicket(t.id) ?? t, links.filter((l) => l.state === 'open').map((l) => linkRef(l, repo)));
-      run('UPDATE tickets SET blockers_checked_at = ? WHERE id = ?', Date.now(), t.id);
-    } catch (err) {
-      console.warn(`Couldn't read the blockers of ${repo.full_name}#${t.number}: ${(err as Error).message}`);
-      if (isRateLimited(err)) return i >= fresh.length;
+  const holds = [...fresh, ...urgent, ...held.filter((t) => !urgent.includes(t)).slice(0, HELD_CHECKS_PER_SYNC)];
+  const seen = new Set(holds.map((t) => t.id));
+  const recounts = recount.filter((t) => !seen.has(t.id) && seen.add(t.id));
+  const backfill = all<TicketRow>(
+    "SELECT * FROM tickets WHERE repo_id = ? AND links_checked_at IS NULL ORDER BY state = 'closed', number DESC LIMIT ?",
+    repo.id,
+    LINK_BACKFILL_PER_SYNC + seen.size,
+  ).filter((t) => !seen.has(t.id)).slice(0, LINK_BACKFILL_PER_SYNC);
+  const targets = [...holds, ...recounts, ...backfill];
+  const recountFrom = holds.length;
+  const recountTo = holds.length + recounts.length;
+  // Hands changed counts that weren't read to the backfill, which retries them on a later sync.
+  const retryLater = (ts: TicketRow[]) => {
+    for (const t of ts) run('UPDATE tickets SET links_checked_at = NULL WHERE id = ?', t.id);
+  };
+  let linksChanged = false;
+  try {
+    for (const [i, t] of targets.entries()) {
+      try {
+        const links = await source.blockers(ref, t.number);
+        // Re-read the row: a Classifier run may have set the hold while the request was in flight.
+        const current = getTicket(t.id) ?? t;
+        if (setLinks(current, links)) linksChanged = true;
+        setBlockers(current, links.filter((l) => l.state === 'open').map((l) => linkRef(l, repo)));
+        run('UPDATE tickets SET blockers_checked_at = ? WHERE id = ?', Date.now(), t.id);
+      } catch (err) {
+        console.warn(`Couldn't read the blockers of ${repo.full_name}#${t.number}: ${(err as Error).message}`);
+        if (i >= recountFrom && i < recountTo) retryLater([t]);
+        if (isRateLimited(err)) {
+          retryLater(targets.slice(Math.max(i + 1, recountFrom), recountTo));
+          return i >= fresh.length;
+        }
+      }
     }
+    return true;
+  } finally {
+    if (linksChanged) publish('tickets');
   }
-  return true;
 }
 
 /**

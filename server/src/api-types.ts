@@ -182,6 +182,32 @@ export interface TicketView {
   updatedAt: string;
 }
 
+/** A ticket on the Dependencies page. */
+export interface DependencyNode {
+  /** "#12", or "other/repo#5" for a ticket in another repository. */
+  ref: string;
+  number: number;
+  title: string | null;
+  url: string;
+  state: 'open' | 'closed';
+  /** Null when the ticket isn't in Workshop (another repository, or an author Workshop doesn't work for). */
+  ticket: TicketView | null;
+}
+
+/** `blocker` must finish before `ticket`; both are node refs. */
+export interface DependencyEdge {
+  blocker: string;
+  ticket: string;
+}
+
+/** Every "blocked by" link Workshop knows of among one repository's tickets, open and closed. */
+export interface DependencyGraph {
+  repoId: number;
+  repo: string;
+  nodes: DependencyNode[];
+  edges: DependencyEdge[];
+}
+
 export type RunStatus = 'starting' | 'running' | 'publishing' | 'paused' | 'succeeded' | 'failed' | 'cancelled' | 'lost';
 
 export interface RunView {

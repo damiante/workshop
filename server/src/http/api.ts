@@ -14,7 +14,7 @@ import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncSoon 
 import { requestPause, stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend, USAGE_RANGES, usageHistory } from '../spend.ts';
-import { activeRunId, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setBypassLimits, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
+import { activeRunId, dependencyGraphs, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setBypassLimits, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { CONTENT_TYPES, extType, validName } from '../workflow/media.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
@@ -201,6 +201,10 @@ apiRouter.get('/models', (_req, res) => {
 
 apiRouter.get('/tickets', (req, res) => {
   res.json(listTicketViews(req.query.closed === '1'));
+});
+
+apiRouter.get('/dependencies', (_req, res) => {
+  res.json(dependencyGraphs());
 });
 
 apiRouter.put('/hosts/:id', (req, res) => {

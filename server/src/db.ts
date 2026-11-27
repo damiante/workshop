@@ -274,6 +274,19 @@ export const MIGRATIONS = [
   ALTER TABLE repos ADD COLUMN push_to_default INTEGER NOT NULL DEFAULT 0;
   `,
   `ALTER TABLE runs ADD COLUMN size TEXT; -- small, standard or large: the container size it started with; null on older rows means standard`,
+  // Every "blocked by" link Workshop has seen, open and closed, for the Dependencies page (#120).
+  `
+  CREATE TABLE ticket_links (
+    ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+    blocker_repo TEXT NOT NULL,      -- full name, e.g. me/app
+    blocker_number INTEGER NOT NULL,
+    blocker_title TEXT,
+    blocker_url TEXT NOT NULL,
+    blocker_state TEXT NOT NULL,     -- open or closed, as GitHub last said
+    PRIMARY KEY (ticket_id, blocker_repo, blocker_number)
+  );
+  ALTER TABLE tickets ADD COLUMN links_checked_at INTEGER; -- epoch ms of the last full read of its blockers; null = never
+  `,
 ];
 
 export let db: DatabaseSync;
