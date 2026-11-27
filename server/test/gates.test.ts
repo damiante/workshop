@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Limits, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, isUnclassified, modeBlock, priorityBlock, pickHost, poolFor, freeSlots, implicitPriority, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours, type HostLoad } from '../src/scheduler/gates.ts';
+import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, modeBlock, priorityAhead, pickHost, poolFor, freeSlots, implicitPriority, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours, type HostLoad } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -194,21 +194,10 @@ describe('hand pushes', () => {
 });
 
 describe('repository priority', () => {
-  it('counts only tickets the Classifier has yet to look at as unclassified', () => {
-    expect(isUnclassified([], true, [])).toBe(true);
-    for (const label of ['workshop/stage:design', 'workshop/stage:reclassify', 'workshop/skip', 'workshop/needs-info', 'workshop/failed']) {
-      expect(isUnclassified([label], true, [])).toBe(false);
-    }
-    expect(isUnclassified([], false, [])).toBe(false);
-    expect(isUnclassified([], true, ['#2'])).toBe(false);
-  });
-
-  it('is held only by strictly higher-priority repos, each named once', () => {
-    expect(priorityBlock(0, [])).toBeNull();
-    expect(priorityBlock(1, [{ repo: 'me/api', priority: 1 }, { repo: 'me/web', priority: 0 }])).toBeNull();
-    expect(priorityBlock(0, [{ repo: 'me/api', priority: 1 }])).toBe('Waiting for me/api to be classified first');
-    expect(priorityBlock(0, [{ repo: 'me/api', priority: 1 }, { repo: 'me/api', priority: 1 }])).toBe('Waiting for me/api to be classified first');
-    expect(priorityBlock(0, [{ repo: 'me/api', priority: 1 }, { repo: 'me/web', priority: 2 }])).toBe('Waiting for me/api and me/web to be classified first');
+  it('names strictly higher-priority repos once each, in queue order', () => {
+    expect(priorityAhead(0, [])).toEqual([]);
+    expect(priorityAhead(1, [{ repo: 'me/api', priority: 1 }, { repo: 'me/web', priority: 0 }])).toEqual([]);
+    expect(priorityAhead(0, [{ repo: 'me/web', priority: 2 }, { repo: 'me/api', priority: 1 }, { repo: 'me/web', priority: 2 }, { repo: 'me/app', priority: 0 }])).toEqual(['me/web', 'me/api']);
   });
 });
 

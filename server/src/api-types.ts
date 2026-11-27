@@ -342,6 +342,8 @@ export interface QueueItem {
   bypassLimits: boolean;
   /** Refs of the prioritised tickets this one goes first for. */
   prioritisedFor: string[];
+  /** Higher-priority repositories whose queued tickets go ahead of this one. It orders the queue, it doesn't hold it. */
+  after: string[];
 }
 
 export interface AlertView {

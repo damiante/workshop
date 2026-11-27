@@ -195,6 +195,7 @@ export function Dashboard() {
                   {q.push && <span className="small muted">Pushed by you</span>}
                   {q.prioritised && !q.push && <span className="small muted">Prioritised by you</span>}
                   {!q.push && !q.prioritised && q.prioritisedFor.length > 0 && <span className="small muted">Prioritised for {q.prioritisedFor.join(', ')}</span>}
+                  {q.after.length > 0 && <span className="small muted">After {q.after.join(', ')} (higher priority)</span>}
                   {q.bypassLimits && <span className="small muted">Ignores your usage limits</span>}
                   {q.blockedBy && <span className="small muted">Waiting: {q.blockedBy}</span>}
                 </li>

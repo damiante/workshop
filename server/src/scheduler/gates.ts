@@ -159,17 +159,12 @@ export function implicitPriority(nodes: { key: string; prioritised: boolean; blo
   return new Map([...found].map(([k, v]) => [k, [...v].sort()]));
 }
 
-/** A ticket the Classifier still has to look at: no stage yet, and nothing it waits on. */
-export function isUnclassified(labels: string[], open: boolean, blockers: string[]): boolean {
-  if (blockers.length) return false;
-  const step = nextStep(parseLabels(labels), open);
-  return step?.kind === 'agent' && step.agent === 'classifier' && step.mode === 'normal';
-}
-
-/** Why unclassified tickets in higher-priority repos hold a ticket back, or null. */
-export function priorityBlock(priority: number, waiting: { repo: string; priority: number }[]): string | null {
-  const names = [...new Set(waiting.filter((w) => w.priority > priority).map((w) => w.repo))];
-  return names.length ? `Waiting for ${joinRefs(names)} to be classified first` : null;
+/**
+ * The higher-priority repos whose queued tickets go ahead of one in a repo of this priority. It only
+ * orders the queue: a ticket that fits a free slot nothing ahead of it can use still starts.
+ */
+export function priorityAhead(priority: number, queued: { repo: string; priority: number }[]): string[] {
+  return [...new Set(queued.filter((q) => q.priority > priority).map((q) => q.repo))];
 }
 
 /** Finish work in flight before starting new work. */

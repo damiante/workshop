@@ -3051,61 +3051,88 @@ describe('manual pushes', () => {
 });
 
 describe('repository priority', () => {
-  const held = () => buildQueue().find((c) => c.ticket.id === 1)?.blockedBy;
+  const queued = (id = 1) => buildQueue().find((c) => c.ticket.id === id)!;
+  // What the tick starts: the first ticket in the queue that isn't held.
+  const next = () => buildQueue().find((c) => !c.blockedBy);
   let api: number;
-  const apiTicket = (labels: string[], over: { author?: string } = {}) =>
-    Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, 9, 'Api', '', 'u', ?, 'open', ?, '2026-10-13T00:00:00Z')", api, over.author ?? 'me', JSON.stringify(labels)).lastInsertRowid);
+  const apiTicket = (labels: string[], over: { author?: string; number?: number } = {}) =>
+    Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (?, ?, 'Api', '', 'u', ?, 'open', ?, '2026-10-13T00:00:00Z')", api, over.number ?? 9, over.author ?? 'me', JSON.stringify(labels)).lastInsertRowid);
+  const configure = (cfg: object) => run('UPDATE connections SET config = ? WHERE id = ?', JSON.stringify({ mode: 'socket', slots: 1, cpus: 2, memoryGb: 4, ...cfg }), ids.env);
+  const occupy = (ticketId: number, size: string, agent = 'classifier') =>
+    run("INSERT INTO runs (id, ticket_id, agent, attempt, environment_id, size, model, billing, status, started_at) VALUES (?, ?, ?, 1, ?, ?, 'm', 'subscription', 'running', 0)", `busy-${ticketId}`, ticketId, agent, ids.env, size);
 
   beforeEach(() => {
     saveSettings({ mode: 'always' });
+    setConnectionStatus(ids.env, 'ok');
+    recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 10, resetsAt: Date.now() + 86400_000 });
+    for (const agent of ['classifier', 'implement'] as const) updateAgent(agent, { model: 'claude-sonnet-5-5', modelConnectionId: ids.model });
+    configure({ smallSlots: 1 });
     const app = one<{ vcs_connection_id: number; ticket_connection_id: number }>('SELECT * FROM repos WHERE id = 1')!;
     api = Number(run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled, priority) VALUES (?, ?, 'me/api', 'main', 'u', 1, 1)", app.vcs_connection_id, app.ticket_connection_id).lastInsertRowid);
   });
   afterEach(() => {
-    run('DELETE FROM tickets WHERE repo_id = ?', api);
+    run('DELETE FROM runs');
+    run('DELETE FROM tickets WHERE repo_id = ? OR number = 4', api);
     run('DELETE FROM repos WHERE id = ?', api);
+    configure({});
   });
 
-  it('holds a lower-priority repo while a higher one has unclassified tickets', () => {
+  it("orders a lower-priority repo after a higher one's unclassified tickets without holding it", () => {
     const t = apiTicket([]);
-    expect(held()).toBe('Waiting for me/api to be classified first');
     const q = buildQueue();
     expect(q[0].ticket.id).toBe(t);
-    expect(q[0].blockedBy ?? '').not.toMatch(/Waiting/);
+    expect(q[0].after).toEqual([]);
+    expect(queued()).toMatchObject({ blockedBy: null, after: ['me/api'] });
   });
 
-  it('releases it once those are classified, held or skipped, and still sorts the higher repo first', () => {
-    const t = apiTicket([label.size('s'), label.stage('design')]);
-    expect(held() ?? '').not.toMatch(/Waiting/);
-    expect(buildQueue()[0].ticket.id).toBe(t);
-    for (const [labels, blocked] of [[['workshop/skip'], '[]'], [[], '["#2"]']] as const) {
-      run('UPDATE tickets SET labels = ?, blocked_by = ? WHERE id = ?', JSON.stringify(labels), blocked, t);
-      expect(held() ?? '').not.toMatch(/Waiting/);
-    }
+  it('starts lower-priority work on a free slot of another size while the higher repo classifies on every small one', () => {
+    occupy(apiTicket([], { number: 8 }), 'small');
+    const t = apiTicket([]);
+    expect(queued(t)).toMatchObject({ size: 'small', blockedBy: 'Every agent host is busy or offline' });
+    expect(queued()).toMatchObject({ size: 'standard', blockedBy: null, after: ['me/api'] });
+    expect(next()?.ticket.id).toBe(1);
+    expect(buildQueue().some((c) => /classified/.test(c.blockedBy ?? ''))).toBe(false);
   });
 
-  it('lets equal priorities proceed', () => {
-    run('UPDATE repos SET priority = 0 WHERE id = ?', api);
-    apiTicket([]);
-    expect(held() ?? '').not.toMatch(/Waiting/);
+  it('gives a slot both repos can use to the higher-priority one', () => {
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 4, 'App', '', 'u', 'me', 'open', '[]', '2026-10-01T00:00:00Z')");
+    const low = one<{ id: number }>('SELECT id FROM tickets WHERE repo_id = 1 AND number = 4')!.id;
+    const high = apiTicket([]);
+    run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.skip]));
+    expect(queued(low)).toMatchObject({ size: 'small', blockedBy: null });
+    expect(next()?.ticket.id).toBe(high);
+    // Once the higher repo holds the small slot, the lower ticket waits for a slot, not for the other repo.
+    occupy(high, 'small');
+    expect(queued(low).blockedBy).toBe('Every agent host is busy or offline');
   });
 
-  it('is skipped by a hand push and by launching now', () => {
+  it('keeps each pool to itself: a free small slot goes to a lower repo when the higher one only has standard work', () => {
+    apiTicket([label.size('s'), label.stage('implement')]);
+    occupy(apiTicket([], { number: 8 }), 'standard', 'implement'); // the only standard slot
+    run('UPDATE tickets SET labels = ? WHERE id = 1', '[]');
+    expect(queued()).toMatchObject({ size: 'small', blockedBy: null, after: ['me/api'] });
+    expect(next()?.ticket.id).toBe(1);
+  });
+
+  it('notes nothing for equal priorities, pushed or prioritised tickets', () => {
     apiTicket([]);
     setPush(getTicket(1)!, 'stage');
-    expect(held() ?? '').not.toMatch(/Waiting/);
+    expect(queued().after).toEqual([]);
     expect(buildQueue()[0].ticket.id).toBe(1);
     setPush(getTicket(1)!, null);
-    const ignoring = buildQueue(undefined, Date.now(), { ignoreMode: true }).find((c) => c.ticket.id === 1);
-    expect(ignoring?.blockedBy ?? '').not.toMatch(/Waiting/);
+    setPrioritised(getTicket(1)!, true);
+    expect(queued().after).toEqual([]);
+    setPrioritised(getTicket(1)!, false);
+    run('UPDATE repos SET priority = 0 WHERE id = ?', api);
+    expect(queued().after).toEqual([]);
   });
 
   it('ignores tickets by other authors and in disabled repos', () => {
     const t = apiTicket([], { author: 'stranger' });
-    expect(held() ?? '').not.toMatch(/Waiting/);
+    expect(queued().after).toEqual([]);
     run('UPDATE tickets SET author = ? WHERE id = ?', 'me', t);
     run('UPDATE repos SET enabled = 0 WHERE id = ?', api);
-    expect(held() ?? '').not.toMatch(/Waiting/);
+    expect(queued().after).toEqual([]);
   });
 });
 
@@ -3148,11 +3175,11 @@ describe('manual priority', () => {
     expect(queued()?.blockedBy).toBe('Workshop is paused');
   });
 
-  it('is not held back by higher-priority repos waiting to be classified', () => {
+  it('goes ahead of higher-priority repos waiting to be classified', () => {
     other(api, []);
-    expect(queued()?.blockedBy).toBe('Waiting for me/api to be classified first');
+    expect(queued()?.after).toEqual(['me/api']);
     setPrioritised(ticket(), true);
-    expect(queued()?.blockedBy ?? '').not.toMatch(/Waiting/);
+    expect(queued()?.after).toEqual([]);
     expect(buildQueue()[0].ticket.id).toBe(1);
   });
 
@@ -3224,13 +3251,13 @@ describe('implicit priority', () => {
     expect(queued(1).prioritisedFor).toEqual([]);
   });
 
-  it('follows chains and blockers in other repositories, and lifts the repository priority gate', () => {
-    add(api, 9, []); // unclassified, so it holds back the lower-priority me/app
-    expect(queued(1).blockedBy).toBe('Waiting for Me/Api to be classified first');
+  it('follows chains and blockers in other repositories, and goes ahead of higher-priority repositories', () => {
+    add(api, 9, []); // the higher-priority Me/Api goes first
+    expect(queued(1).after).toEqual(['Me/Api']);
     const c = add(api, 21, [label.stage('design'), label.size('s')], ['me/app#3']);
     const b = add(1, 20, [label.stage('design'), label.size('s')], ['me/api#21']);
     setPrioritised(getTicket(b)!, true);
-    expect(queued(1).blockedBy ?? '').not.toMatch(/Waiting/);
+    expect(queued(1).after).toEqual([]);
     expect(queued(1).prioritisedFor).toEqual(['#20']);
     expect(ticketView(getTicket(c)!, getRepo(api)!).prioritisedFor).toEqual([{ ref: 'me/app#20', ticketId: b }]);
     expect(ticketView(getTicket(b)!, getRepo(1)!).dependsOn).toEqual([{ ref: 'me/api#21', ticketId: c }]);
