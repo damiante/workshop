@@ -59,14 +59,15 @@ export async function syncRepo(repo: RepoRow) {
   if (changed.length) publish('tickets');
 }
 
-/** Held tickets re-read per repo per sync, beyond those whose blockers look closed or that you prioritised. */
+/** Held tickets re-read per repo per sync, beyond those you prioritised or pushed. */
 export const HELD_CHECKS_PER_SYNC = 100;
 
 /**
  * Open blockers decide whether a ticket is held. The list's count says which tickets not yet held need a look;
  * those are all read, so nothing blocked gets launched. Held tickets are re-read because closing a blocker may not
- * touch their update time, but there can be thousands, so each sync reads first the ones you prioritised or pushed,
- * then those with a blocker Workshop has seen close, then up to HELD_CHECKS_PER_SYNC more, least recently read first.
+ * touch their update time, but there can be thousands, so each sync reads first every ticket you prioritised or
+ * pushed, then up to HELD_CHECKS_PER_SYNC more: those with a blocker Workshop has seen close, then the least recently
+ * read. The cap matters when many blockers close at once: reads are one at a time, and the scheduler waits for them.
  * A failure for one ticket keeps its stored hold; a rate limit ends the round. Returns false when GitHub's rate limit
  * stopped it before every newly blocked ticket was read, so the next sync lists them again.
  */
@@ -88,8 +89,11 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
     repo.id,
   );
   const graph = priorityGraph();
-  const urgent = held.filter((t) => t.prioritised || t.push || graph.prioritisedFor(t, repo).length || looksFree(t));
-  const targets = [...fresh, ...urgent, ...held.filter((t) => !urgent.includes(t)).slice(0, HELD_CHECKS_PER_SYNC)];
+  const isYours = (t: TicketRow) => t.prioritised || t.push || graph.prioritisedFor(t, repo).length > 0;
+  const yours = held.filter(isYours);
+  const rest = held.filter((t) => !isYours(t));
+  const capped = [...rest.filter(looksFree), ...rest.filter((t) => !looksFree(t))].slice(0, HELD_CHECKS_PER_SYNC);
+  const targets = [...yours, ...fresh, ...capped];
   for (const [i, t] of targets.entries()) {
     try {
       const links = await source.blockers(ref, t.number);
@@ -98,7 +102,7 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
       run('UPDATE tickets SET blockers_checked_at = ? WHERE id = ?', Date.now(), t.id);
     } catch (err) {
       console.warn(`Couldn't read the blockers of ${repo.full_name}#${t.number}: ${(err as Error).message}`);
-      if (isRateLimited(err)) return i >= fresh.length;
+      if (isRateLimited(err)) return i >= yours.length + fresh.length;
     }
   }
   return true;

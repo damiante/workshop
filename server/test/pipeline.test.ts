@@ -2351,6 +2351,18 @@ describe('sync', () => {
         expect(holdOf(1148)).toBe('[]');
       });
 
+      it('caps the tickets whose blocker closed, after every ticket you prioritised or pushed', async () => {
+        // Many blockers closing at once (gate tickets) used to make one sync read every held ticket.
+        add(950, '[]', 'closed');
+        run(`UPDATE tickets SET blocked_by = '["#950"]' WHERE number >= 1000`);
+        run('UPDATE tickets SET prioritised = 1, blockers_checked_at = 9 WHERE number = 1149');
+        run(`UPDATE tickets SET push = 'stage', blockers_checked_at = 9 WHERE number = 1148`);
+        fake.tickets.blockers = vi.fn(async () => []);
+        await syncRepo(repo());
+        expect(checked()).toHaveLength(HELD_CHECKS_PER_SYNC + 2);
+        expect(checked().slice(0, 2).sort()).toEqual([1148, 1149]);
+      });
+
       it('stops the round at a rate limit, keeping what it read', async () => {
         const limited = Object.assign(new Error('API rate limit exceeded'), { status: 403, response: { headers: { 'x-ratelimit-remaining': '0' } } });
         let calls = 0;

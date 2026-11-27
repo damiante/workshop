@@ -84,8 +84,10 @@ export async function tick() {
     await checkHosts();
     reattachRuns();
     // What's already known to be ready starts first, so a slow or rate-limited GitHub sync can't leave hosts idle.
-    const early = buildQueue(getSettings(), Date.now()).find((c) => !c.blockedBy);
-    if (early) startCandidate(early);
+    const early = buildQueue(getSettings(), Date.now());
+    const ready = early.find((c) => !c.blockedBy);
+    if (ready) startCandidate(ready);
+    probeStale(early); // before the sync too, so a long one doesn't leave readings stale and launches waiting
     await syncRepos();
     settleManual();
     const s = getSettings();
@@ -95,7 +97,7 @@ export async function tick() {
     const queue = buildQueue(s, now);
     const next = queue.find((c) => !c.blockedBy);
     if (next) startCandidate(next);
-    for (const c of queue) if (c.blockedBy === 'Checking allowance' && c.modelConnectionId) void probeAllowance(c.modelConnectionId).catch(() => {});
+    probeStale(queue);
     if (now - lastCleanup > 24 * 3600_000) {
       lastCleanup = now;
       await cleanup(s);
@@ -116,6 +118,11 @@ export async function tick() {
       kick();
     }
   }
+}
+
+/** Re-reads the allowance of subscriptions that hold a launch back for want of a recent reading. */
+function probeStale(queue: Candidate[]) {
+  for (const c of queue) if (c.blockedBy === 'Checking allowance' && c.modelConnectionId) void probeAllowance(c.modelConnectionId).catch(() => {});
 }
 
 export function hostLoads(): (HostLoad & { name: string; specs: string | null })[] {
