@@ -417,12 +417,31 @@ describe('usage and launch', () => {
     expect(res.body).toMatchObject({ apiRunCapUsd: s.apiRunCapUsd, apiDailyCapUsd: s.apiDailyCapUsd });
   });
 
-  it('accepts a refresh, which a read token may not ask for', async () => {
-    const res = await request(app).post('/api/refresh').set('cookie', cookie);
-    expect(res.status).toBe(202);
-    expect(res.body).toEqual({ ok: true });
+  const progressShape = {
+    state: expect.stringMatching(/^(idle|requested|waiting|running)$/),
+    kind: expect.stringMatching(/^(sync|refresh|scheduled)$/),
+    done: expect.any(Number),
+    total: expect.any(Number),
+  };
+
+  it('reports the sync progress', async () => {
+    const res = await request(app).get('/api/sync').set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(['done', 'kind', 'lastError', 'lastFinishedAt', 'phase', 'repo', 'requestedAt', 'state', 'total']);
+    expect(res.body).toMatchObject(progressShape);
+  });
+
+  it('accepts a sync and a refresh, which a read token may not ask for, and answers with the progress', async () => {
+    for (const path of ['/api/sync', '/api/refresh']) {
+      const res = await request(app).post(path).set('cookie', cookie);
+      expect(res.status).toBe(202);
+      expect(res.body).toMatchObject(progressShape);
+      expect(res.body.requestedAt).toEqual(expect.any(Number));
+    }
     const token = (await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'refresh', scope: 'read' })).body.token;
     expect((await request(app).post('/api/refresh').set('authorization', `Bearer ${token}`)).status).toBe(403);
+    expect((await request(app).post('/api/sync').set('authorization', `Bearer ${token}`)).status).toBe(403);
+    expect((await request(app).get('/api/sync').set('authorization', `Bearer ${token}`)).status).toBe(200);
   });
 
   it('refuses to launch what cannot run', async () => {

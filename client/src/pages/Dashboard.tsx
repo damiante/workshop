@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import type { ConnectionView, Overview, RepoView, RunView, Settings, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi, useNow } from '../api.ts';
+import { SyncButton } from '../components/SyncButton.tsx';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, runStatus } from '../format.ts';
 
@@ -98,22 +99,15 @@ export function Dashboard() {
   const { data: settings } = useApi<Settings>('/settings', ['settings']);
   const now = useNow();
   const [showDismissed, setShowDismissed] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   if (!data) return <ErrorNote error={error} />;
 
   const steps = setupSteps(connections ?? [], repos ?? [], settings, data);
   const waiting = data.queue.find((q) => q.blockedBy);
-  const refresh = () => {
-    setRefreshing(true);
-    api('/refresh', { body: {} }).finally(() => setTimeout(() => setRefreshing(false), 1500));
-  };
   return (
     <div className="stack">
       <div className="spread">
         <h1>Dashboard</h1>
-        <button onClick={refresh} disabled={refreshing} title="Sync tickets, check Claude usage and start or resume what's ready, without waiting for the next check">
-          {refreshing ? 'Checking…' : 'Refresh'}
-        </button>
+        <SyncButton action="/refresh" label="Refresh" title="Sync tickets, check Claude usage and start or resume what's ready, without waiting for the next check" />
       </div>
       {steps.length > 0 && (
         <Panel title="Finish setting up">

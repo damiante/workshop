@@ -26,7 +26,7 @@ const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { checkRaiseRate, connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
-const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, syncSoon, tick } = await import('../src/scheduler/loop.ts');
+const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resetSyncProgress, resumeNow, resumePaused, settleManual, syncProgress, syncSoon, tick } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf } = await import('../src/tickets.ts');
 const { checkingBlockers, syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
@@ -2193,6 +2193,121 @@ describe('allocation', () => {
     expect(second).toBe(first);
     expect(await second).toEqual(await first);
     expect(fake.env.started.filter((spec: StepSpec) => spec.cmd[0] === 'usage-probe')).toHaveLength(1);
+  });
+});
+
+describe('sync progress', () => {
+  type Progress = ReturnType<typeof syncProgress>;
+  let seen: Progress[] = [];
+  const record = (t: string) => t === 'sync' && seen.push(syncProgress());
+  let release = () => {};
+  let gate = Promise.resolve();
+  let mode: ReturnType<typeof getSettings>['mode'] = 'paused';
+
+  beforeEach(() => {
+    mode = getSettings().mode;
+    saveSettings({ mode: 'paused' }); // nothing launches: only the sync is under test
+    const r = getRepo(1)!;
+    run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled) VALUES (?, ?, 'me/other', 'main', 'u', 1)", r.vcs_connection_id, r.ticket_connection_id);
+    gate = new Promise<void>((done) => (release = done));
+    fake.tickets.listChanged = async () => [];
+    resetSyncProgress();
+    seen = [];
+    bus.on('topic', record);
+  });
+  afterEach(async () => {
+    release();
+    bus.off('topic', record);
+    await syncSoon(); // nothing left running when the fakes change
+    run("DELETE FROM repos WHERE full_name = 'me/other'");
+    saveSettings({ mode });
+  });
+
+  it('steps from requested through each repository to idle', async () => {
+    const before = Date.now();
+    await syncSoon();
+    expect(seen[0]).toMatchObject({ state: 'requested', kind: 'sync' });
+    const syncing = seen.filter((p) => p.state === 'running' && p.phase === 'sync');
+    expect(syncing.every((p) => p.total === 2 && p.kind === 'sync')).toBe(true);
+    expect([...new Set(syncing.map((p) => p.done))]).toEqual([0, 1, 2]);
+    expect(syncing.map((p) => p.repo)).toEqual(expect.arrayContaining(['me/app', 'me/other']));
+    expect(seen.at(-1)).toMatchObject({ state: 'idle', kind: 'sync', phase: null, lastError: null });
+    expect(seen.at(-1)!.lastFinishedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it('shows a request made during a running pass as waiting, then runs it', async () => {
+    let listed = 0;
+    fake.tickets.listChanged = async () => {
+      listed++;
+      await gate;
+      return [];
+    };
+    const first = syncSoon();
+    await vi.waitFor(() => expect(listed).toBe(1));
+    expect(syncProgress()).toMatchObject({ state: 'running', repo: 'me/app' });
+    void syncSoon();
+    expect(syncProgress()).toMatchObject({ state: 'waiting', kind: 'sync' });
+    seen = [];
+    release();
+    await first;
+    expect(listed).toBe(3); // me/other was read after the click, so only me/app runs again
+    const states = seen.map((p) => p.state).filter((s, i, a) => s !== a[i - 1]);
+    expect(states).toEqual(['waiting', 'running', 'idle']);
+  });
+
+  it('goes through the sync, the usage checks and starting work on Refresh, and resolves after its sync', async () => {
+    run('DELETE FROM allowance_samples');
+    forgetProbe(ids.model);
+    fake.env = new FakeEnv({ usage: [RATE, result({})] });
+    let listed = 0;
+    fake.tickets.listChanged = async () => {
+      listed++;
+      await gate;
+      return [];
+    };
+    let done = false;
+    const refresh = refreshNow().then(() => (done = true));
+    expect(refreshNow()).toBe(refreshNow()); // a second Refresh joins the first
+    await vi.waitFor(() => expect(listed).toBe(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(done).toBe(false);
+    expect(syncProgress()).toMatchObject({ state: 'running', kind: 'refresh', phase: 'sync' });
+    release();
+    await refresh;
+    expect(fake.env.started.filter((spec: StepSpec) => spec.cmd[0] === 'usage-probe')).toHaveLength(1);
+    const phases = seen.map((p) => p.phase).filter((p, i, a) => p !== a[i - 1]);
+    expect(phases).toEqual([null, 'sync', 'usage', 'allocate', null]);
+    const usage = seen.filter((p) => p.phase === 'usage');
+    expect(usage.every((p) => p.total === 1)).toBe(true);
+    expect(usage.at(-1)!.done).toBe(1);
+    expect(seen.every((p) => p.kind === 'refresh')).toBe(true);
+    expect(seen.at(-1)).toMatchObject({ state: 'idle', kind: 'refresh' });
+  });
+
+  it('records a failing repository and still finishes', async () => {
+    const other = one<{ id: number }>("SELECT id FROM repos WHERE full_name = 'me/other'")!.id;
+    const synced: string[] = [];
+    fake.tickets.listChanged = async (r: { fullName: string }) => {
+      if (r.fullName === 'me/app') throw new Error('Bad credentials');
+      synced.push(r.fullName);
+      return [];
+    };
+    await syncSoon();
+    expect(synced).toEqual(['me/other']);
+    expect(seen.filter((p) => p.state === 'running').at(-1)).toMatchObject({ done: 2, total: 2 });
+    expect(syncProgress()).toMatchObject({ state: 'idle', lastError: "Couldn't sync me/app: Bad credentials" });
+    expect(one('SELECT id FROM alerts WHERE kind = ? AND ref = ?', 'sync-failed', `repo:${other}`)).toBeUndefined();
+    run("DELETE FROM alerts WHERE kind = 'sync-failed'");
+  });
+
+  it('leaves the record alone on a tick with nothing due', async () => {
+    await syncSoon();
+    const last = syncProgress().lastFinishedAt;
+    seen = [];
+    await tick();
+    await new Promise((r) => setTimeout(r, 20)); // the tick's sync runs in the background
+    expect(seen).toEqual([]);
+    expect(syncProgress().lastFinishedAt).toBe(last);
   });
 });
 

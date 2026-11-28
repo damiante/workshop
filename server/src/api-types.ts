@@ -1,6 +1,6 @@
 // Types shared with the client (imported type-only). Keep this file free of runtime imports.
 
-export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media';
+export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media' | 'sync';
 
 export type Mode = 'paused' | 'scheduled' | 'always';
 
@@ -575,4 +575,21 @@ export interface LoginResponse {
   ok?: boolean;
   /** First sign-in: scan this with an authenticator app, then sign in again with a code. */
   enroll?: { secret: string; uri: string };
+}
+
+/** GET /api/sync: what the GitHub sync is doing (scheduled, Sync now or Refresh). In memory, so it resets on restart. */
+export interface SyncProgress {
+  /** requested: a click was received. waiting: queued behind the pass that's running. */
+  state: 'idle' | 'requested' | 'waiting' | 'running';
+  kind: 'sync' | 'refresh' | 'scheduled';
+  /** sync: done/total count repositories. usage (Refresh only): allowance checks. allocate (Refresh only): starting work. */
+  phase: 'sync' | 'usage' | 'allocate' | null;
+  /** The repository being synced. */
+  repo: string | null;
+  done: number;
+  total: number;
+  requestedAt: number | null;
+  lastFinishedAt: number | null;
+  /** The sync failures of the last pass, if any. */
+  lastError: string | null;
 }

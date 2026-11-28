@@ -23,7 +23,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
 | `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`, and the code review's routing `stageForRework` and formatters), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |
-| `src/scheduler/loop.ts` | Two serialised passes: allocation (re-attach, settle hand pushes, resume paused runs, the queue, fill every free slot, usage probe, clock topics) runs on every `kick()`; sync (GitHub sync, API merges, then allocation) runs on the 60-second tick, which also checks hosts and cleans up |
+| `src/scheduler/loop.ts` | Two serialised passes: allocation (re-attach, settle hand pushes, resume paused runs, the queue, fill every free slot, usage probe, clock topics) runs on every `kick()`; sync (GitHub sync, API merges, then allocation) runs on the 60-second tick, which also checks hosts and cleans up. Keeps the in-memory `sync` progress record (`syncProgress`) for scheduled syncs, Sync now and Refresh |
 | `src/media.ts` | The per-ticket media store (`DATA_DIR/media/<ticket id>/` plus the `media` table): downloads issue images, copies agent screenshots back, delivers the folder to runs, deletes it on finish and in the 30-day sweep |
 | `src/workflow/media.ts` | Pure media rules: allowed hosts, image sniffing, name and size checks, link rewriting, the PR's Screenshots line |
 | `src/scheduler/runner.ts` | Run lifecycle (`launch`, `drive`, `resume`, `fail`, `stopRun`) |

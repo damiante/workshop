@@ -576,6 +576,43 @@ input[type='checkbox'] {
   background: var(--text);
 }
 
+/* Sync now and Refresh: what the sync is doing, next to the button */
+.sync-control {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+.sync-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.sync-row .meter {
+  min-width: 14rem;
+  grid-template-columns: auto 100px;
+}
+.sync-row .meter > span:last-child:empty {
+  display: none;
+}
+.sync-control .notice {
+  margin: 0;
+}
+@media (max-width: 760px) {
+  .sync-control,
+  .sync-row {
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+  .sync-row .meter {
+    min-width: 0;
+    grid-template-columns: 1fr 80px;
+  }
+}
+
 /* Run progress: label, bar and figures in aligned columns */
 
 .progress {
