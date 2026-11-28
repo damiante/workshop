@@ -129,6 +129,11 @@ export interface ClaudeRun {
   boundary?: boolean;
   /** Ids of the background tasks (commands, subagents) the latest `background_tasks_changed` listed as still running. */
   backgroundTasks?: string[];
+  /**
+   * True once another turn has started after the latest result (a background task finishing wakes the agent),
+   * until that turn reports. The result still stands if none follows, but the session isn't done.
+   */
+  superseded?: boolean;
 }
 
 type Block = { type: string; id?: string; tool_use_id?: string; text?: string; name?: string; input?: Record<string, unknown> };
@@ -194,13 +199,17 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
   const content: Block[] = Array.isArray(event.message?.content) ? event.message.content : [];
   switch (event.type) {
     case 'system':
-      if (event.subtype === 'init') run.sessionId = event.session_id;
+      if (event.subtype === 'init') {
+        run.sessionId = event.session_id;
+        if (run.result) run.superseded = true;
+      }
       if (event.subtype === 'api_retry') run.apiError = event.error;
       if (event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks)) run.backgroundTasks = event.tasks.map((t: { task_id?: string }) => String(t?.task_id));
       break;
     case 'assistant':
       // A request that failed outright (e.g. "Not logged in") arrives as an assistant message with `error`.
       if (event.error) run.apiError = event.error;
+      if (topLevel && run.result) run.superseded = true;
       // Subagents' responses too: they are usage like any other.
       if (event.message) countResponse(run, event.message, content);
       for (const block of content) {
@@ -232,6 +241,7 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
       // `usage` counts the agent's own turns; `modelUsage` adds what the session spent besides (subagents,
       // compaction), and is what `total_cost_usd` is the price of.
       const totals = modelTotals(event.modelUsage);
+      run.superseded = false;
       run.result = {
         subtype: event.subtype,
         isError: Boolean(event.is_error) && reported === undefined,
