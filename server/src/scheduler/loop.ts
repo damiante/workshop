@@ -520,9 +520,10 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
   // fits a free slot, so a higher repo's ticket wins a slot it can use and leaves the rest to others.
   const queued = out.map((c) => ({ repo: c.repo.full_name, priority: c.repoPriority }));
   for (const c of out) if (!c.pushed && !c.boosted) c.after = priorityAhead(c.repoPriority, queued);
-  // Pushed, prioritised, then tickets more open work waits on. The sort is stable, so the ticket
-  // order setting (from the query) decides ties.
-  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.unblocks - a.unblocks || b.repoPriority - a.repoPriority || a.priority - b.priority);
+  // Pushed, prioritised, repository priority, then tickets more open work waits on, then step. So
+  // within a repo the dependency graph decides, and across repos repository priority wins. The sort
+  // is stable, so the ticket order setting (from the query) decides ties.
+  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.repoPriority - a.repoPriority || b.unblocks - a.unblocks || a.priority - b.priority);
 }
 
 export function queueView(): QueueItem[] {

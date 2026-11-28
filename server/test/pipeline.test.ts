@@ -3779,9 +3779,51 @@ describe('repository priority', () => {
   });
   afterEach(() => {
     run('DELETE FROM runs');
-    run('DELETE FROM tickets WHERE repo_id = ? OR number = 4', api);
+    run('DELETE FROM tickets WHERE repo_id = ? OR number = 4 OR number BETWEEN 40 AND 49', api);
     run('DELETE FROM repos WHERE id = ?', api);
     configure({});
+  });
+
+  describe('against tickets other work waits on', () => {
+    const implement = [label.size('s'), label.stage('implement')];
+    /** `count` open tickets in me/app, numbered from 40, that wait on `ref`. */
+    const waitOn = (ref: string, count: number) => {
+      for (let i = 0; i < count; i++) {
+        run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (1, ?, 'App', '', 'u', 'me', 'open', ?, ?, '2026-10-13T00:00:00Z')", 40 + i, JSON.stringify(implement), JSON.stringify([ref]));
+      }
+    };
+    beforeEach(() => {
+      run('UPDATE repos SET priority = 99 WHERE id = ?', api);
+      run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(implement));
+      waitOn('#3', 3);
+    });
+
+    it("puts a higher-priority repo's ticket ahead of a lower repo's ticket that more work waits on", () => {
+      const high = apiTicket(implement);
+      expect(queued(high)).toMatchObject({ unblocks: 0, size: 'standard', blockedBy: null });
+      expect(queued()).toMatchObject({ unblocks: 3, size: 'standard', blockedBy: null, after: ['me/api'] });
+      expect(buildQueue()[0].ticket.id).toBe(high);
+      expect(next()?.ticket.id).toBe(high); // the only free standard slot
+    });
+
+    it('still lets the dependency graph order tickets within a repo', () => {
+      const plain = apiTicket(implement, { number: 8 });
+      const needed = apiTicket(implement, { number: 9 });
+      run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (?, 10, 'Api', '', 'u', 'me', 'open', ?, ?, '2026-10-13T00:00:00Z')", api, JSON.stringify(implement), JSON.stringify(['#9']));
+      const order = buildQueue().filter((c) => !c.blockedBy?.startsWith('Depends on')).map((c) => c.ticket.id);
+      expect(order.slice(0, 3)).toEqual([needed, plain, 1]);
+    });
+
+    it('still puts a prioritised ticket in the lower repo, and what it waits on, first, and a pushed ticket ahead of both', () => {
+      const high = apiTicket(implement);
+      const wanted = one<{ id: number }>('SELECT id FROM tickets WHERE repo_id = 1 AND number = 40')!.id;
+      setPrioritised(getTicket(wanted)!, true);
+      expect(queued(wanted).blockedBy).toBe('Depends on #3');
+      expect(queued()).toMatchObject({ prioritisedFor: ['#40'], after: [] });
+      expect(next()?.ticket.id).toBe(1);
+      setPush(getTicket(high)!, 'stage');
+      expect(buildQueue()[0].ticket.id).toBe(high);
+    });
   });
 
   it("orders a lower-priority repo after a higher one's unclassified tickets without holding it", () => {
