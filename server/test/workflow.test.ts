@@ -890,6 +890,12 @@ describe('code review', () => {
       expect(DEFAULT_PROMPTS['code-review']).toContain("When in doubt, it isn't severe");
     });
 
+    it('tells every agent not to leave background commands running', () => {
+      for (const publishes of [true, false]) {
+        expect(protocolText({ branch: 'b', base: 'main', publishes })).toContain('make sure no background commands you started are still running');
+      }
+    });
+
     it("doesn't tell the reviewer that Workshop pushes its commits", () => {
       expect(protocolText({ branch: 'b', base: 'main' })).toContain('Workshop pushes it');
       const reviewer = protocolText({ branch: 'b', base: 'main', publishes: false });

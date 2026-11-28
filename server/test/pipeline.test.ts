@@ -25,7 +25,7 @@ const { createConnection, reorderConnections, setConnectionPaused, setConnection
 const { bus, publish } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
-const { checkRaiseRate, connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
+const { checkRaiseRate, connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, RESULT_GRACE_MS, resume, stopRun } = await import('../src/scheduler/runner.ts');
 const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, syncSoon, tick } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf, priorityGraph } = await import('../src/tickets.ts');
 const { checkingBlockers, syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
@@ -901,6 +901,27 @@ describe('runner', () => {
       stream.end();
       expect(await settle(id)).toMatchObject({ status: 'succeeded', pause_requested_at: null });
       expect(stream.killed).toBe(false);
+    });
+
+    it('stops a container that stays up after a successful result, and publishes as normal', async () => {
+      const { stream, say } = live();
+      const id = go();
+      await say(toolUse('a'), toolResult('a'));
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        await say(DONE); // a background command keeps claude -p, and the container, alive
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS - 1000);
+        expect(stream.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(stream.killed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+      const r = await settle(id);
+      expect(r).toMatchObject({ status: 'succeeded', summary: 'Done.' });
+      expect(fake.env.spec('publish')).toBeDefined();
+      expect(all("SELECT id FROM alerts WHERE kind = 'container-killed'")).toHaveLength(0);
+      expect(readLog(id).map((e) => e.text)).toContain('Workshop stopped the container: the agent had returned its result, but something it started was still running.');
     });
 
     it('honours a request made while the run is starting at the first boundary of the run step', async () => {

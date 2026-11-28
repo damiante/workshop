@@ -72,6 +72,11 @@ function splitRule(t: TicketRow, mode: 'normal' | 'delta'): SplitRule {
 const USAGE_RECORD_MS = 30_000;
 /** How long a run over its subscription's limits may wait for its open tool calls (a long subagent) before it's stopped anyway. */
 export const PAUSE_GRACE_MS = 10 * 60_000;
+/**
+ * How long the run container may stay up after the agent returns its result. `claude -p` doesn't exit while
+ * background commands it started are alive, and the result is all Workshop needs, so it then stops the container.
+ */
+export const RESULT_GRACE_MS = 5_000;
 const driving = new Set<string>();
 export const isDriving = (id: string) => driving.has(id);
 /** Running agents' "a pause was just requested" callbacks, so a request acts at once when the agent is between turns. */
@@ -441,6 +446,8 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   // Set while this segment continues a session another subscription started, until its first turn boundary.
   let switched = r.switched_from !== null;
   let trailing: NodeJS.Timeout | undefined;
+  // Stops the container once the result is in and the rest of the output has had time to flush.
+  let lingering: NodeJS.Timeout | undefined;
   // A new session records the limits it starts with; a re-attach keeps the ones it has.
   if (!(r.step === 'run' && r.container_id)) {
     setRun(r.id, { max_turns: agent.max_turns, timeout_min: agent.timeout_min });
@@ -480,6 +487,13 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
         trailing = undefined;
         lastPublished = Date.now();
         publish('runs');
+        // Also after a re-attach: a container that never exited is still holding the slot.
+        lingering = setTimeout(() => {
+          const id = getRun(r.id)?.container_id;
+          if (!id) return;
+          appendLog(r.id, { step: 'workshop', stream: 'stdout', text: 'Workshop stopped the container: the agent had returned its result, but something it started was still running.' });
+          void ctx.env.kill(id).catch(() => {});
+        }, RESULT_GRACE_MS);
       } else if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
         // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
@@ -501,6 +515,7 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   // Record what the run reported even if the container failed.
   const state = await running.finally(() => {
     clearTimeout(grace);
+    clearTimeout(lingering);
     pauseSignals.delete(r.id);
     recordUsage();
   });
