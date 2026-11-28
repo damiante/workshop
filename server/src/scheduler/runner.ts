@@ -512,8 +512,9 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
       }
       // Once the result is in and nothing the agent started is still running, stop the container: `claude -p`
       // would otherwise wait on it. While a task is listed, a later result may replace this one, so wait.
-      // Also after a re-attach: a container that never exited is still holding the slot.
-      if (claude.result && !claude.backgroundTasks?.length) {
+      // Also after a re-attach: a container that never exited is still holding the slot. Once a new turn starts
+      // after the result, wait for that turn's own result: stopping it mid-way would publish the stale one.
+      if (claude.result && !claude.superseded && !claude.backgroundTasks?.length) {
         lingering ??= setTimeout(() => {
           const id = getRun(r.id)?.container_id;
           if (!id) return;

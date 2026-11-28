@@ -24,7 +24,7 @@ const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, getConnection, reorderConnections, setBurndown, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
 const { bus, publish } = await import('../src/events.ts');
-const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
+const { activity, appendLog, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { checkRaiseRate, connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, RESULT_GRACE_MS, resume, stopRun } = await import('../src/scheduler/runner.ts');
 const { allocate, allocatePass, buildQueue, cancelKicks, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, probeIdle, queueView, reattachRuns, refreshNow, resetSyncProgress, resumeNow, resumePaused, settleManual, syncProgress, syncSoon, tick } = await import('../src/scheduler/loop.ts');
@@ -1054,6 +1054,71 @@ describe('runner', () => {
         vi.useRealTimers();
       }
       expect(await settle(id)).toMatchObject({ status: 'succeeded', summary: 'Done.' });
+    });
+
+    it("doesn't stop the turn a finished background task wakes, and stops the container after that turn's result", async () => {
+      const { stream, say } = live();
+      const id = go();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        await say(tasks('bg1'), DONE);
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS * 2);
+        // The background npm test fails: the empty list and the new turn arrive together.
+        await say(tasks(), line({ type: 'system', subtype: 'init', session_id: 's' }));
+        await vi.advanceTimersByTimeAsync(1000);
+        await say(toolUse('fix'));
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS * 10);
+        expect(stream.killed).toBe(false);
+        await say(toolResult('fix'), result({ outcome: 'done', summary: 'Fixed the failing test.' }));
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS - 1000);
+        expect(stream.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(stream.killed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(await settle(id)).toMatchObject({ status: 'succeeded', summary: 'Fixed the failing test.' });
+      expect(readLog(id).map((e) => e.text)).toContain(STOPPED);
+    });
+
+    it('publishes the last result when the container exits during the woken turn without another', async () => {
+      const { stream, say } = live();
+      const id = go();
+      await say(tasks('bg1'), DONE, tasks(), line({ type: 'system', subtype: 'init', session_id: 's' }), toolUse('b'));
+      stream.end();
+      expect(await settle(id)).toMatchObject({ status: 'succeeded', summary: 'Done.' });
+      expect(stream.killed).toBe(false);
+    });
+
+    it('stops a re-attached container whose log already ends with a result and no background tasks', async () => {
+      const { env, stream } = live();
+      env.inspect = async () => ({ running: true, exitCode: 0, oomKilled: false });
+      const id = 'reattach-result';
+      run(
+        `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, step, container_id, volume, image, max_turns, timeout_min, step_started_at, started_at)
+         VALUES (?, 1, 'implement', 'normal', 1, ?, ?, 'claude-sonnet-5-5', 'subscription', 'running', 'run', 'run-container-old', 'v', 'img', 300, 60, ?, ?)`,
+        id,
+        ids.env,
+        ids.model,
+        Date.now() - 60_000,
+        Date.now() - 2 * 60_000,
+      );
+      for (const text of [tasks('bg1'), DONE, tasks()]) appendLog(id, { step: 'run', stream: 'stdout', text, container: 'run-containe' });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      let driven: Promise<unknown>;
+      try {
+        driven = drive(id);
+        await vi.waitFor(() => expect(stream.emit).not.toBeNull());
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS - 1000);
+        expect(stream.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(stream.killed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+      await driven;
+      expect(readLog(id).map((e) => e.text)).toContain(STOPPED);
+      expect(getRun(id)).toMatchObject({ status: 'succeeded', summary: 'Done.' });
     });
 
     it("stops a container that stays up after an error result, and reports the agent's own error", async () => {
