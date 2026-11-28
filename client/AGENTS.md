@@ -16,7 +16,7 @@ The Workshop UI: React 19, React Router 8, Vite. Plain CSS with custom propertie
 | `src/sync.ts` | Pure: `syncStatus()`, the text and bar the Sync now and Refresh buttons show for the server's sync progress. Tested in `test/` |
 | `src/markdown.ts` | Pure parser: the Markdown subset agents write → block and inline tree. Tested in `test/` |
 | `src/components/` | `Markdown` (renders that tree as React elements, never raw HTML), `Layout` (sidebar, mode switch, allowance meters), `ui.tsx` (`Status`, `Meter`, `Modal`, `Panel`, `ErrorNote`), `ThemeToggle`, `Chart`, `SyncButton` (Sync now and Refresh, following `/api/sync` on the `sync` topic) with its presentational `SyncControl` (hand-drawn SVG stacked columns and line chart, with legend and tooltips) |
-| `src/pages/` | Login, Dashboard, Tickets, Runs, RunView, Usage (charts, projections and lifetime tables), Connections, Agents, Settings, Alerts, Ticket (a ticket's lifecycle, `tickets/:id`), Media (a ticket's screenshots, `tickets/:id/media`) |
+| `src/pages/` | Login, Dashboard, Tickets, Runs, RunView, Usage (charts, projections and lifetime tables), Connections, Agents, Settings, Alerts, TicketTotals (every ticket agents have worked on, finished ones included, with its totals, `tickets/all`), Ticket (a ticket's lifecycle, `tickets/:id`), Media (a ticket's screenshots, `tickets/:id/media`) |
 | `src/theme.css` | Every colour, size and component style |
 
 ## Data flow

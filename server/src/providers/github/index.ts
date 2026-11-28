@@ -548,6 +548,14 @@ export class GitHubApp implements VcsHost, TicketSource {
     return { ahead: data.ahead_by, behind: data.behind_by, subjects: data.commits.map((c) => c.commit.message.split('\n')[0]) };
   }
 
+  /** Files and lines changed on `head` since it left `base`. Counts the first 300 files. */
+  async diffStats(repo: RepoRef, base: string, head: string) {
+    const kit = await this.kit(repo);
+    const { data } = await kit.request('GET /repos/{owner}/{repo}/compare/{basehead}', { ...split(repo), basehead: `${base}...${head}`, per_page: 1 });
+    const files = data.files ?? [];
+    return { files: files.length, additions: files.reduce((n, f) => n + f.additions, 0), deletions: files.reduce((n, f) => n + f.deletions, 0) };
+  }
+
   async mergeDefaultInto(repo: RepoRef, branch: string) {
     const kit = await this.kit(repo);
     try {

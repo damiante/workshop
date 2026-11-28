@@ -8,6 +8,7 @@ import { ErrorNote, Panel, Progress, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, money, runStatus, tokens } from '../format.ts';
 import { LiveStream } from '../live.ts';
 import { addEntry, emptyTranscript, type Item, type Transcript } from '../transcript.ts';
+import { diffText } from './TicketTotals.tsx';
 
 const ACTIVE = ['starting', 'running', 'publishing', 'paused'];
 
@@ -264,8 +265,10 @@ export function RunView() {
           Started {clock(run.startedAt)}, {active ? `running ${duration(run.startedAt, now)}` : `took ${duration(run.startedAt, run.endedAt ?? now)}`}
         </span>
         {run.attempt > 1 && <span>Attempt {run.attempt}</span>}
+        {run.turns !== null && !active && <span>{run.turns} turns</span>}
+        {run.diff && <span title="The ticket's branch against the default branch after this run's push">{diffText(run.diff)}</span>}
         {tokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0) || null) && <span>{tokens((run.inputTokens ?? 0) + (run.outputTokens ?? 0))}</span>}
-        {run.billing === 'api' && money(run.costUsd) && <span>{money(run.costUsd)}</span>}
+        {run.costUsd ? <span>{money(run.costUsd)}{run.billing === 'api' ? '' : ' at API prices'}</span> : null}
         {run.status === 'paused' && run.pauseReason === 'threshold' && <span>Resumes when usage is under your limit{run.resetsAt ? `, by ${clock(run.resetsAt)}` : ''}</span>}
         {run.status === 'paused' && (run.pauseReason ?? 'limit') === 'limit' && run.resetsAt && <span>Resumes after {clock(run.resetsAt)}</span>}
         {run.status === 'paused' && run.pauseReason === 'connection' && <span>Moving to another Claude subscription</span>}

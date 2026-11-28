@@ -156,6 +156,8 @@ export interface VcsHost {
   merge(repo: RepoRef, number: number): Promise<{ merged: boolean; message?: string }>;
   /** How `branch` stands against the default branch, with the first line of each of its own commits, oldest first. */
   branchState(repo: RepoRef, branch: string): Promise<BranchState>;
+  /** Files and lines changed on `head` since it left `base`. Optional: not every host can say. */
+  diffStats?(repo: RepoRef, base: string, head: string): Promise<{ files: number; additions: number; deletions: number }>;
   /** Merge the default branch into `branch` server-side. */
   mergeDefaultInto(repo: RepoRef, branch: string): Promise<'merged' | 'conflict'>;
   /** Put `branch`'s files on the default branch as one commit. Refused (`ok: false`) unless `branch` holds everything on the default branch. */

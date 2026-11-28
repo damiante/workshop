@@ -321,6 +321,16 @@ export const MIGRATIONS = [
   ALTER TABLE repos ADD COLUMN rework_on TEXT NOT NULL DEFAULT 'severe'; -- severe, moderate or minor: the lowest code review severity that sends a ticket back
   ALTER TABLE tickets ADD COLUMN follow_ups TEXT; -- JSON: code review findings to open as tickets once the work is pushed to the default branch
   `,
+  // What Workshop works out about a run as it goes, for the Runs page and the ticket totals.
+  `
+  CREATE TABLE IF NOT EXISTS run_stats (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    turns INTEGER,     -- over every session of the run
+    files INTEGER,     -- the ticket's branch against the default branch after the run's push
+    additions INTEGER,
+    deletions INTEGER
+  );
+  `,
 ];
 
 export let db: DatabaseSync;

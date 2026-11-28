@@ -21,6 +21,7 @@ import { RunView } from './pages/RunView.tsx';
 import { Runs } from './pages/Runs.tsx';
 import { SettingsPage } from './pages/Settings.tsx';
 import { Tickets } from './pages/Tickets.tsx';
+import { TicketTotalsPage } from './pages/TicketTotals.tsx';
 import { Usage } from './pages/Usage.tsx';
 
 applyStoredTheme();
@@ -43,6 +44,7 @@ function App() {
         <Route element={<Layout version={auth.version} />}>
           <Route index element={<Dashboard />} />
           <Route path="tickets" element={<Tickets />} />
+          <Route path="tickets/all" element={<TicketTotalsPage />} />
           <Route path="tickets/:id" element={<Ticket />} />
           <Route path="tickets/:id/media" element={<Media />} />
           <Route path="dependencies" element={<Dependencies />} />

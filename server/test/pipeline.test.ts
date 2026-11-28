@@ -2066,6 +2066,68 @@ describe('usage of a session that ends without a result', () => {
   });
 });
 
+describe('run statistics', () => {
+  it('keeps the turns each session took and what the run pushed', async () => {
+    fake.vcs.diffStats = vi.fn(async () => ({ files: 3, additions: 120, deletions: 14 }));
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [line({ type: 'result', subtype: 'success', is_error: false, num_turns: 42, structured_output: { outcome: 'done', summary: 'ok', tests: 'ok' }, usage: { input_tokens: 10, output_tokens: 5 } })],
+      publish: [line({ before: 'abc1234', after: 'def5678', ahead: 1 })],
+    });
+    const id = go();
+    await settle(id);
+    expect(fake.vcs.diffStats).toHaveBeenCalledWith(expect.anything(), 'main', 'def5678');
+    expect(runView(id)).toMatchObject({ turns: 42, diff: { files: 3, additions: 120, deletions: 14 } });
+  });
+
+  it('shrugs off a host that cannot count', async () => {
+    fake.vcs.diffStats = vi.fn(async () => {
+      throw new Error('nope');
+    });
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [result({ outcome: 'done', summary: 'ok', tests: 'ok' })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    const id = go();
+    expect((await settle(id)).status).toBe('succeeded');
+    expect(fake.vcs.diffStats).toHaveBeenCalledWith(expect.anything(), 'main', 'def5678');
+    expect(runView(id)).toMatchObject({ turns: null, diff: null });
+  });
+});
+
+describe('ticket totals', () => {
+  it("adds up a ticket's runs and takes the diff from its last push", async () => {
+    const { ticketTotals } = await import('../src/ticket-totals.ts');
+    run('DELETE FROM runs');
+    const add = (id: string, status: string, start: number, end: number | null, cost: number) =>
+      run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at, ended_at, cost_usd, input_tokens, output_tokens) VALUES (?, 1, 'implement', 1, 'm', 'subscription', ?, ?, ?, ?, 1000, 10)", id, status, start, end, cost);
+    add('one', 'failed', 1000, 61_000, 0.5);
+    add('two', 'succeeded', 100_000, 400_000, 1.25);
+    add('three', 'succeeded', 500_000, 560_000, 0.25);
+    run("INSERT INTO run_stats (run_id, turns, files, additions, deletions) VALUES ('one', 10, NULL, NULL, NULL), ('two', 40, 3, 120, 14), ('three', 5, NULL, NULL, NULL)");
+    try {
+      const [t] = ticketTotals(600_000).filter((x) => x.ticketId === 1);
+      expect(t).toMatchObject({
+        ticket: 'me/app#3',
+        runs: 3,
+        failedRuns: 1,
+        working: false,
+        agentMs: 60_000 + 300_000 + 60_000,
+        costUsd: 2,
+        tokens: 3030,
+        turns: 55,
+        firstStartedAt: 1000,
+        lastEndedAt: 560_000,
+        diff: { files: 3, additions: 120, deletions: 14 },
+      });
+    } finally {
+      run("DELETE FROM run_stats WHERE run_id IN ('one', 'two', 'three')");
+      run('DELETE FROM runs');
+    }
+  });
+});
+
 describe('launchNow', () => {
   const script = () => ({ prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'Done.', tests: 'ok' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
 

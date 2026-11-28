@@ -103,6 +103,8 @@ export interface ClaudeRun {
     costUsd?: number;
     inputTokens?: number;
     outputTokens?: number;
+    /** How many turns the session took, by Claude's own count. */
+    turns?: number;
   };
   /**
    * Tokens used so far, added up from each API response as it arrives, for a session that ends without a result
@@ -110,6 +112,8 @@ export interface ClaudeRun {
    * agent wrote, because a response's own output count isn't final when it is printed.
    */
   spent?: { inputTokens: number; outputTokens: number; responses: number };
+  /** The agent's own API responses so far (not a subagent's): the turn count for a session that prints no result. */
+  ownResponses?: number;
   /** Ids of the API responses already counted in `spent`: one response is printed once per content block. */
   counted?: Set<string>;
   /** The subscription's 5-hour and weekly usage, reported with every API response. */
@@ -202,7 +206,11 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
       // A request that failed outright (e.g. "Not logged in") arrives as an assistant message with `error`.
       if (event.error) run.apiError = event.error;
       // Subagents' responses too: they are usage like any other.
-      if (event.message) countResponse(run, event.message, content);
+      if (event.message) {
+        const before = run.spent?.responses ?? 0;
+        countResponse(run, event.message, content);
+        if (topLevel && (run.spent?.responses ?? 0) > before) run.ownResponses = (run.ownResponses ?? 0) + 1;
+      }
       for (const block of content) {
         run.activity = describeBlock(block)?.slice(0, 200) ?? run.activity;
         if (topLevel && block.type === 'tool_use' && block.id) run.openTools = [...(run.openTools ?? []), block.id];
@@ -241,6 +249,7 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
         costUsd: event.total_cost_usd,
         inputTokens: totals?.inputTokens ?? inputOf(usage),
         outputTokens: totals?.outputTokens ?? usage.output_tokens,
+        turns: typeof event.num_turns === 'number' ? event.num_turns : undefined,
       };
       break;
     }

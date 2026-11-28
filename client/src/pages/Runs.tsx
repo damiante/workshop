@@ -3,6 +3,7 @@ import type { RunView } from '../../../server/src/api-types.ts';
 import { useApi, useNow } from '../api.ts';
 import { ErrorNote, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, money, runStatus, tokens } from '../format.ts';
+import { diffText } from './TicketTotals.tsx';
 
 export function Runs() {
   const { data, error } = useApi<RunView[]>('/runs', ['runs', 'activity']);
@@ -24,7 +25,9 @@ export function Runs() {
                 <th>Host</th>
                 <th>Status</th>
                 <th>Took</th>
+                <th>Turns</th>
                 <th>Usage</th>
+                <th title="The ticket's branch against the default branch after this run's push">Changes</th>
               </tr>
             </thead>
             <tbody>
@@ -47,10 +50,12 @@ export function Runs() {
                     <Status tone={runStatus(r).tone}>{runStatus(r).label}</Status>
                   </td>
                   <td className="small">{duration(r.startedAt, r.endedAt ?? now)}</td>
+                  <td className="small">{r.turns ?? '–'}</td>
                   <td className="small muted">
                     {tokens((r.inputTokens ?? 0) + (r.outputTokens ?? 0) || null)}
-                    {r.billing === 'api' && r.costUsd !== null && <div>{money(r.costUsd)}</div>}
+                    {r.costUsd ? <div title={r.billing === 'api' ? undefined : 'At API prices'}>{money(r.costUsd)}</div> : null}
                   </td>
+                  <td className="small">{diffText(r.diff)}</td>
                 </tr>
               ))}
             </tbody>

@@ -265,6 +265,45 @@ export interface RunView {
   stepStartedAt: number | null;
   /** The agent finished, but GitHub failed while publishing: when Workshop tries again. Such a run holds no agent slot. */
   publishRetryAt: number | null;
+  /** How many turns the agent took, over every session of the run; null when Workshop didn't see any. */
+  turns: number | null;
+  /** How the ticket's branch differed from the default branch once this run had pushed; null for a run that pushed nothing. */
+  diff: DiffStats | null;
+}
+
+/** Files changed and lines added and removed. */
+export interface DiffStats {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+/** What every run on one ticket added up to. */
+export interface TicketTotals {
+  ticketId: number;
+  ticket: string;
+  title: string;
+  url: string;
+  state: 'open' | 'closed';
+  size: Size | null;
+  stage: Stage | null;
+  skipped: boolean;
+  failed: boolean;
+  prNumber: number | null;
+  prUrl: string | null;
+  runs: number;
+  failedRuns: number;
+  /** An agent is on it now. */
+  working: boolean;
+  /** Time agents spent on it, added over its runs. */
+  agentMs: number;
+  costUsd: number | null;
+  tokens: number | null;
+  turns: number | null;
+  firstStartedAt: number;
+  lastEndedAt: number | null;
+  /** The ticket's branch against the default branch after its last push; null when nothing was pushed. */
+  diff: DiffStats | null;
 }
 
 export type PauseReason = 'limit' | 'threshold' | 'manual' | 'connection';

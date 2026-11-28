@@ -80,6 +80,14 @@ describe('readClaudeLine', () => {
     });
   });
 
+  it("takes the turn count from the result, and counts the agent's own responses when there is none", () => {
+    expect(read({ ...SUCCESS, num_turns: 42 }).result).toMatchObject({ turns: 42 });
+    expect(read(SUCCESS).result!.turns).toBeUndefined();
+    const reply = (id: string, parent?: string) => ({ type: 'assistant', parent_tool_use_id: parent ?? null, message: { id, usage: { input_tokens: 1, output_tokens: 1 }, content: [{ type: 'text', text: 'x' }] } });
+    // One response printed twice, a subagent's response, then another of the agent's own.
+    expect(read(reply('m1'), reply('m1'), reply('s1', 't9'), reply('m2')).ownResponses).toBe(2);
+  });
+
   it('keeps the reported result when later turns of the session end without one', () => {
     const report = (summary: string) => ({ type: 'result', subtype: 'success', is_error: false, structured_output: { outcome: 'done', summary } });
     const wakeup = { type: 'result', subtype: 'success', is_error: false, result: 'Nothing is left to do, so I stopped the loop.' };

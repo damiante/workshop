@@ -326,6 +326,7 @@ export function Tickets() {
         <div className="row">
           <h1>Tickets</h1>
           <Link to="/dependencies">Dependencies</Link>
+          <Link to="/tickets/all">Completed and totals</Link>
         </div>
         <SyncButton action="/sync" label="Sync now" title="Sync tickets from GitHub now" />
       </div>

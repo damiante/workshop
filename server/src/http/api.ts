@@ -1,3 +1,4 @@
+import { ticketTotals } from '../ticket-totals.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router } from 'express';
@@ -227,6 +228,10 @@ apiRouter.get('/models', (_req, res) => {
 
 apiRouter.get('/tickets', (req, res) => {
   res.json(listTicketViews(req.query.closed === '1'));
+});
+
+apiRouter.get('/ticket-totals', (_req, res) => {
+  res.json(ticketTotals());
 });
 
 apiRouter.get('/dependencies', (_req, res) => {
