@@ -217,7 +217,7 @@ export function Dashboard() {
                       {h.status === 'ok' ? `${h.busy} of ${h.slots} in use` : h.status === 'error' ? 'Unreachable' : 'Not checked yet'}
                     </Status>
                   </div>
-                  {h.status === 'ok' && h.pools && <span className="small muted">{h.pools.map((p) => `${p.busy} of ${p.slots} ${p.size}`).join(', ')}</span>}
+                  {h.status === 'ok' && h.pools && <span className="small muted">{h.pools.map((p) => `${p.busy} of ${p.slots} ${p.size}${p.borrowed ? ` (${p.borrowed} by smaller agents)` : ''}`).join(', ')}</span>}
                   {!h.available && <span className="small muted">Switched off for new agents</span>}
                   {h.specs && <span className="small muted">{h.specs}</span>}
                 </li>

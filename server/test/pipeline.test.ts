@@ -26,7 +26,7 @@ const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
-const { allocate, buildQueue, forgetProbe, hostLoads, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, tick } = await import('../src/scheduler/loop.ts');
+const { allocate, buildQueue, forgetProbe, hostLoads, hostViews, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, tick } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
 const { syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
@@ -1797,18 +1797,95 @@ describe('agent sizes', () => {
       run("INSERT INTO runs (id, ticket_id, agent, attempt, environment_id, size, model, billing, status, started_at) VALUES (?, ?, 'implement', 1, ?, ?, 'm', 'subscription', 'running', 0)", `busy-${size}`, other, ids.env, size);
     try {
       occupy('standard');
-      expect(hostLoads().find((h) => h.id === ids.env)!.pools).toEqual({ standard: { slots: 1, busy: 1 }, small: { slots: 3, busy: 0 }, large: { slots: 1, busy: 0 } });
+      expect(hostLoads().find((h) => h.id === ids.env)!.pools).toEqual({ standard: { slots: 1, busy: 1, borrowed: 0 }, small: { slots: 3, busy: 0, borrowed: 0 }, large: { slots: 1, busy: 0, borrowed: 0 } });
       expect(candidate().blockedBy).toBeNull();
       run("DELETE FROM runs WHERE id = 'busy-standard'");
       occupy('large');
       expect(candidate().blockedBy).toBe('Every agent host is busy or offline');
       // Without large slots, the large run holds the standard slot instead.
       configure({});
-      expect(hostLoads().find((h) => h.id === ids.env)!.pools).toEqual({ standard: { slots: 1, busy: 1 } });
+      expect(hostLoads().find((h) => h.id === ids.env)!.pools).toEqual({ standard: { slots: 1, busy: 1, borrowed: 0 } });
       expect(candidate().blockedBy).toBe('Every agent host is busy or offline');
     } finally {
       run('DELETE FROM tickets WHERE number = 9');
     }
+  });
+
+  describe('borrowing a larger slot', () => {
+    let other: number;
+    const pools = () => hostLoads().find((h) => h.id === ids.env)!.pools;
+    const occupy = (id: string, size: string, slot: string | null = null, ticketId = other) =>
+      run("INSERT INTO runs (id, ticket_id, agent, attempt, environment_id, size, slot, model, billing, status, started_at) VALUES (?, ?, 'implement', 1, ?, ?, ?, 'm', 'subscription', 'running', 0)", id, ticketId, ids.env, size, slot);
+    const ticket = (number: number, labels: string[]) =>
+      Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, ?, 'More', '', 'u', 'me', 'open', ?, '2026-10-14T00:00:00Z')", number, JSON.stringify(labels)).lastInsertRowid);
+
+    beforeEach(() => {
+      updateAgent('classifier', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model });
+      configure({ smallSlots: 1 });
+      // Not ready itself: it only owns the runs that fill slots.
+      other = ticket(9, [label.failed]);
+      run('UPDATE tickets SET labels = ? WHERE id = 1', '[]'); // ready for the Classifier: small
+    });
+    afterEach(() => {
+      run('DELETE FROM runs');
+      run('DELETE FROM tickets WHERE number IN (9, 10)');
+    });
+
+    it('starts a small agent in a free standard slot when the small one is taken and no standard work is ready', async () => {
+      occupy('busy-small', 'small');
+      expect(candidate()).toMatchObject({ agent: 'classifier', size: 'small', slot: 'standard', blockedBy: null, hostId: ids.env });
+      allocate(getSettings(), Date.now());
+      const started = one<{ id: string; slot: string; size: string }>("SELECT id, slot, size FROM runs WHERE ticket_id = 1")!;
+      expect(started).toMatchObject({ size: 'small', slot: 'standard' });
+      expect(pools()).toEqual({ small: { slots: 1, busy: 1, borrowed: 0 }, standard: { slots: 1, busy: 1, borrowed: 1 } });
+      expect(hostViews().find((h) => h.id === ids.env)!.pools).toEqual([
+        { size: 'small', slots: 1, busy: 1, borrowed: 0 },
+        { size: 'standard', slots: 1, busy: 1, borrowed: 1 },
+      ]);
+      await settle(started.id);
+    });
+
+    it('gives a contested standard slot to the ready standard ticket', async () => {
+      occupy('busy-small', 'small');
+      const standard = ticket(10, [label.size('s'), label.stage('implement')]);
+      const q = buildQueue();
+      expect(q.find((c) => c.ticket.id === standard)).toMatchObject({ size: 'standard', slot: 'standard', blockedBy: null });
+      expect(candidate()).toMatchObject({ size: 'small', blockedBy: 'Every agent host is busy or offline' });
+      allocate(getSettings(), Date.now());
+      const started = all<{ id: string; ticket_id: number }>("SELECT id, ticket_id FROM runs WHERE id NOT LIKE 'busy-%'");
+      expect(started.map((r) => r.ticket_id)).toEqual([standard]);
+      await settle(started[0].id);
+    });
+
+    it('never starts a large agent in a smaller slot', () => {
+      configure({ smallSlots: 1, largeSlots: 1 });
+      run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.size('xl'), label.stage('implement')]));
+      expect(candidate()).toMatchObject({ size: 'large', slot: 'large', blockedBy: null });
+      occupy('busy-large', 'large');
+      expect(candidate()).toMatchObject({ size: 'large', slot: null, hostId: null, blockedBy: 'Every agent host is busy or offline' });
+      expect(pools().standard).toEqual({ slots: 1, busy: 0, borrowed: 0 });
+    });
+
+    it('counts a borrowed slot where it was taken, and in standard once the host drops that pool', () => {
+      configure({ smallSlots: 1, largeSlots: 1 });
+      occupy('busy-borrow', 'standard', 'large');
+      expect(pools()).toMatchObject({ standard: { busy: 0, borrowed: 0 }, large: { busy: 1, borrowed: 1 } });
+      configure({ smallSlots: 1 });
+      expect(pools()).toMatchObject({ standard: { busy: 1, borrowed: 0 } });
+    });
+
+    it('resumes a paused small run in a free standard slot, and refuses when that is taken too', async () => {
+      occupy('busy-small', 'small');
+      run("INSERT INTO runs (id, ticket_id, agent, attempt, environment_id, size, model, model_connection_id, billing, status, step, pause_reason, started_at) VALUES ('paused', 1, 'classifier', 1, ?, 'small', 'claude-sonnet-5-5', ?, 'subscription', 'paused', 'run', 'manual', 0)", ids.env, ids.model);
+      occupy('busy-standard', 'standard', null, ticket(10, [label.failed]));
+      expect(() => resumeNow('paused')).toThrow('box has no free agent slot.');
+      run("DELETE FROM runs WHERE id = 'busy-standard'");
+      fake.env = done();
+      resumeNow('paused');
+      expect(getRun('paused')).toMatchObject({ status: 'running', slot: 'standard' });
+      expect(pools().standard).toEqual({ slots: 1, busy: 1, borrowed: 1 });
+      await settle('paused');
+    });
   });
 });
 
@@ -1846,7 +1923,7 @@ describe('allocation', () => {
     configure(3);
     const queue = allocate(getSettings(), Date.now());
     expect(started()).toHaveLength(3);
-    expect(hostLoads().find((h) => h.id === ids.env)!.pools.standard).toEqual({ slots: 3, busy: 3 });
+    expect(hostLoads().find((h) => h.id === ids.env)!.pools.standard).toEqual({ slots: 3, busy: 3, borrowed: 0 });
     expect(queue).toHaveLength(1);
     expect(queue[0].blockedBy).toBe('Every agent host is busy or offline');
     expect(ticketIds()).toContain(queue[0].ticket.id);
@@ -1864,7 +1941,7 @@ describe('allocation', () => {
     run("INSERT INTO runs (id, ticket_id, agent, attempt, environment_id, size, model, billing, status, started_at) VALUES ('busy-standard', ?, 'implement', 1, ?, 'standard', 'm', 'subscription', 'running', 0)", other, ids.env);
     const queue = allocate(getSettings(), Date.now());
     expect(started()).toHaveLength(2);
-    expect(hostLoads().find((h) => h.id === ids.env)!.pools.standard).toEqual({ slots: 3, busy: 3 });
+    expect(hostLoads().find((h) => h.id === ids.env)!.pools.standard).toEqual({ slots: 3, busy: 3, borrowed: 0 });
     expect(queue.map((c) => c.blockedBy)).toEqual(['Every agent host is busy or offline']);
   });
 
@@ -3287,9 +3364,9 @@ describe('repository priority', () => {
     run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify([label.skip]));
     expect(queued(low)).toMatchObject({ size: 'small', blockedBy: null });
     expect(next()?.ticket.id).toBe(high);
-    // Once the higher repo holds the small slot, the lower ticket waits for a slot, not for the other repo.
+    // Once the higher repo holds the small slot, the lower ticket borrows the idle standard one.
     occupy(high, 'small');
-    expect(queued(low).blockedBy).toBe('Every agent host is busy or offline');
+    expect(queued(low)).toMatchObject({ blockedBy: null, slot: 'standard' });
   });
 
   it('keeps each pool to itself: a free small slot goes to a lower repo when the higher one only has standard work', () => {

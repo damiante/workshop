@@ -16,7 +16,7 @@ import { getSettings } from '../settings.ts';
 import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, priorityGraph, setBypassLimits, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { agentSize, nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
-import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, freeSlots, inScope, localTime, modeBlock, pickHost, poolFor, priorityAhead, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
+import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, freeSlot, inScope, localTime, modeBlock, place, poolFor, priorityAhead, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 import { abortRun, cancelPause, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
 import { syncRepo } from './sync.ts';
@@ -140,18 +140,24 @@ function probeStale(queue: Candidate[]) {
 }
 
 export function hostLoads(): (HostLoad & { name: string; specs: string | null })[] {
-  const running = all<{ environment_id: number; size: AgentSize | null; n: number }>(
-    `SELECT environment_id, size, COUNT(*) AS n FROM runs WHERE ${RUNNING_SQL} AND publish_retry_at IS NULL GROUP BY environment_id, size`,
+  const running = all<{ environment_id: number; size: AgentSize | null; slot: AgentSize | null; n: number }>(
+    `SELECT environment_id, size, slot, COUNT(*) AS n FROM runs WHERE ${RUNNING_SQL} AND publish_retry_at IS NULL GROUP BY environment_id, size, slot`,
   );
   return listConnections('environment').map((c) => {
     const cfg = c.config as Partial<DockerConfig> & { specs?: string; available?: boolean };
     const slots = slotsBySize(cfg);
-    const pools: HostLoad['pools'] = { standard: { slots: slots.standard, busy: 0 } };
-    if (slots.small) pools.small = { slots: slots.small, busy: 0 };
-    if (slots.large) pools.large = { slots: slots.large, busy: 0 };
+    const pools: HostLoad['pools'] = { standard: { slots: slots.standard, busy: 0, borrowed: 0 } };
+    if (slots.small) pools.small = { slots: slots.small, busy: 0, borrowed: 0 };
+    if (slots.large) pools.large = { slots: slots.large, busy: 0, borrowed: 0 };
     const host = { id: c.id, name: c.name, healthy: c.status === 'ok', available: cfg.available !== false, pools, specs: cfg.specs ?? null };
-    // A run whose size has no slots of its own here (any more) holds a standard one.
-    for (const r of running) if (r.environment_id === c.id) poolFor(host, r.size ?? 'standard').busy += r.n;
+    // A run holds the pool it started in (its size's own when slot is null). A pool the host no
+    // longer keeps counts as standard.
+    for (const r of running) {
+      if (r.environment_id !== c.id) continue;
+      const pool = poolFor(host, r.slot ?? r.size ?? 'standard');
+      pool.busy += r.n;
+      if (pool !== poolFor(host, r.size ?? 'standard')) pool.borrowed += r.n;
+    }
     return host;
   });
 }
@@ -296,9 +302,11 @@ export function resumePaused(s: Settings, now: number) {
     // The session and workspace live on the run's volume, so it resumes on the same host.
     const host = hosts.find((h) => h.id === r.environment_id);
     const size = r.size ?? 'standard';
-    if (!host?.healthy || freeSlots(host, size) <= 0) continue;
-    poolFor(host, size).busy++;
-    resume(r.id);
+    // It takes the first free pool it may use there, with no headroom check: work under way goes first.
+    const slot = host?.healthy ? freeSlot(host, size) : null;
+    if (!slot) continue;
+    host!.pools[slot]!.busy++;
+    resume(r.id, slot);
   }
 }
 
@@ -310,6 +318,8 @@ export interface Candidate {
   blockedBy: string | null;
   hostId: number | null;
   size: AgentSize;
+  /** The host pool it starts in; a larger one than its size's when it borrows. */
+  slot: AgentSize | null;
   modelConnectionId: number | null;
   model: string | null;
   billing: Billing;
@@ -332,6 +342,7 @@ function startCandidate(c: Candidate): string | null {
     attempt: c.ticket.failures + 1,
     environmentId: c.hostId!,
     size: c.size,
+    slot: c.slot!,
     modelConnectionId: c.modelConnectionId!,
     model: c.model!,
     billing: c.billing,
@@ -368,7 +379,8 @@ export function resumeNow(runId: string) {
   const name = host?.name ?? getConnection(r.environment_id)?.name ?? 'The agent host';
   check(host, 'The agent host for this run was removed, so it can only be stopped.', 409);
   check(host.healthy, `${name} is offline. Resume this run when it's back.`, 409);
-  check(freeSlots(host, r.size ?? 'standard') > 0, `${name} has no free agent slot. Pause or stop another agent there, or resume this one when a slot frees up.`, 409);
+  const slot = freeSlot(host, r.size ?? 'standard');
+  check(slot, `${name} has no free agent slot. Pause or stop another agent there, or resume this one when a slot frees up.`, 409);
   const s = getSettings();
   const now = Date.now();
   if (onPausedSubscription(r)) {
@@ -383,7 +395,7 @@ export function resumeNow(runId: string) {
     check(!block, `Can't resume yet: ${block}.`, 409);
   }
   appendLog(runId, { step: 'workshop', stream: 'stdout', text: 'Resumed from Workshop.' });
-  resume(runId);
+  resume(runId, slot);
   kick();
 }
 
@@ -407,7 +419,6 @@ const vcsConn = (r: RepoRow) => {
 /** Every ticket Workshop could work on next, in order, each with the reason it's waiting (if any). */
 export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: { ignoreMode?: boolean } = {}): Candidate[] {
   const hosts = hostLoads();
-  const hostFor = new Map(AGENT_SIZES.map((size) => [size, pickHost(hosts, size)]));
   const modeReason = opts.ignoreMode ? null : modeBlock(s, new Date(now));
   const spentToday = apiSpendSince(startOfDay(now, s.timezone));
   const repos = new Map(all<RepoRow>('SELECT * FROM repos').map((r) => [r.id, r]));
@@ -455,9 +466,17 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
       else blockedBy = 'Every Claude subscription is paused. Resume one on the Connections page';
     }
     const size = agentSize(agent, parseLabels(labelsOf(t)), Boolean(t.ui));
-    const hostId = hostFor.get(size)!;
-    if (!blockedBy && hostId === null) blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
-    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId, size, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), prioritisedFor, after: [], unblocks: graph.unblocks(t, repo), boosted, priority: stepPriority(step), repoPriority: repo.priority });
+    out.push({ ticket: t, repo, agent, mode, blockedBy, hostId: null, size, slot: null, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), prioritisedFor, after: [], unblocks: graph.unblocks(t, repo), boosted, priority: stepPriority(step), repoPriority: repo.priority });
+  }
+  // Hosts come last: a borrower leaves a larger pool to a ready candidate whose own pool it is.
+  // allocate rebuilds the queue after every start, so the borrower gets whatever is left.
+  const waiting = out.filter((c) => !c.blockedBy).map((c) => c.size);
+  const hostFor = new Map(AGENT_SIZES.map((size) => [size, place(hosts, size, waiting)]));
+  for (const c of out) {
+    const at = hostFor.get(c.size)!;
+    c.hostId = at?.hostId ?? null;
+    c.slot = at?.slot ?? null;
+    if (!c.blockedBy && !at) c.blockedBy = hosts.length ? 'Every agent host is busy or offline' : 'No agent hosts connected';
   }
   // Repository priority orders the queue but holds nothing back: the tick starts the first ticket that
   // fits a free slot, so a higher repo's ticket wins a slot it can use and leaves the rest to others.

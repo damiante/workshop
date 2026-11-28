@@ -37,6 +37,8 @@ export interface RunRow {
   image: string | null;
   /** The container size it started with, which decides its limits and the slot it holds; null on older rows means standard. */
   size: AgentSize | null;
+  /** The host pool it holds, which may be a larger one it borrowed; null means its size's own. */
+  slot: AgentSize | null;
   /** The Claude connection this run just moved off, until the moved session reaches its first turn boundary. */
   switched_from: number | null;
   /** The turn limit and time limit (minutes) the latest agent session started with; null on older rows. */

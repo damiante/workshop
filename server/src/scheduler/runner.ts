@@ -966,6 +966,8 @@ export function launch(p: {
   environmentId: number;
   /** The container size, which picks the host's limits and the slot the run holds. Standard when left out. */
   size?: AgentSize;
+  /** The host pool it holds: its size's own when left out, or a larger one it borrows. */
+  slot?: AgentSize;
   modelConnectionId: number;
   model: string;
   billing: Billing;
@@ -973,8 +975,8 @@ export function launch(p: {
   const id = crypto.randomUUID();
   try {
     run(
-      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, size, model_connection_id, model, billing, status, volume, started_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?)`,
+      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, size, slot, model_connection_id, model, billing, status, volume, started_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?)`,
       id,
       p.ticketId,
       p.agent,
@@ -982,6 +984,7 @@ export function launch(p: {
       p.attempt,
       p.environmentId,
       p.size ?? 'standard',
+      p.slot ?? null,
       p.modelConnectionId,
       p.model,
       p.billing,
@@ -1002,10 +1005,10 @@ export function launch(p: {
  * Continues a paused run (usage limit, its subscription's limits, by hand or a paused subscription) in the same Claude session
  * on the same host, with the credentials of the connection it's on now (another subscription, after a move).
  */
-export function resume(runId: string) {
+export function resume(runId: string, slot?: AgentSize) {
   const r = getRun(runId);
   if (r?.status !== 'paused') return;
-  setRun(runId, { status: 'running', step: 'run', container_id: null, resets_at: null, pause_reason: null, pause_requested_at: null, resumes: r.resumes + 1 });
+  setRun(runId, { status: 'running', step: 'run', container_id: null, resets_at: null, pause_reason: null, pause_requested_at: null, resumes: r.resumes + 1, ...(slot && { slot }) });
   void drive(runId);
 }
 

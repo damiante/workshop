@@ -320,8 +320,8 @@ export interface HostView {
   available: boolean;
   slots: number;
   busy: number;
-  /** Slots by agent size, when the host keeps separate ones for small or large agents; null when every agent shares one pool. */
-  pools: { size: AgentSize; slots: number; busy: number }[] | null;
+  /** Slots by agent size, when the host keeps separate ones for small or large agents; null when every agent shares one pool. `borrowed` counts slots in that pool held by smaller agents that borrowed them. */
+  pools: { size: AgentSize; slots: number; busy: number; borrowed: number }[] | null;
   specs: string | null;
 }
 
