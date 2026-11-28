@@ -117,6 +117,10 @@ export interface AgentClassView {
   prompt: string;
   defaultPrompt: string;
   customised: boolean;
+  /** The default the customisation was based on, when it differs from today's `defaultPrompt`. */
+  defaultBefore: string | null;
+  /** Customised before Workshop recorded which default it was based on, so it can't tell whether that changed. */
+  defaultUnknown: boolean;
   /** Fixed instructions Workshop appends; shown read-only. */
   protocol: string;
   maxTurns: number;

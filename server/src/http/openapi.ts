@@ -251,6 +251,8 @@ const schemas: Record<string, Schema> = {
     prompt: str,
     defaultPrompt: str,
     customised: bool,
+    defaultBefore: { ...nullable(str), description: 'The default the customised instructions were based on, when it differs from defaultPrompt' },
+    defaultUnknown: { ...bool, description: 'Customised before Workshop recorded which default they were based on' },
     protocol: str,
     maxTurns: int,
     timeoutMin: int,
@@ -334,6 +336,9 @@ const paths: Record<string, Record<string, Op>> = {
   '/agents': { get: { summary: 'Agent classes and their model settings and prompts.', ok: array(ref('AgentClassView')) } },
   '/agents/{name}': {
     put: { summary: 'Changes one agent class. Send only the fields to change.', params: ['name'], body: { type: 'object' }, ok: ref('AgentClassView'), errors: [400, 403, 404] },
+  },
+  '/agents/{name}/accept-default': {
+    post: { summary: "Marks a customised agent's instructions as checked against the current default, which clears the out-of-date flag.", params: ['name'], ok: ref('AgentClassView'), errors: [403, 404] },
   },
   '/hosts/{id}': {
     put: {

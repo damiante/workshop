@@ -126,6 +126,10 @@ A push is refused with 409 and the reason when the ticket is closed, failed, ski
 
 `GET /api/runs/{id}` includes the limits the agent's session started with: `maxTurns` and `timeoutMin` (minutes), plus `stepStartedAt`, when the current step's container started. The time limit counts from `stepStartedAt`, and both limits start again when a paused run resumes. They're null for runs from before Workshop recorded them.
 
+## Agent instructions
+
+`GET /api/agents` marks customised instructions whose base has moved on: `defaultBefore` holds the default they were customised from when it differs from today's `defaultPrompt`, and `defaultUnknown` is true for instructions customised before Workshop recorded that. Changing the instructions through `PUT /api/agents/:name` records today's default as the new base. `POST /api/agents/:name/accept-default` records it without changing the instructions, which clears both; it answers with the agent, or 404 for an unknown one.
+
 ## Media
 
 `GET /api/tickets/{id}` returns a ticket (open or closed), every agent run on it oldest first, and its media, which is what the ticket lifecycle page shows. Finished runs are removed after the retention period in Settings.

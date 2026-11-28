@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router } from 'express';
-import { agentViews, updateAgent } from '../agents.ts';
+import { acceptDefault, agentViews, updateAgent } from '../agents.ts';
 import { allowanceOf, allowanceViews, apiSpendSince } from '../allowance.ts';
 import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, StatusSummary, TicketStatePatch, Usage, UsageRange } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
@@ -203,6 +203,13 @@ apiRouter.put('/agents/:name', (req, res) => {
   if ('timeoutMin' in b) patch.timeoutMin = int(b.timeoutMin, 'Time limit', 5, 1440);
   updateAgent(name, patch);
   kick();
+  res.json(agentViews().find((a) => a.name === name));
+});
+
+apiRouter.post('/agents/:name/accept-default', (req, res) => {
+  const name = req.params.name as AgentName;
+  check(AGENT_NAMES.includes(name), 'Unknown agent.', 404);
+  acceptDefault(name);
   res.json(agentViews().find((a) => a.name === name));
 });
 

@@ -289,6 +289,11 @@ export const MIGRATIONS = [
   `,
   `ALTER TABLE tickets ADD COLUMN parts TEXT; -- JSON: the smaller tickets this one was broken into`,
   `ALTER TABLE runs ADD COLUMN slot TEXT; -- small, standard or large: the host pool the run holds (it may borrow a larger one); null on older rows means its size's own pool`,
+  `
+  -- The default instructions a customised prompt was based on; null: not customised, or customised before Workshop recorded it (#155).
+  ALTER TABLE agent_classes ADD COLUMN prompt_base TEXT;
+  ALTER TABLE agent_classes ADD COLUMN prompt_alerted TEXT; -- sha256 of the default last raised as an alert
+  `,
 ];
 
 export let db: DatabaseSync;
