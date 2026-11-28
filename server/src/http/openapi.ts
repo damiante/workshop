@@ -36,6 +36,7 @@ const schemas: Record<string, Schema> = {
     pollMinutes: int,
     authors: array(str),
     retentionDays: int,
+    raiseAlertPerHour: int,
   }),
   Limits: object({ fiveHour: num, weekly: num }),
   UsageWindow: object({ pct: num, resetsAt: nullable(int) }),

@@ -34,6 +34,8 @@ export interface WorkResult {
   noticed?: Noticed[];
   /** Prerequisite tickets to open and wait for (blocked only; `BLOCKING_AGENTS`). */
   raise_blockers?: Noticed[];
+  /** Open tickets this one waits for (blocked only; `BLOCKING_AGENTS`). */
+  blocked_by?: number[];
   tests?: string;
   /** Images this run added to /work/media. */
   media?: { path: string; caption: string }[];
@@ -207,13 +209,19 @@ export function schemaFor(agent: AgentName, opts: { noticed?: boolean; blockers?
     };
   }
   if (opts.blockers && BLOCKING_AGENTS.includes(agent)) {
-    properties = { ...properties, outcome: { type: 'string', enum: ['done', 'needs_info', 'failed', 'blocked'] }, raise_blockers: RAISE_BLOCKERS_SCHEMA };
+    properties = {
+      ...properties,
+      outcome: { type: 'string', enum: ['done', 'needs_info', 'failed', 'blocked'] },
+      blocked_by: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'Numbers of open tickets that must be finished first (blocked only).' },
+      raise_blockers: RAISE_BLOCKERS_SCHEMA,
+    };
   }
   return properties === schema.properties ? schema : { ...schema, properties };
 }
 
 const isStringList = (v: unknown) => Array.isArray(v) && v.every((q) => typeof q === 'string');
 const isText = (v: unknown) => typeof v === 'string' && v.trim() !== '';
+const isNumberList = (v: unknown) => Array.isArray(v) && v.every((n) => Number.isInteger(n) && n > 0);
 const isTextList = (v: unknown) => Array.isArray(v) && v.every((n) => n && typeof n === 'object' && isText(n.title) && isText(n.body));
 
 function isFinding(v: unknown): v is Finding {
@@ -241,7 +249,7 @@ export function parseResult(agent: AgentName, value: unknown): AgentResult | str
     if (v.raise_blockers !== undefined && !isTextList(v.raise_blockers)) return 'raise_blockers must be a list of { title, body }.';
     if (v.decision === 'blocked') {
       const b = v.blocked_by;
-      if (b !== undefined && !(Array.isArray(b) && b.every((n) => Number.isInteger(n) && n > 0))) return 'blocked_by must be a list of ticket numbers.';
+      if (b !== undefined && !isNumberList(b)) return 'blocked_by must be a list of ticket numbers.';
       if (!(b as number[] | undefined)?.length && !(v.raise_blockers as Noticed[] | undefined)?.length) {
         return 'blocked requires blocked_by (open ticket numbers) or raise_blockers (new prerequisite tickets).';
       }
@@ -260,7 +268,10 @@ export function parseResult(agent: AgentName, value: unknown): AgentResult | str
   if (v.media !== undefined && !(Array.isArray(v.media) && v.media.every((m) => m && typeof m === 'object' && typeof m.path === 'string' && typeof m.caption === 'string'))) return 'media must be a list of { path, caption }.';
   if (v.noticed !== undefined && !isTextList(v.noticed)) return 'noticed must be a list of { title, body }.';
   if (v.raise_blockers !== undefined && !isTextList(v.raise_blockers)) return 'raise_blockers must be a list of { title, body }.';
-  if (v.outcome === 'blocked' && !(v.raise_blockers as Noticed[] | undefined)?.length) return 'blocked requires raise_blockers: the prerequisite tickets to open.';
+  if (v.blocked_by !== undefined && !isNumberList(v.blocked_by)) return 'blocked_by must be a list of ticket numbers.';
+  if (v.outcome === 'blocked' && !(v.blocked_by as number[] | undefined)?.length && !(v.raise_blockers as Noticed[] | undefined)?.length) {
+    return 'blocked requires blocked_by (open ticket numbers) or raise_blockers (new prerequisite tickets).';
+  }
   if (agent === 'code-review' && (v.outcome === 'done' || v.findings !== undefined) && !(Array.isArray(v.findings) && v.findings.every(isFinding))) {
     return 'findings must be a list of { severity, cause, title, detail, evidence, fix }, with severity severe, moderate or minor and cause design or implementation.';
   }

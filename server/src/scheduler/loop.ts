@@ -18,7 +18,7 @@ import { agentSize, nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, freeSlots, inScope, localTime, modeBlock, pickHost, poolFor, priorityAhead, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
-import { abortRun, cancelPause, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
+import { abortRun, cancelPause, checkRaiseRate, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
 import { checkingBlockers, syncRepo } from './sync.ts';
 
 const TICK_MS = 60_000;
@@ -160,6 +160,8 @@ export async function tick() {
     await checkHosts();
     await allocatePass();
     void syncPass(); // GitHub runs on its own: a long sync never holds allocation back
+    // Every repository, so the alert clears once the hour has passed, even after raising was turned off.
+    for (const repo of all<RepoRow>('SELECT * FROM repos')) checkRaiseRate(repo);
     const now = Date.now();
     if (now - lastCleanup > 24 * 3600_000) {
       lastCleanup = now;

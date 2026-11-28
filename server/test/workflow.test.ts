@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { addNeeds, agentSize, applyEdits, branchFor, describeStep, labelDiff, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
 import { parseResult, schemaFor, type Finding, type Rescue } from '../src/workflow/schemas.ts';
 import { MAX_FINDINGS_SHOWN, MAX_REWORKS, planTransition, reviewSection, stageForRework, type PlanContext } from '../src/workflow/transitions.ts';
-import { capabilitiesOf, DEFAULT_PROMPTS, environmentText, protocolText, taskPrompt } from '../src/workflow/prompts.ts';
+import { capabilitiesOf, DEFAULT_PROMPTS, environmentText, INDEX_PATH, protocolText, SEARCH_INDEX, taskPrompt } from '../src/workflow/prompts.ts';
+import { isDuplicate, keywords, similarity } from '../src/workflow/similar.ts';
 import { stepPriority } from '../src/scheduler/gates.ts';
 
 const step = (labels: string[], open = true) => nextStep(parseLabels(labels), open);
@@ -192,8 +193,11 @@ describe('parseResult blocked', () => {
     const raise_blockers = [{ title: 'T', body: 'B' }];
     for (const agent of ['design', 'implement'] as const) {
       expect(parseResult(agent, { outcome: 'blocked', summary: 's', raise_blockers })).toMatchObject({ outcome: 'blocked', raise_blockers });
-      expect(parseResult(agent, { outcome: 'blocked', summary: 's' })).toBe('blocked requires raise_blockers: the prerequisite tickets to open.');
+      expect(parseResult(agent, { outcome: 'blocked', summary: 's' })).toBe('blocked requires blocked_by (open ticket numbers) or raise_blockers (new prerequisite tickets).');
       expect(parseResult(agent, { outcome: 'blocked', summary: 's', raise_blockers: [{ title: 'T' }] })).toBe('raise_blockers must be a list of { title, body }.');
+      expect(parseResult(agent, { outcome: 'blocked', summary: 's', blocked_by: [4] })).toMatchObject({ outcome: 'blocked', blocked_by: [4] });
+      expect(parseResult(agent, { outcome: 'blocked', summary: 's', blocked_by: [] })).toMatch(/^blocked requires blocked_by/);
+      expect(parseResult(agent, { outcome: 'blocked', summary: 's', blocked_by: ['4'] })).toBe('blocked_by must be a list of ticket numbers.');
     }
     for (const agent of ['code-review', 'merge', 'design-review'] as const) {
       expect(parseResult(agent, { outcome: 'blocked', summary: 's', raise_blockers })).toBe('outcome must be done, needs_info or failed.');
@@ -211,6 +215,8 @@ describe('raising blockers', () => {
     expect(schemaFor('design', { blockers: true })).toHaveProperty('properties.outcome.enum', ['done', 'needs_info', 'failed', 'blocked']);
     expect(schemaFor('implement', { blockers: true, noticed: true })).toHaveProperty('properties.raise_blockers.items.required', ['title', 'body']);
     expect(schemaFor('implement', { blockers: true, noticed: true })).toHaveProperty('properties.noticed');
+    expect(schemaFor('implement', { blockers: true })).toHaveProperty('properties.blocked_by.items.type', 'integer');
+    expect(schemaFor('implement')).not.toHaveProperty('properties.blocked_by');
     for (const agent of ['code-review', 'merge', 'design-review'] as const) {
       expect(schemaFor(agent, { blockers: true })).not.toHaveProperty('properties.raise_blockers');
       expect(schemaFor(agent, { blockers: true })).toHaveProperty('properties.outcome.enum', ['done', 'needs_info', 'failed']);
@@ -248,6 +254,13 @@ describe('raising blockers', () => {
     expect(plan.comment).toContain('Needs T first.');
   });
 
+  it.each(['design', 'implement'] as const)('%s blocked on an open ticket links it', (agent) => {
+    const plan = planTransition(ctx({ agent, labels: [label.size('l'), label.stage(agent)] }), { outcome: 'blocked', summary: 'Needs #4 first.', blocked_by: [4] });
+    expect(plan).toMatchObject({ publish: true, addBlockers: [4] });
+    expect(plan.raiseBlockers).toBeUndefined();
+    expect(plan.comment).toContain('Workshop will wait for #4 before working on this ticket');
+  });
+
   it('puts the blocker rule in the protocol and the classifier task only with the flag', () => {
     const plain = protocolText({ branch: 'b', base: 'main', noticed: true });
     expect(plain).not.toContain('raise_blockers');
@@ -256,6 +269,9 @@ describe('raising blockers', () => {
     expect(both).toContain('Return "blocked" with that work under "raise_blockers"');
     expect(both).toContain("don't let it stop you (if it does, see the next rule)");
     expect(protocolText({ branch: 'b', base: 'main', blockers: true })).toContain('raise_blockers');
+    expect(both).toContain(SEARCH_INDEX);
+    expect(both).toContain('return "blocked" with its number under "blocked_by" instead');
+    expect(plain).not.toContain(INDEX_PATH);
 
     const task = {
       agent: 'classifier' as const,
@@ -276,7 +292,10 @@ describe('raising blockers', () => {
     expect(taskPrompt({ ...task, openTickets })).not.toContain('raise_blockers');
     expect(taskPrompt(task)).not.toContain('blocked');
     const listed = taskPrompt({ ...task, openTickets, raiseBlockers: true });
-    expect(listed).toContain('put the numbers of the open tickets above that cover it in blocked_by, and describe prerequisite work that no open ticket covers under raise_blockers');
+    expect(listed).toContain('put the numbers of the open tickets that cover it in blocked_by, and describe prerequisite work that no open ticket covers under raise_blockers');
+    expect(listed).toContain(`search \`${INDEX_PATH}\``);
+    expect(listed).not.toContain('open tickets are in');
+    expect(taskPrompt({ ...task, openTickets, raiseBlockers: true, indexed: 35 })).toContain(`All 35 open tickets are in \`${INDEX_PATH}\`.`);
     const none = taskPrompt({ ...task, raiseBlockers: true });
     expect(none).toContain('prerequisite work outside its scope exists, return "blocked" and describe that work under raise_blockers');
     expect(none).not.toContain('blocked_by');
@@ -812,5 +831,34 @@ describe('code review', () => {
       expect(reviewer).not.toContain('Workshop pushes it');
       expect(reviewer).toContain('Workshop discards this container');
     });
+  });
+});
+
+describe('similar tickets', () => {
+  const t = (title: string, body = '') => ({ title, body });
+
+  it('finds keywords: lowercase, no stop words or short words, one suffix stripped', () => {
+    expect([...keywords('The Roll offers, spending and Declared dies for a pool')]).toEqual(['roll', 'offer', 'spend', 'declar', 'die', 'pool']);
+    expect([...keywords('uses')]).toEqual(['use']);
+    expect([...keywords('outcome outcomes saving save')]).toEqual(['outcom', 'sav']);
+    expect([...keywords('data-declared add-die')]).toEqual(['data', 'declar', 'add', 'die']);
+  });
+
+  it('counts two differently worded titles for the same mechanism as duplicates', () => {
+    const s = similarity(t('data-declared add-die roll offers paid from a feature pool'), t('overlay-declared roll offers that spend a resource die and add it to a roll'));
+    expect(s.shared).toBe(5);
+    expect(s.title).toBeCloseTo(5 / 12);
+    expect(isDuplicate(s)).toBe(true);
+  });
+
+  it("doesn't count different mechanisms, or titles that share one keyword", () => {
+    expect(similarity(t('Save outcome modifiers'), t('Login page crashes on an empty password'))).toEqual({ title: 0, shared: 0, text: 0 });
+    expect(isDuplicate(similarity(t('Save outcome modifiers'), t('Save button styling on mobile')))).toBe(false);
+    expect(isDuplicate(similarity(t('convert between spell slots and a feature resource'), t('regain uses by spending a spell slot')))).toBe(false);
+  });
+
+  it('counts strongly overlapping bodies', () => {
+    const body = 'The engine needs a hook that changes the outcome of a saving throw after the roll.';
+    expect(isDuplicate(similarity(t('Save outcome hook', body), t('Modify saving throws', body)))).toBe(true);
   });
 });

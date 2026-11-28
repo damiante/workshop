@@ -288,6 +288,7 @@ export function SettingsPage() {
           </label>
           <NumberField label="Check for changes every (minutes)" value={draft.pollMinutes} min={1} max={60} onChange={(n) => set({ pollMinutes: n })} />
           <NumberField label="Keep run history for (days)" value={draft.retentionDays} min={1} max={365} onChange={(n) => set({ retentionDays: n })} />
+          <NumberField label="Alert when agents open more tickets per hour than" value={draft.raiseAlertPerHour} min={1} max={1000} onChange={(n) => set({ raiseAlertPerHour: n })} />
         </div>
       </Panel>
       <ErrorNote error={saveError} />

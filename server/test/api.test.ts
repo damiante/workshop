@@ -87,6 +87,18 @@ describe('authenticated API', () => {
     expect((await request(app).get('/api/settings').set('cookie', cookie)).body.ticketOrder).toBe('created-desc');
   });
 
+  it('validates and saves the alert limit for opened tickets', async () => {
+    expect((await request(app).get('/api/settings').set('cookie', cookie)).body.raiseAlertPerHour).toBe(10);
+    for (const bad of [0, 2.5, 'many']) {
+      const res = await request(app).put('/api/settings').set('cookie', cookie).send({ raiseAlertPerHour: bad });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Alert limit for opened tickets must be a whole number from 1 to 1000.');
+    }
+    const ok = await request(app).put('/api/settings').set('cookie', cookie).send({ raiseAlertPerHour: 25 });
+    expect(ok.body.raiseAlertPerHour).toBe(25);
+    expect((await request(app).get('/api/settings').set('cookie', cookie)).body.raiseAlertPerHour).toBe(25);
+  });
+
   it('treats a prompt equal to the default as not customised', async () => {
     const agents = (await request(app).get('/api/agents').set('cookie', cookie)).body;
     const classifier = agents.find((a: { name: string }) => a.name === 'classifier');

@@ -74,6 +74,8 @@ export interface Raised {
   runId: string;
   /** Raised as a prerequisite this ticket waits for, not as noticed work. */
   blocker?: boolean;
+  /** When it was opened (epoch ms). Older records have none. */
+  at?: number;
 }
 export const raisedOf = (t: TicketRow): Raised[] => (t.raised ? JSON.parse(t.raised) : []);
 export const reworkOf = (t: TicketRow): Rework | null => (t.rework ? JSON.parse(t.rework) : null);

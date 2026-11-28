@@ -22,6 +22,8 @@ export interface Settings {
   /** Order of tickets within the same push, prioritisation, repo priority and step. */
   ticketOrder: TicketOrder;
   retentionDays: number;
+  /** An alert shows when agents open more tickets than this in one repository in an hour. */
+  raiseAlertPerHour: number;
 }
 
 export type ConnectionKind = 'vcs' | 'tickets' | 'environment' | 'model';

@@ -140,6 +140,7 @@ apiRouter.put('/settings', (req, res) => {
     patch.ticketOrder = b.ticketOrder;
   }
   if (b.retentionDays !== undefined) patch.retentionDays = int(b.retentionDays, 'Retention', 1, 365);
+  if (b.raiseAlertPerHour !== undefined) patch.raiseAlertPerHour = int(b.raiseAlertPerHour, 'Alert limit for opened tickets', 1, 1000);
   if (b.authors !== undefined) {
     check(Array.isArray(b.authors) && b.authors.every((a: unknown) => typeof a === 'string'), 'Authors must be a list of GitHub usernames.');
     const authors = [...new Set<string>(b.authors.map((a: string) => a.trim().replace(/^@/, '')).filter(Boolean))];
