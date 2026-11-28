@@ -13,7 +13,7 @@ import { appendLog, deleteLog, getRun, RUNNING_SQL, type RunRow } from '../runs.
 import { check } from '../http/util.ts';
 import { sweepExpiredTokens } from '../http/tokens.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, priorityGraph, setBypassLimits, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, activeRunIds, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, priorityGraph, setBypassLimits, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { agentSize, nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, freeSlot, inScope, localTime, modeBlock, place, poolFor, priorityAhead, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
@@ -471,10 +471,11 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     githubBlock.set(r.id, until ? `GitHub's rate limit is used up until ${formatTime(until, s.timezone, now)}` : null);
   }
   const graph = priorityGraph();
+  const active = activeRunIds();
   const out: (Candidate & { priority: number; repoPriority: number; boosted: boolean })[] = [];
   for (const t of rows) {
     const repo = repos.get(t.repo_id)!;
-    if (!isAllowedAuthor(t.author) || !ticketInScope(t, repo) || activeRunId(t.id)) continue;
+    if (!isAllowedAuthor(t.author) || !ticketInScope(t, repo) || active.has(t.id)) continue;
     const step = nextStep(parseLabels(labelsOf(t)), true);
     if (!step) continue;
     if (step.kind === 'merge' && t.pr_status !== 'conflict') continue; // merged through the API, no agent needed

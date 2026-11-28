@@ -374,8 +374,18 @@ export interface Overview {
   /** Needs-you items you dismissed. */
   dismissed: TicketView[];
   queue: QueueItem[];
+  /** Every queued ticket; `queue` holds only the first few. */
+  queueTotal: number;
   hosts: HostView[];
   alerts: AlertView[];
+}
+
+export interface StatusSummary {
+  mode: Mode;
+  withinHours: boolean;
+  allowance: AllowanceView[];
+  /** Unacknowledged alerts. */
+  openAlerts: number;
 }
 
 export interface Usage {

@@ -671,6 +671,7 @@ describe('OpenAPI', () => {
 
   it.each([
     ['/overview', 'Overview'],
+    ['/status', 'StatusSummary'],
     ['/settings', 'Settings'],
     ['/usage', 'Usage'],
     ['/usage/lifetime', 'LifetimeSpend'],
@@ -962,6 +963,101 @@ describe('dismissing Needs you items', () => {
     setLabels(['workshop/stage:implement']);
     expect(await lists()).toEqual({ needs: false, dismissed: false });
     run("DELETE FROM runs WHERE id LIKE 'r-dismiss-%'");
+  });
+});
+
+describe('Needs you in the overview', () => {
+  it('lists each attention state with the same view as the ticket page', async () => {
+    const { run, one } = await import('../src/db.ts');
+    const id = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
+    const set = (labels: string[], prStatus: string | null = null) =>
+      run('UPDATE tickets SET labels = ?, pr_status = ?, dismissed = NULL WHERE id = ?', JSON.stringify(labels), prStatus, id);
+    const lists = async () => {
+      const o = (await request(app).get('/api/overview').set('cookie', cookie)).body;
+      const find = (l: { id: number }[]) => l.find((t) => t.id === id);
+      return { needs: find(o.needsYou), dismissed: find(o.dismissed) };
+    };
+    const ticket = async () => (await request(app).get(`/api/tickets/${id}`).set('cookie', cookie)).body.ticket;
+    const expectAttention = async (attention: string | null) => {
+      const { needs, dismissed } = await lists();
+      expect(dismissed).toBeUndefined();
+      if (!attention) return expect(needs).toBeUndefined();
+      expect(needs).toMatchObject({ attention, dismissed: false });
+      expect(needs).toEqual(await ticket());
+    };
+
+    try {
+      set(['workshop/stage:implement', 'workshop/needs-info']);
+      await expectAttention('question');
+      set(['workshop/stage:implement', 'workshop/failed']);
+      await expectAttention('failed');
+      set(['workshop/stage:pr-review']);
+      await expectAttention('review');
+      set(['workshop/stage:pr-review'], 'changes_requested');
+      await expectAttention(null);
+      set(['workshop/stage:implement', 'workshop/needs-info', 'workshop/skip']);
+      await expectAttention(null);
+
+      set(['workshop/stage:pr-review']);
+      run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-needs-active', ?, 'review', 1, 'm', 'subscription', 'running', 1)", id);
+      await expectAttention(null);
+      run("DELETE FROM runs WHERE id = 'r-needs-active'");
+
+      set(['workshop/stage:implement', 'workshop/needs-info']);
+      expect((await request(app).put(`/api/tickets/${id}/dismissed`).set('cookie', cookie).send({ dismissed: true })).status).toBe(200);
+      const { needs, dismissed } = await lists();
+      expect(needs).toBeUndefined();
+      expect(dismissed).toMatchObject({ attention: 'question', dismissed: true });
+      expect(dismissed).toEqual(await ticket());
+    } finally {
+      run("DELETE FROM runs WHERE id = 'r-needs-active'");
+      set(['workshop/stage:implement']);
+    }
+  });
+});
+
+describe('the overview queue', () => {
+  it('returns the front of the queue and counts all of it', async () => {
+    const { run, all } = await import('../src/db.ts');
+    const ids = Array.from({ length: 10 }, (_, i) =>
+      Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, ?, 'T', '', 'u', 'me', 'open', '[\"workshop/stage:design\", \"workshop/nominated\"]', '2026-10-13T00:00:00Z')", 700 + i).lastInsertRowid),
+    );
+    try {
+      const { queueView } = await import('../src/scheduler/loop.ts');
+      const full = queueView();
+      expect(full.length).toBeGreaterThanOrEqual(10);
+      const o = (await request(app).get('/api/overview').set('cookie', cookie)).body;
+      expect(o.queue).toHaveLength(8);
+      expect(o.queueTotal).toBe(full.length);
+      expect(o.queue).toEqual(JSON.parse(JSON.stringify(full.slice(0, 8))));
+    } finally {
+      run(`DELETE FROM tickets WHERE id IN (${ids.join(', ')})`);
+    }
+    expect(all('SELECT id FROM tickets WHERE number >= 700 AND number < 710')).toEqual([]);
+  });
+});
+
+describe('status', () => {
+  it('reports the mode and counts open alerts', async () => {
+    const { run, one } = await import('../src/db.ts');
+    const status = async () => (await request(app).get('/api/status').set('cookie', cookie)).body;
+    const before = (await status()).openAlerts;
+    expect(before).toBe(one<{ n: number }>('SELECT COUNT(*) AS n FROM alerts WHERE ack_at IS NULL')!.n);
+    const a = Number(run("INSERT INTO alerts (level, kind, message, ref, created_at) VALUES ('error', 'status-a', 'm', NULL, 0)").lastInsertRowid);
+    const b = Number(run("INSERT INTO alerts (level, kind, message, ref, created_at) VALUES ('error', 'status-b', 'm', NULL, 0)").lastInsertRowid);
+    try {
+      run('UPDATE alerts SET ack_at = 1 WHERE id = ?', a);
+      expect((await status()).openAlerts).toBe(before + 1);
+    } finally {
+      run('DELETE FROM alerts WHERE id IN (?, ?)', a, b);
+    }
+
+    const mode = (await status()).mode;
+    for (const m of ['paused', 'always']) {
+      await request(app).put('/api/settings').set('cookie', cookie).send({ mode: m });
+      expect((await status()).mode).toBe(m);
+    }
+    await request(app).put('/api/settings').set('cookie', cookie).send({ mode });
   });
 });
 

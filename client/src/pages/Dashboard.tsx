@@ -171,15 +171,16 @@ export function Dashboard() {
         </Panel>
         <Panel title="Up next" action={<Link to="/tickets">All tickets</Link>}>
           {data.queue.length ? (
-            <ul className="list">
-              {data.queue.slice(0, 8).map((q) => (
-                <li key={q.ticketId} className="stack" style={{ gap: 4 }}>
-                  <div className="spread">
-                    <span>
-                      <Link to={`/tickets/${q.ticketId}`}>{q.ticket}</Link>: {q.title}
-                    </span>
-                    <span className="tag">{q.next}</span>
-                  </div>
+            <>
+              <ul className="list">
+                {data.queue.map((q) => (
+                  <li key={q.ticketId} className="stack" style={{ gap: 4 }}>
+                    <div className="spread">
+                      <span>
+                        <Link to={`/tickets/${q.ticketId}`}>{q.ticket}</Link>: {q.title}
+                      </span>
+                      <span className="tag">{q.next}</span>
+                    </div>
       {data.publishWaiting.length > 0 && (
         <Panel title="Waiting to publish">
           <p className="small muted">These agents have finished and their work is saved. Workshop publishes it to GitHub when GitHub answers again; they don't use an agent slot.</p>
@@ -192,16 +193,22 @@ export function Dashboard() {
           </ul>
         </Panel>
       )}
-                  {q.push && <span className="small muted">Pushed by you</span>}
-                  {q.prioritised && !q.push && <span className="small muted">Prioritised by you</span>}
-                  {!q.push && !q.prioritised && q.prioritisedFor.length > 0 && <span className="small muted">Prioritised for {q.prioritisedFor.join(', ')}</span>}
-                  {q.after.length > 0 && <span className="small muted">After {q.after.join(', ')} (higher priority)</span>}
-                  {q.unblocks > 0 && <span className="small muted">Unblocks {q.unblocks} open {q.unblocks === 1 ? 'ticket' : 'tickets'}</span>}
-                  {q.bypassLimits && <span className="small muted">Ignores your usage limits</span>}
-                  {q.blockedBy && <span className="small muted">Waiting: {q.blockedBy}</span>}
-                </li>
-              ))}
-            </ul>
+                    {q.push && <span className="small muted">Pushed by you</span>}
+                    {q.prioritised && !q.push && <span className="small muted">Prioritised by you</span>}
+                    {!q.push && !q.prioritised && q.prioritisedFor.length > 0 && <span className="small muted">Prioritised for {q.prioritisedFor.join(', ')}</span>}
+                    {q.after.length > 0 && <span className="small muted">After {q.after.join(', ')} (higher priority)</span>}
+                    {q.unblocks > 0 && <span className="small muted">Unblocks {q.unblocks} open {q.unblocks === 1 ? 'ticket' : 'tickets'}</span>}
+                    {q.bypassLimits && <span className="small muted">Ignores your usage limits</span>}
+                    {q.blockedBy && <span className="small muted">Waiting: {q.blockedBy}</span>}
+                  </li>
+                ))}
+              </ul>
+              {data.queueTotal > data.queue.length && (
+                <p className="small muted" style={{ padding: '8px 16px' }}>
+                  And {data.queueTotal - data.queue.length} more in the queue.
+                </p>
+              )}
+            </>
           ) : (
             <p className="empty">No tickets are ready for an agent.</p>
           )}
