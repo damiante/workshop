@@ -244,8 +244,15 @@ const schemas: Record<string, Schema> = {
     needsYou: array(ref('TicketView')),
     dismissed: array(ref('TicketView')),
     queue: array(ref('QueueItem')),
+    queueTotal: int,
     hosts: array(ref('HostView')),
     alerts: array(ref('AlertView')),
+  }),
+  StatusSummary: object({
+    mode: ref('Mode'),
+    withinHours: bool,
+    allowance: array(ref('AllowanceView')),
+    openAlerts: int,
   }),
   AgentClassView: object({
     name: ref('AgentName'),
@@ -311,7 +318,8 @@ function operation(method: string, op: Op) {
 }
 
 const paths: Record<string, Record<string, Op>> = {
-  '/overview': { get: { summary: 'Status: mode, running agents, queue, hosts, allowance and open alerts.', ok: ref('Overview') } },
+  '/overview': { get: { summary: 'Status: mode, running agents, the front of the queue, hosts, allowance and open alerts.', ok: ref('Overview') } },
+  '/status': { get: { summary: 'Mode, operating hours, Claude allowance and the number of open alerts: what the top bar and sidebar show.', ok: ref('StatusSummary') } },
   '/usage': { get: { summary: 'Claude allowance and limits per subscription, and today\'s API spend against the caps.', ok: ref('Usage') } },
   '/usage/limits/{connectionId}': {
     put: {

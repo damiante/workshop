@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import type { AllowanceHistory, LifetimeSpend, SpendTotals, UsageHistory } from '../../../server/src/api-types.ts';
 import { bucketLabel, foldSeries, GROUPINGS, METRICS, RANGES, readFilters, shares, value, type Grouping, type Metric } from '../chart.ts';
@@ -6,6 +7,7 @@ import { Bars, Legend, LineChart, StackedColumns } from '../components/Chart.tsx
 import { ErrorNote, Panel } from '../components/ui.tsx';
 import { money, tokens } from '../format.ts';
 import { projectionSections, type Cell } from '../projections.ts';
+import { DEFAULT_TICKET_SORT, filterTickets, nextSort, sortTickets, TICKETS_SHOWN, type TicketSortKey } from '../ticket-usage.ts';
 
 const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 const OTHER_COLOR = 'var(--series-other)';
@@ -272,9 +274,19 @@ function SpendOverTime({ data, group, metric }: { data: UsageHistory; group: Gro
   );
 }
 
-/** What each ticket's runs used in the range, the most expensive first. */
+const TICKET_COLUMNS: { key: TicketSortKey; label: string }[] = [
+  { key: 'inputTokens', label: 'Input' },
+  { key: 'outputTokens', label: 'Output' },
+  { key: 'costUsd', label: 'Cost' },
+];
+
+/** What each ticket's runs used in the range: the top few by the chosen column, filtered by the search. */
 function TicketUsage({ data }: { data: UsageHistory }) {
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState(DEFAULT_TICKET_SORT);
   const total = data.byTicket.reduce((n, t) => n + t.costUsd, 0);
+  const matching = filterTickets(data.byTicket, query);
+  const shown = sortTickets(matching, sort).slice(0, TICKETS_SHOWN);
   return (
     <Panel title="Cost per ticket">
       <div className="panel-body stack">
@@ -283,42 +295,57 @@ function TicketUsage({ data }: { data: UsageHistory }) {
         ) : (
           <>
             <p className="small muted">
-              What each ticket's agent runs used in this range, the most expensive first{data.byTicket.length > 1 ? `: ${money(total / data.byTicket.length)} a ticket on average` : ''}. A ticket still
-              being worked on counts what it has used so far.
+              What each ticket's agent runs used in this range{data.byTicket.length > 1 ? `: ${money(total / data.byTicket.length)} a ticket on average` : ''}. A ticket still being worked on counts
+              what it has used so far. Shows the top {TICKETS_SHOWN}; click Input, Output or Cost to sort by it.
             </p>
-            <div className="table-wrap">
-              <table className="spend-table">
-                <thead>
-                  <tr>
-                    <th>Ticket</th>
-                    <th className="num">Runs</th>
-                    <th className="num">Input</th>
-                    <th className="num">Output</th>
-                    <th className="num">Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.byTicket.map((t) => (
-                    <tr key={`${t.repo}#${t.number}`}>
-                      <td>
-                        {t.url ? (
-                          <a href={t.url} target="_blank" rel="noreferrer">
-                            {t.repo}#{t.number}
-                          </a>
-                        ) : (
-                          `${t.repo}#${t.number}`
-                        )}
-                        {t.title && <span className="muted"> {t.title}</span>}
-                      </td>
-                      <td className="num">{t.runs}</td>
-                      <td className="num">{tokens(t.inputTokens)}</td>
-                      <td className="num">{tokens(t.outputTokens)}</td>
-                      <td className="num">{money(t.costUsd)}</td>
+            <input type="search" placeholder="Search tickets" aria-label="Search tickets" value={query} onChange={(e) => setQuery(e.target.value)} />
+            {shown.length === 0 ? (
+              <p className="small muted">No tickets match that search.</p>
+            ) : (
+              <div className="table-wrap">
+                <table className="spend-table">
+                  <thead>
+                    <tr>
+                      <th>Ticket</th>
+                      <th className="num">Runs</th>
+                      {TICKET_COLUMNS.map((c) => (
+                        <th key={c.key} className="num" aria-sort={sort.key === c.key ? (sort.desc ? 'descending' : 'ascending') : undefined}>
+                          <button type="button" className="sort" onClick={() => setSort(nextSort(sort, c.key))}>
+                            {c.label}
+                            {sort.key === c.key && <span aria-hidden="true">{sort.desc ? ' ↓' : ' ↑'}</span>}
+                          </button>
+                        </th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {shown.map((t) => (
+                      <tr key={`${t.repo}#${t.number}`}>
+                        <td>
+                          {t.url ? (
+                            <a href={t.url} target="_blank" rel="noreferrer">
+                              {t.repo}#{t.number}
+                            </a>
+                          ) : (
+                            `${t.repo}#${t.number}`
+                          )}
+                          {t.title && <span className="muted"> {t.title}</span>}
+                        </td>
+                        <td className="num">{t.runs}</td>
+                        <td className="num">{tokens(t.inputTokens)}</td>
+                        <td className="num">{tokens(t.outputTokens)}</td>
+                        <td className="num">{money(t.costUsd)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {matching.length > shown.length && (
+              <p className="small muted">
+                {shown.length} of {matching.length} {query.trim() ? 'matching tickets' : 'tickets'}.
+              </p>
+            )}
           </>
         )}
       </div>

@@ -5,7 +5,7 @@ import { ErrorNote, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, money, runStatus, tokens } from '../format.ts';
 
 export function Runs() {
-  const { data, error } = useApi<RunView[]>('/runs', ['runs']);
+  const { data, error } = useApi<RunView[]>('/runs', ['runs', 'activity']);
   const now = useNow();
   return (
     <div className="stack">

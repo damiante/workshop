@@ -352,6 +352,19 @@ thead th {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+/* A sortable column's heading: a button that looks like the other headings. */
+.spend-table button.sort {
+  font-weight: inherit;
+  font-size: inherit;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  white-space: nowrap;
+}
+.spend-table button.sort:hover {
+  text-decoration: underline;
+}
 /* Too narrow for shared widths: let each table fit its own content. */
 @media (max-width: 760px) {
   .spend-table {

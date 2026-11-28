@@ -23,6 +23,9 @@ To have Claude Code look into a run, open the run and click **Give Claude access
 ## Examples
 
 ```sh
+# Read status: mode, within operating hours, allowance and open alert count
+curl $WORKSHOP/api/status -H "Authorization: Bearer $TOKEN"
+
 # Pause Workshop (mode: paused, scheduled or always)
 curl -X PUT $WORKSHOP/api/settings -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"mode":"paused"}'
@@ -75,6 +78,8 @@ curl -X POST $WORKSHOP/api/runs/<run id>/resume -H "Authorization: Bearer $TOKEN
 # Stop a run
 curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 ```
+
+`/api/overview`'s `queue` holds the first 8 tickets in queue order, and `queueTotal` counts all of them.
 
 Usage limits are set per subscription. `PUT /api/settings` with the old global `fiveHourMax` or `weeklyMax` returns 400, and `/api/overview` and `/api/usage` no longer have a `thresholds` field: each `allowance` entry carries its own `limits`.
 

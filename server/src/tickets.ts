@@ -1,6 +1,6 @@
-import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, TicketRefView, TicketView } from './api-types.ts';
+import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, TicketRefView, TicketView, Topic } from './api-types.ts';
 import { all, one, run } from './db.ts';
-import { publish } from './events.ts';
+import { bus, publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
 import type { RepoRef, TicketLink } from './providers/types.ts';
 import { mediaCount } from './media.ts';
@@ -219,6 +219,7 @@ export const linkCount = (ticketId: number) => one<{ n: number }>('SELECT count(
 export function dependencyGraphs(): DependencyGraph[] {
   const repos = all<RepoRow>('SELECT * FROM repos');
   const byId = new Map(repos.map((r) => [r.id, r]));
+  const graph = priorityGraph();
   return repos
     .filter((r) => r.enabled)
     .sort((a, b) => a.full_name.localeCompare(b.full_name))
@@ -241,7 +242,7 @@ export function dependencyGraphs(): DependencyGraph[] {
       const nodes = new Map<string, DependencyNode>();
       for (const t of rows) {
         const r = byId.get(t.repo_id)!;
-        const node = { ref: refOf(r.full_name, t.number), number: t.number, title: t.title, url: t.url, state: t.state, held: blockersOf(t).length > 0, ticket: ticketView(t, r) };
+        const node = { ref: refOf(r.full_name, t.number), number: t.number, title: t.title, url: t.url, state: t.state, held: blockersOf(t).length > 0, ticket: ticketView(t, r, graph) };
         nodes.set(linkKey(r.full_name, t.number), node);
       }
       const seen = new Set<string>();
@@ -307,6 +308,12 @@ export function activeRunId(ticketId: number) {
   return one<{ id: string }>("SELECT id FROM runs WHERE ticket_id = ? AND status IN ('starting', 'running', 'publishing', 'paused')", ticketId)?.id ?? null;
 }
 
+/** Every ticket's active run id in one query, for code that would otherwise call `activeRunId` per ticket. */
+export function activeRunIds(): Map<number, string> {
+  const rows = all<{ ticket_id: number; id: string }>("SELECT ticket_id, id FROM runs WHERE status IN ('starting', 'running', 'publishing', 'paused')");
+  return new Map(rows.map((r) => [r.ticket_id, r.id]));
+}
+
 type Attention = NonNullable<TicketView['attention']>;
 
 /** Why a ticket is waiting on you, or null when it isn't. */
@@ -341,8 +348,22 @@ export interface PriorityGraph {
   unblocks(t: TicketRow, repo: RepoRow): number;
 }
 
+/**
+ * The graph is built from open tickets in enabled repos, their blockers and prioritised flags, and repo names, so it's
+ * kept until the `tickets` or `repos` topic says one of those may have changed. Building it walks every open ticket,
+ * so doing that per view stalls the server. It's never patched in place: priority and counts are transitive.
+ */
+let cachedGraph: PriorityGraph | null = null;
+bus.on('topic', (topic: Topic) => {
+  if (topic === 'tickets' || topic === 'repos') cachedGraph = null;
+});
+
 /** Implicit priority, worked out from the open tickets' stored blockers. Nothing of it is stored. */
 export function priorityGraph(): PriorityGraph {
+  return (cachedGraph ??= buildPriorityGraph());
+}
+
+function buildPriorityGraph(): PriorityGraph {
   const rows = all<{ id: number; number: number; prioritised: number; blocked_by: string; full_name: string }>(
     openTicketsSql.replace('SELECT t.*', 'SELECT t.id, t.number, t.prioritised, t.blocked_by, r.full_name'),
   );
@@ -357,21 +378,20 @@ export function priorityGraph(): PriorityGraph {
     const prefix = `${repo.full_name.toLowerCase()}#`;
     return key.startsWith(prefix) ? `#${key.slice(prefix.length)}` : full;
   };
-  return {
+  return Object.freeze<PriorityGraph>({
     prioritisedFor: (t, repo) => (graph.get(refKey(`#${t.number}`, repo.full_name)) ?? []).map((k) => ({ ref: displayRef(k, repo), ticketId: known.get(k)?.id ?? null })),
     resolve: (ref, repo) => ({ ref, ticketId: known.get(refKey(ref, repo.full_name))?.id ?? null }),
     unblocks: (t, repo) => counts.get(refKey(`#${t.number}`, repo.full_name)) ?? 0,
-  };
+  });
 }
 
-export function ticketView(t: TicketRow, repo: RepoRow, graph: PriorityGraph = priorityGraph()): TicketView {
+export function ticketView(t: TicketRow, repo: RepoRow, graph: PriorityGraph = priorityGraph(), activeRun: string | null = activeRunId(t.id)): TicketView {
   const labels = labelsOf(t);
   const state = parseLabels(labels);
   const step = nextStep(state, t.state === 'open');
   const next = step && !inScope(repo.selection, labels)
     ? 'Not nominated'
     : state.stage === 'pr-review' && !state.needsInfo ? 'Waiting for your review' : (step && dependencyBlock(blockersOf(t))) || describeStep(step, state.stage);
-  const activeRun = activeRunId(t.id);
   const attention = attentionOf({ ...state, skipped: state.skip, prStatus: t.pr_status, activeRunId: activeRun });
   return {
     id: t.id,
@@ -406,13 +426,33 @@ export function ticketView(t: TicketRow, repo: RepoRow, graph: PriorityGraph = p
   };
 }
 
-export function listTicketViews(includeClosed = false): TicketView[] {
-  const rows = all<TicketRow & { r_id: number }>(
+function openTicketRows(includeClosed: boolean) {
+  return all<TicketRow>(
     `SELECT t.* FROM tickets t JOIN repos r ON r.id = t.repo_id WHERE r.enabled = 1 ${includeClosed ? '' : "AND t.state = 'open'"} ORDER BY t.updated_at DESC`,
   );
-  const repos = new Map(all<RepoRow>('SELECT * FROM repos').map((r) => [r.id, r]));
+}
+
+const reposById = () => new Map(all<RepoRow>('SELECT * FROM repos').map((r) => [r.id, r]));
+
+export function listTicketViews(includeClosed = false): TicketView[] {
+  const rows = openTicketRows(includeClosed);
+  const repos = reposById();
   const graph = priorityGraph();
-  return rows.map((t) => ticketView(t, repos.get(t.repo_id)!, graph));
+  const active = activeRunIds();
+  return rows.map((t) => ticketView(t, repos.get(t.repo_id)!, graph, active.get(t.id) ?? null));
+}
+
+/** Views of the open tickets waiting on you (dismissed ones included), working out attention from the rows first. */
+export function needsYouViews(): TicketView[] {
+  const active = activeRunIds();
+  const rows = openTicketRows(false).filter((t) => {
+    const state = parseLabels(labelsOf(t));
+    return attentionOf({ ...state, skipped: state.skip, prStatus: t.pr_status, activeRunId: active.get(t.id) ?? null }) !== null;
+  });
+  if (!rows.length) return [];
+  const repos = reposById();
+  const graph = priorityGraph();
+  return rows.map((t) => ticketView(t, repos.get(t.repo_id)!, graph, active.get(t.id) ?? null));
 }
 
 /** Applies label edits on the ticket source, then mirrors them locally. */

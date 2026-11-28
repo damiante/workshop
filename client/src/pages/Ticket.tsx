@@ -50,7 +50,7 @@ function Thumbs({ items }: { items: MediaItem[] }) {
 
 export function Ticket() {
   const { id } = useParams();
-  const { data, error } = useApi<TicketLifecycle>(`/tickets/${id}`, ['tickets', 'runs', 'media']);
+  const { data, error } = useApi<TicketLifecycle>(`/tickets/${id}`, ['tickets', 'runs', 'activity', 'media']);
   const now = useNow();
   if (error) return <ErrorNote error={error} />;
   if (!data) return null;

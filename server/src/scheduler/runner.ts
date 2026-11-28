@@ -14,7 +14,7 @@ import type { ContainerState, CreatedTicket, Environment, StepSpec } from '../pr
 import { collectAgentMedia, deleteMedia, fetchTicketImages, listMedia, mediaFiles, warn, type IssueImage } from '../media.ts';
 import { ACTIVE_STATUSES, activity, appendLog, getRun, linesFrom, readLog, type RunRow } from '../runs.ts';
 import { getSettings } from '../settings.ts';
-import { recordSpend } from '../spend.ts';
+import { estimateCost, recordSpend } from '../spend.ts';
 import {
   addLinks,
   branchOf,
@@ -483,15 +483,16 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
       } else if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
         // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
+        // Only the activity text changed, so only the views that show it refetch.
         const wait = lastPublished + 3000 - Date.now();
         if (wait <= 0) {
           lastPublished = Date.now();
-          publish('runs');
+          publish('activity');
         } else if (!trailing) {
           trailing = setTimeout(() => {
             trailing = undefined;
             lastPublished = Date.now();
-            publish('runs');
+            publish('activity');
           }, wait);
         }
       }
@@ -507,16 +508,17 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   clearTimeout(trailing);
   activity.delete(r.id);
   publish('runs');
-  if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
   const res = claude.result;
-  setRun(r.id, { exit_code: state.exitCode });
+  // A session that was killed or paused prints no result, so its usage comes from the responses counted on the way.
   if (res) recordSpend(r, res);
+  else if (claude.spent?.responses) recordSpend(r, { ...claude.spent, costUsd: estimateCost(r.model, claude.spent.inputTokens + claude.spent.outputTokens) });
+  if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
+  setRun(r.id, { exit_code: state.exitCode });
 
   if (claude.limit && r.model_connection_id) recordLimit(r.model_connection_id, claude.limit.resetsAt ?? Date.now() + 3600_000);
   if (pausedFor && res?.structured === undefined) {
-    // Killed between turns, so the session resumes cleanly. A killed segment prints no result, so its
-    // tokens and cost don't reach the spend ledger: acceptable for subscription runs, an undercount for
-    // API runs you pause by hand (see docs/workshop/80-feature-manual-pause.md).
+    // Killed between turns, so the session resumes cleanly. A killed segment prints no result; its usage was
+    // recorded above from the responses counted on the way (output and cost as estimates).
     setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: pausedFor.resetsAt, pause_reason: pausedFor.kind, pause_requested_at: null });
     await markRunning(ctx.ticket, false);
     return false;
@@ -650,6 +652,7 @@ function storeCreated(repo: RepoRow, made: CreatedTicket, t: { title: string; bo
     made.updatedAt ?? now,
     made.createdAt ?? now,
   );
+  publish('tickets');
 }
 
 const sameTitle = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();

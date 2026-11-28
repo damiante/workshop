@@ -22,12 +22,12 @@ const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, reorderConnections, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
-const { bus } = await import('../src/events.ts');
+const { bus, publish } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { checkRaiseRate, connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
 const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resetSyncProgress, resumeNow, resumePaused, settleManual, syncProgress, syncSoon, tick } = await import('../src/scheduler/loop.ts');
-const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf } = await import('../src/tickets.ts');
+const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf, priorityGraph } = await import('../src/tickets.ts');
 const { checkingBlockers, syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
@@ -107,6 +107,7 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
+  publish('tickets'); // tests write rows directly, so drop the cached priority graph
   run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, handoff = NULL, rework = NULL, prioritised = 0, bypass_limits = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
@@ -173,7 +174,7 @@ async function review(findings: object[] = [], over: object = {}) {
 const ticketLabels = () => JSON.parse(getTicket(1)!.labels) as string[];
 
 describe('runner', () => {
-  it('publishes runs when the agent finishes, even if its last activity was throttled', async () => {
+  it('publishes activity, not runs, for activity-only changes, and runs when the agent finishes', async () => {
     const tool = (command: string) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } });
     fake.env = new FakeEnv({
       prepare: ['ok'],
@@ -188,8 +189,12 @@ describe('runner', () => {
     } finally {
       bus.off('topic', listener);
     }
-    // The second tool call fell inside the 3s throttle window; the runner must still announce it.
-    expect(topics.filter((t) => t === 'runs').length).toBeGreaterThanOrEqual(3);
+    // The first tool call only changes the activity text. The second falls inside the 3s throttle window,
+    // and the result line, a state change, announces it with 'runs' straight after.
+    expect(topics.filter((t) => t === 'activity')).toHaveLength(1);
+    const at = topics.indexOf('activity');
+    expect(topics.slice(0, at)).toContain('runs'); // starting
+    expect(topics[at + 1]).toBe('runs');
   });
 
   it.each([
@@ -1850,6 +1855,54 @@ describe('breaking large tickets down', () => {
   });
 });
 
+describe('usage of a session that ends without a result', () => {
+  const reply = (id: string, read: number, text: string) => line({ type: 'assistant', parent_tool_use_id: null, message: { id, usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: read, output_tokens: 1 }, content: [{ type: 'text', text }] } });
+  const spend = (id: string) => all<{ input_tokens: number; output_tokens: number; cost_usd: number }>('SELECT input_tokens, output_tokens, cost_usd FROM spend WHERE run_id = ?', id);
+
+  it('records what the agent used before it ran out of time', async () => {
+    // An earlier run of this model sets the price: $1 for 1,000,000 tokens.
+    run("INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd) VALUES ('earlier', 1, 'claude-priced', 'subscription', 990000, 10000, 1)");
+    const env = new FakeEnv({});
+    let release = () => {};
+    env.inspect = async () => ({ running: true, exitCode: 0, oomKilled: false });
+    env.follow = (_id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+      for (const text of [reply('m1', 990, 'x'.repeat(220)), reply('m1', 990, 'y'.repeat(110)), reply('m2', 1990, '')]) onLine({ stream: 'stdout', text });
+      return new Promise<void>((done) => (release = done));
+    };
+    env.kill = async () => release();
+    env.wait = async () => ({ running: false, exitCode: 137, oomKilled: false });
+    fake.env = env;
+    run(
+      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, step, container_id, volume, image, max_turns, timeout_min, step_started_at, started_at)
+       VALUES ('cut-short', 1, 'implement', 'normal', 1, ?, ?, 'claude-priced', 'subscription', 'running', 'run', 'run-container-old', 'v', 'img', 300, 1, ?, ?)`,
+      ids.env,
+      ids.model,
+      Date.now() - 5 * 60_000,
+      Date.now() - 6 * 60_000,
+    );
+    try {
+      await drive('cut-short');
+      expect(getRun('cut-short')).toMatchObject({ status: 'failed', error: 'Stopped after the 1-minute time limit.', input_tokens: 3000, output_tokens: 300 });
+      const [row] = spend('cut-short');
+      expect(row).toMatchObject({ input_tokens: 3000, output_tokens: 300 });
+      expect(row.cost_usd).toBeCloseTo(0.0033, 6);
+    } finally {
+      run("DELETE FROM spend WHERE run_id IN ('earlier', 'cut-short')");
+    }
+  });
+
+  it("leaves a run that printed a result to the result's own figures", async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [reply('m1', 990, 'hello'), line({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.5, structured_output: { outcome: 'done', summary: 'ok', tests: 'ok' }, usage: { input_tokens: 10, output_tokens: 5 } })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    const id = go();
+    await settle(id);
+    expect(spend(id)).toEqual([{ input_tokens: 10, output_tokens: 5, cost_usd: 0.5 }]);
+  });
+});
+
 describe('launchNow', () => {
   const script = () => ({ prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'Done.', tests: 'ok' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
 
@@ -2881,6 +2934,26 @@ describe('sync', () => {
       expect(buildQueue().find((c) => c.ticket.id === 1)?.blockedBy).toBe('Depends on #2');
     });
 
+    it('rebuilds the cached priority graph when a sync changes what a ticket waits on', async () => {
+      const blocker = Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 2, 'Expose the API', '', 'u', 'me', 'open', '[]', '2026-10-13T00:00:00Z')").lastInsertRowid);
+      publish('tickets');
+      try {
+        const before = priorityGraph();
+        expect(before.unblocks(getTicket(blocker)!, repo())).toBe(0);
+        expect(priorityGraph()).toBe(before); // kept while nothing changes
+        fake.tickets.listChanged = async () => [remote({ labels: [], openBlockers: 1 })];
+        fake.tickets.blockers = vi.fn(async () => [open(2)]);
+        await syncRepo(repo());
+        expect(priorityGraph()).not.toBe(before);
+        expect(priorityGraph().unblocks(getTicket(blocker)!, repo())).toBe(1);
+        expect(ticketView(getTicket(1)!, repo()).dependsOn).toEqual([{ ref: '#2', ticketId: blocker }]);
+      } finally {
+        run("UPDATE tickets SET blocked_by = '[]' WHERE id = 1");
+        run('DELETE FROM tickets WHERE id = ?', blocker);
+        publish('tickets');
+      }
+    });
+
     it('releases a held ticket when its blocker closes, even though the ticket did not change', async () => {
       run(`UPDATE tickets SET blocked_by = '["#2"]' WHERE id = 1`);
       fake.tickets.listChanged = async () => [];
@@ -3894,9 +3967,51 @@ describe('repository priority', () => {
   });
   afterEach(() => {
     run('DELETE FROM runs');
-    run('DELETE FROM tickets WHERE repo_id = ? OR number = 4', api);
+    run('DELETE FROM tickets WHERE repo_id = ? OR number = 4 OR number BETWEEN 40 AND 49', api);
     run('DELETE FROM repos WHERE id = ?', api);
     configure({});
+  });
+
+  describe('against tickets other work waits on', () => {
+    const implement = [label.size('s'), label.stage('implement')];
+    /** `count` open tickets in me/app, numbered from 40, that wait on `ref`. */
+    const waitOn = (ref: string, count: number) => {
+      for (let i = 0; i < count; i++) {
+        run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (1, ?, 'App', '', 'u', 'me', 'open', ?, ?, '2026-10-13T00:00:00Z')", 40 + i, JSON.stringify(implement), JSON.stringify([ref]));
+      }
+    };
+    beforeEach(() => {
+      run('UPDATE repos SET priority = 99 WHERE id = ?', api);
+      run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(implement));
+      waitOn('#3', 3);
+    });
+
+    it("puts a higher-priority repo's ticket ahead of a lower repo's ticket that more work waits on", () => {
+      const high = apiTicket(implement);
+      expect(queued(high)).toMatchObject({ unblocks: 0, size: 'standard', blockedBy: null });
+      expect(queued()).toMatchObject({ unblocks: 3, size: 'standard', blockedBy: null, after: ['me/api'] });
+      expect(buildQueue()[0].ticket.id).toBe(high);
+      expect(next()?.ticket.id).toBe(high); // the only free standard slot
+    });
+
+    it('still lets the dependency graph order tickets within a repo', () => {
+      const plain = apiTicket(implement, { number: 8 });
+      const needed = apiTicket(implement, { number: 9 });
+      run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (?, 10, 'Api', '', 'u', 'me', 'open', ?, ?, '2026-10-13T00:00:00Z')", api, JSON.stringify(implement), JSON.stringify(['#9']));
+      const order = buildQueue().filter((c) => !c.blockedBy?.startsWith('Depends on')).map((c) => c.ticket.id);
+      expect(order.slice(0, 3)).toEqual([needed, plain, 1]);
+    });
+
+    it('still puts a prioritised ticket in the lower repo, and what it waits on, first, and a pushed ticket ahead of both', () => {
+      const high = apiTicket(implement);
+      const wanted = one<{ id: number }>('SELECT id FROM tickets WHERE repo_id = 1 AND number = 40')!.id;
+      setPrioritised(getTicket(wanted)!, true);
+      expect(queued(wanted).blockedBy).toBe('Depends on #3');
+      expect(queued()).toMatchObject({ prioritisedFor: ['#40'], after: [] });
+      expect(next()?.ticket.id).toBe(1);
+      setPush(getTicket(high)!, 'stage');
+      expect(buildQueue()[0].ticket.id).toBe(high);
+    });
   });
 
   it("orders a lower-priority repo after a higher one's unclassified tickets without holding it", () => {
@@ -4207,8 +4322,11 @@ describe('nominated tickets only', () => {
 describe('ticket order', () => {
   const implement = JSON.stringify([label.size('s'), label.stage('implement')]);
   const numbers = () => buildQueue().map((c) => c.ticket.number);
-  const add = (n: number, updated: string, created: string | null, labels = implement, blockedBy: string[] = [], repo = 1) =>
+  // Published like every real write, so the cached priority graph sees it.
+  const add = (n: number, updated: string, created: string | null, labels = implement, blockedBy: string[] = [], repo = 1) => {
     run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at, created_at) VALUES (?, ?, 'T', '', 'u', 'me', 'open', ?, ?, ?, ?)", repo, n, labels, JSON.stringify(blockedBy), updated, created);
+    publish('tickets');
+  };
   /** Tickets not waiting on another ticket, in queue order. */
   const startable = () => buildQueue().filter((c) => !c.blockedBy?.startsWith('Depends on')).map((c) => c.ticket.number);
   /** `count` open tickets, numbered from `from`, that wait on `ref`. */
@@ -4224,6 +4342,7 @@ describe('ticket order', () => {
   });
   afterEach(() => {
     run('DELETE FROM tickets WHERE number BETWEEN 10 AND 49');
+    publish('tickets');
     saveSettings({ ticketOrder: 'updated-asc' });
   });
 
@@ -4295,6 +4414,7 @@ describe('ticket order', () => {
     } finally {
       run('DELETE FROM tickets WHERE repo_id = ?', lib);
       run('DELETE FROM repos WHERE id = ?', lib);
+      publish('repos');
     }
   });
 

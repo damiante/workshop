@@ -3,7 +3,7 @@ import path from 'node:path';
 import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
 import { allowanceOf, allowanceViews, apiSpendSince } from '../allowance.ts';
-import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, TicketStatePatch, Usage, UsageRange } from '../api-types.ts';
+import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, StatusSummary, TicketStatePatch, Usage, UsageRange } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { listMedia, mediaDir, mediaView } from '../media.ts';
@@ -14,7 +14,7 @@ import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncProgr
 import { requestPause, stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend, USAGE_RANGES, usageHistory } from '../spend.ts';
-import { activeRunId, dependencyGraphs, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setBypassLimits, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
+import { activeRunId, dependencyGraphs, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, needsYouViews, setBypassLimits, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { CONTENT_TYPES, extType, validName } from '../workflow/media.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
@@ -22,6 +22,8 @@ import { OPENAPI } from './openapi.ts';
 import { check, HttpError, int, num } from './util.ts';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+/** How much of the queue the overview returns: what the Dashboard shows. */
+const OVERVIEW_QUEUE_LIMIT = 8;
 
 function alertViews(where: string, limit: number): AlertView[] {
   return all<{ id: number; level: AlertView['level']; kind: string; message: string; ref: string | null; created_at: number; ack_at: number | null }>(
@@ -51,8 +53,8 @@ export const apiRouter = Router();
 
 apiRouter.get('/overview', (_req, res) => {
   const s = getSettings();
-  const tickets = listTicketViews();
-  const waiting = tickets.filter((t) => t.attention);
+  const waiting = needsYouViews();
+  const queue = queueView();
   const overview: Overview = {
     mode: s.mode,
     withinHours: withinHours(s, new Date()),
@@ -61,11 +63,23 @@ apiRouter.get('/overview', (_req, res) => {
     publishWaiting: runViews("runs.status = 'publishing' AND runs.publish_retry_at IS NOT NULL"),
     needsYou: waiting.filter((t) => !t.dismissed),
     dismissed: waiting.filter((t) => t.dismissed),
-    queue: queueView(),
+    queue: queue.slice(0, OVERVIEW_QUEUE_LIMIT),
+    queueTotal: queue.length,
     hosts: hostViews(),
     alerts: alertViews('ack_at IS NULL', 20),
   };
   res.json(overview);
+});
+
+apiRouter.get('/status', (_req, res) => {
+  const s = getSettings();
+  const status: StatusSummary = {
+    mode: s.mode,
+    withinHours: withinHours(s, new Date()),
+    allowance: allowanceViews(),
+    openAlerts: one<{ n: number }>('SELECT COUNT(*) AS n FROM alerts WHERE ack_at IS NULL')!.n,
+  };
+  res.json(status);
 });
 
 apiRouter.get('/usage/lifetime', (_req, res) => {

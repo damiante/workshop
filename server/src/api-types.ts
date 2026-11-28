@@ -1,6 +1,6 @@
 // Types shared with the client (imported type-only). Keep this file free of runtime imports.
 
-export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media' | 'sync';
+export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media' | 'activity' | 'sync';
 
 export type Mode = 'paused' | 'scheduled' | 'always';
 
@@ -374,8 +374,18 @@ export interface Overview {
   /** Needs-you items you dismissed. */
   dismissed: TicketView[];
   queue: QueueItem[];
+  /** Every queued ticket; `queue` holds only the first few. */
+  queueTotal: number;
   hosts: HostView[];
   alerts: AlertView[];
+}
+
+export interface StatusSummary {
+  mode: Mode;
+  withinHours: boolean;
+  allowance: AllowanceView[];
+  /** Unacknowledged alerts. */
+  openAlerts: number;
 }
 
 export interface Usage {
@@ -518,7 +528,7 @@ export interface UsageHistory {
   byModel: SpendSeries[];
   byProject: SpendSeries[];
   byConnection: SpendSeries[];
-  /** The tickets that used the most in the range, by cost, highest first; at most 50. */
+  /** The tickets that used the most in the range, by cost, highest first; at most 500. */
   byTicket: TicketSpend[];
   allowance: AllowanceHistory[];
   projection: {

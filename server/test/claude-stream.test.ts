@@ -45,6 +45,41 @@ describe('readClaudeLine', () => {
     expect(hitUsageLimit(run)).toBe(false);
   });
 
+  describe('usage counted response by response', () => {
+    // One API response is printed once per content block, each time with the same id and usage.
+    const reply = (id: string, usage: object, content: object[], parent?: string) => ({ type: 'assistant', parent_tool_use_id: parent ?? null, message: { id, usage, content } });
+    const usage = (input: number, created: number, read: number) => ({ input_tokens: input, cache_creation_input_tokens: created, cache_read_input_tokens: read, output_tokens: 3 });
+
+    it('adds each response once, however many blocks it prints', () => {
+      const run = read(
+        reply('m1', usage(6, 1000, 0), [{ type: 'thinking', thinking: '' }]),
+        reply('m1', usage(6, 1000, 0), [{ type: 'text', text: 'x'.repeat(110) }]),
+        reply('m1', usage(6, 1000, 0), [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'npm test' } }]),
+        { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } },
+        reply('m2', usage(4, 200, 1006), [{ type: 'text', text: 'Done.' }]),
+      );
+      expect(run.spent).toMatchObject({ inputTokens: 1006 + 1210, responses: 2 });
+      // An estimate from what was written; the 3 printed with each response isn't the final count.
+      expect(run.spent!.outputTokens).toBe(100 + Math.round(('Bash'.length + '{"command":"npm test"}'.length) / 1.1) + Math.round(5 / 1.1));
+    });
+
+    it("counts a subagent's responses too, and nothing for a line without usage", () => {
+      const run = read(reply('m1', usage(1, 0, 99), [{ type: 'text', text: 'a' }]), reply('s1', usage(1, 0, 49), [{ type: 'text', text: 'b' }], 't9'), { type: 'assistant', error: 'rate_limit', message: { content: [] } });
+      expect(run.spent).toMatchObject({ inputTokens: 150, responses: 2 });
+      expect(read(RATE_ALLOWED).spent).toBeUndefined();
+    });
+
+    it("takes a result's totals from modelUsage when it has them, which include what usage leaves out", () => {
+      const modelUsage = {
+        'claude-a': { inputTokens: 10, cacheCreationInputTokens: 40000, cacheReadInputTokens: 36000, outputTokens: 700, costUSD: 0.3 },
+        'claude-b': { inputTokens: 5, cacheCreationInputTokens: 0, cacheReadInputTokens: 1000, outputTokens: 50, costUSD: 0.01 },
+      };
+      expect(read({ ...SUCCESS, modelUsage }).result).toMatchObject({ inputTokens: 77015, outputTokens: 750, costUsd: 0.31 });
+      expect(read(SUCCESS).result).toMatchObject({ inputTokens: 6 + 35984 + 35447, outputTokens: 597 });
+      expect(read({ ...SUCCESS, modelUsage: {} }).result).toMatchObject({ inputTokens: 71437, outputTokens: 597 });
+    });
+  });
+
   it('keeps the reported result when later turns of the session end without one', () => {
     const report = (summary: string) => ({ type: 'result', subtype: 'success', is_error: false, structured_output: { outcome: 'done', summary } });
     const wakeup = { type: 'result', subtype: 'success', is_error: false, result: 'Nothing is left to do, so I stopped the loop.' };

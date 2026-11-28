@@ -12,12 +12,12 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/crypto.ts` | AES-256-GCM `seal`/`unseal` for stored secrets, TOTP, constant-time compare |
 | `src/settings.ts` | Operating settings (one JSON row) plus a key/value store |
 | `src/api-types.ts` | Types shared with the client. **No runtime imports.** |
-| `src/events.ts` | Topic bus plus SSE helper. `publish('runs')` makes browsers refetch run views. SSE streams send a visible `ping` event every 15 s |
+| `src/events.ts` | Topic bus plus SSE helper. `publish('runs')` makes browsers refetch run views. An agent's activity text alone publishes `activity`, which only the views showing it listen to. SSE streams send a visible `ping` event every 15 s |
 | `src/alerts.ts` | `raiseAlert` (de-duplicated by kind and ref) and `clearAlert` |
 | `src/agents.ts` | Agent-class settings, defaults, suggested models |
 | `src/tickets.ts` | Ticket and repo rows, views, `editLabels` (remote first, then local mirror) |
 | `src/runs.ts` | Run rows and views, run log files (`DATA_DIR/runs/<id>.jsonl`), live activity |
-| `src/spend.ts` | Lifetime spend ledger: one row per claude invocation, kept past run cleanup. New dimensions are recorded in `recordSpend`, filled in `backfillSpend`, and grouped through `DIMENSIONS` |
+| `src/spend.ts` | Lifetime spend ledger: one row per claude invocation, kept past run cleanup. A session that ends without a result (killed at a limit, paused, out of memory) is recorded from the responses counted on the way: exact input, estimated output, cost at the model's average price (`estimateCost`). New dimensions are recorded in `recordSpend`, filled in `backfillSpend`, and grouped through `DIMENSIONS` |
 | `src/projection.ts` | Pure projections for the Usage page: when a subscription window reaches a limit, when API spend reaches the daily limit, month-end totals |
 | `src/backfill-spend.ts` | CLI: fill in spend ledger dimensions and missing rows, optionally from an old database copy |
 | `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
@@ -52,7 +52,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 
 ## Invariants: don't break these
 
-- **Every state change a view shows must `publish` its topic.** Clock-driven state goes through `clockTopics` in the scheduler tick.
+- **Every state change a view shows must `publish` its topic.** Clock-driven state goes through `clockTopics` in the scheduler tick. The priority graph (`priorityGraph()`) is cached until the `tickets` or `repos` topic fires, so a write to a ticket's state, `blocked_by` or `prioritised`, or to a repo, that doesn't publish leaves queue order and the Dependencies page stale.
 - **No git credentials in the `run` container.** Tokens go only to `prepare` (read) and `publish` (write), through env vars, never onto the volume. `pipeline.test.ts` checks this.
 - **Secrets never reach the browser.** `toView()` masks them. Edits with an empty secret field keep the stored value.
 - **Exactly one Claude credential per container** (`launchEnv`): with both set, Claude Code would bill the API key.
