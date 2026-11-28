@@ -93,7 +93,23 @@ Usage limits are set per subscription. `PUT /api/settings` with the old global `
 
 ## Checking now
 
-`POST /api/refresh` runs the checks Workshop's timer runs, without waiting for the next poll: it syncs tickets from GitHub, re-reads the usage of every Claude subscription that is over your limits or hasn't been checked in the last 10 minutes (even one whose last check failed), and starts agents in every free slot that a ready ticket fits. It waits up to about 2.5 minutes for those usage checks, then starts or resumes what they made ready too. A usage limit Claude reported mid-run still waits for its reset time. It answers 202 at once; the checks finish in the background, and the dashboard updates when they do.
+`POST /api/sync` syncs tickets from GitHub now, or right after the sync that's already running.
+
+`POST /api/refresh` runs the checks Workshop's timer runs, without waiting for the next poll: it syncs tickets from GitHub, re-reads the usage of every Claude subscription that is over your limits or hasn't been checked in the last 10 minutes (even one whose last check failed), and starts agents in every free slot that a ready ticket fits. It waits for its sync, then up to about 2.5 minutes from the request for those usage checks, then starts or resumes what they made ready too. A usage limit Claude reported mid-run still waits for its reset time. A Refresh asked for while one is running joins it.
+
+Both answer 202 at once with the sync progress record. Before #147 they answered `{ "ok": true }`; a script that checks `ok` needs updating. Follow the work with `GET /api/sync`, which returns the same record:
+
+| Field | Meaning |
+|---|---|
+| `state` | `idle`; `requested` (received, about to start); `waiting` (queued behind the sync pass that's running); `running` |
+| `kind` | `sync` (Sync now, or a settings change), `refresh`, or `scheduled` (the timer) |
+| `phase` | `sync`, then for a refresh `usage` and `allocate` (starting work); `null` when idle |
+| `repo` | The repository being synced |
+| `done`, `total` | In `sync`: repositories synced and due. In `usage`: Claude usage checks finished and started |
+| `requestedAt`, `lastFinishedAt` | Epoch milliseconds |
+| `lastError` | Why repositories failed to sync in the last pass, or `null` |
+
+The record lives in memory, so after a restart `lastFinishedAt` is `null` until the first sync. Every change publishes the `sync` topic on `GET /api/events`. A timer check with no repository due doesn't change it.
 
 ## Pausing a run
 
@@ -125,6 +141,10 @@ A push is refused with 409 and the reason when the ticket is closed, failed, ski
 ## Run progress
 
 `GET /api/runs/{id}` includes the limits the agent's session started with: `maxTurns` and `timeoutMin` (minutes), plus `stepStartedAt`, when the current step's container started. The time limit counts from `stepStartedAt`, and both limits start again when a paused run resumes. They're null for runs from before Workshop recorded them.
+
+## Agent instructions
+
+`GET /api/agents` marks customised instructions whose base has moved on: `defaultBefore` holds the default they were customised from when it differs from today's `defaultPrompt`, and `defaultUnknown` is true for instructions customised before Workshop recorded that. Changing the instructions through `PUT /api/agents/:name` records today's default as the new base. `POST /api/agents/:name/accept-default` records it without changing the instructions, which clears both; it answers with the agent, or 404 for an unknown one.
 
 ## Media
 

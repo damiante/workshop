@@ -352,6 +352,19 @@ thead th {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+/* A sortable column's heading: a button that looks like the other headings. */
+.spend-table button.sort {
+  font-weight: inherit;
+  font-size: inherit;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: inherit;
+  white-space: nowrap;
+}
+.spend-table button.sort:hover {
+  text-decoration: underline;
+}
 /* Too narrow for shared widths: let each table fit its own content. */
 @media (max-width: 760px) {
   .spend-table {
@@ -485,6 +498,18 @@ input[type='checkbox'] {
 .error-text {
   color: var(--error-text);
 }
+.diff {
+  white-space: pre-wrap;
+  margin: 6px 0 0;
+}
+.diff .added {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  color: var(--text);
+}
+.diff .removed {
+  background: color-mix(in srgb, var(--error) 18%, transparent);
+  color: var(--text);
+}
 
 /* Status indicator: a dot that always sits next to words */
 
@@ -574,6 +599,43 @@ input[type='checkbox'] {
   bottom: -4px;
   width: 2px;
   background: var(--text);
+}
+
+/* Sync now and Refresh: what the sync is doing, next to the button */
+.sync-control {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: 100%;
+}
+.sync-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.sync-row .meter {
+  min-width: 14rem;
+  grid-template-columns: auto 100px;
+}
+.sync-row .meter > span:last-child:empty {
+  display: none;
+}
+.sync-control .notice {
+  margin: 0;
+}
+@media (max-width: 760px) {
+  .sync-control,
+  .sync-row {
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+  .sync-row .meter {
+    min-width: 0;
+    grid-template-columns: 1fr 80px;
+  }
 }
 
 /* Run progress: label, bar and figures in aligned columns */

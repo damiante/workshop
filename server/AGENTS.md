@@ -17,13 +17,13 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/agents.ts` | Agent-class settings, defaults, suggested models |
 | `src/tickets.ts` | Ticket and repo rows, views, `editLabels` (remote first, then local mirror) |
 | `src/runs.ts` | Run rows and views, run log files (`DATA_DIR/runs/<id>.jsonl`), live activity |
-| `src/spend.ts` | Lifetime spend ledger: one row per claude invocation, kept past run cleanup. New dimensions are recorded in `recordSpend`, filled in `backfillSpend`, and grouped through `DIMENSIONS` |
+| `src/spend.ts` | Lifetime spend ledger: one row per claude invocation, kept past run cleanup. A session that ends without a result (killed at a limit, paused, out of memory) is recorded from the responses counted on the way: exact input, estimated output, cost at the model's average price (`estimateCost`). New dimensions are recorded in `recordSpend`, filled in `backfillSpend`, and grouped through `DIMENSIONS` |
 | `src/projection.ts` | Pure projections for the Usage page: when a subscription window reaches a limit, when API spend reaches the daily limit, month-end totals |
 | `src/backfill-spend.ts` | CLI: fill in spend ledger dimensions and missing rows, optionally from an old database copy |
 | `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
 | `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`, and the code review's routing `stageForRework` and formatters), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |
-| `src/scheduler/loop.ts` | Two serialised passes: allocation (re-attach, settle hand pushes, resume paused runs, the queue, fill every free slot, usage probe, clock topics) runs on every `kick()`; sync (GitHub sync, API merges, then allocation) runs on the 60-second tick, which also checks hosts and cleans up |
+| `src/scheduler/loop.ts` | Two serialised passes: allocation (re-attach, settle hand pushes, resume paused runs, the queue, fill every free slot, usage probe, clock topics) runs on every `kick()`; sync (GitHub sync, API merges, then allocation) runs on the 60-second tick, which also checks hosts and cleans up. Keeps the in-memory `sync` progress record (`syncProgress`) for scheduled syncs, Sync now and Refresh |
 | `src/media.ts` | The per-ticket media store (`DATA_DIR/media/<ticket id>/` plus the `media` table): downloads issue images, copies agent screenshots back, delivers the folder to runs, deletes it on finish and in the 30-day sweep |
 | `src/workflow/media.ts` | Pure media rules: allowed hosts, image sniffing, name and size checks, link rewriting, the PR's Screenshots line |
 | `src/scheduler/runner.ts` | Run lifecycle (`launch`, `drive`, `resume`, `fail`, `stopRun`) |

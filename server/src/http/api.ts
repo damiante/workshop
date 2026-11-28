@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router } from 'express';
-import { agentViews, updateAgent } from '../agents.ts';
+import { acceptDefault, agentViews, updateAgent } from '../agents.ts';
 import { allowanceOf, allowanceViews, apiSpendSince } from '../allowance.ts';
 import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, StatusSummary, TicketStatePatch, Usage, UsageRange } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
@@ -10,7 +10,7 @@ import { listMedia, mediaDir, mediaView } from '../media.ts';
 import { getConnection, listConnections, modelsOf, setLimits } from '../providers/index.ts';
 import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews, ticketRunViews } from '../runs.ts';
 import { pushRefusal, startOfDay, withinHours } from '../scheduler/gates.ts';
-import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncSoon } from '../scheduler/loop.ts';
+import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncProgress, syncSoon } from '../scheduler/loop.ts';
 import { requestPause, stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend, USAGE_RANGES, usageHistory } from '../spend.ts';
@@ -206,6 +206,13 @@ apiRouter.put('/agents/:name', (req, res) => {
   res.json(agentViews().find((a) => a.name === name));
 });
 
+apiRouter.post('/agents/:name/accept-default', (req, res) => {
+  const name = req.params.name as AgentName;
+  check(AGENT_NAMES.includes(name), 'Unknown agent.', 404);
+  acceptDefault(name);
+  res.json(agentViews().find((a) => a.name === name));
+});
+
 apiRouter.get('/models', (_req, res) => {
   const options: ModelOption[] = listConnections('model').flatMap((c) => {
     const provider = modelsOf(c);
@@ -342,14 +349,18 @@ apiRouter.put('/tickets/:id/state', async (req, res) => {
   res.json(ticketView(t, repo));
 });
 
+apiRouter.get('/sync', (_req, res) => {
+  res.json(syncProgress());
+});
+
 apiRouter.post('/sync', (_req, res) => {
-  syncSoon();
-  res.status(202).json({ ok: true });
+  void syncSoon();
+  res.status(202).json(syncProgress());
 });
 
 apiRouter.post('/refresh', (_req, res) => {
   void refreshNow();
-  res.status(202).json({ ok: true });
+  res.status(202).json(syncProgress());
 });
 
 function ticketParam(idParam: string) {

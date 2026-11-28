@@ -3,11 +3,11 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { seedAgents } from '../src/agents.ts';
+import { checkPromptDefaults, seedAgents } from '../src/agents.ts';
 import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
 import { DatabaseSync } from 'node:sqlite';
-import { initDb, MIGRATIONS, one, run } from '../src/db.ts';
+import { all, initDb, MIGRATIONS, one, run } from '../src/db.ts';
 import { mediaDir } from '../src/media.ts';
 import { createConnection } from '../src/providers/index.ts';
 import { publish } from '../src/events.ts';
@@ -113,6 +113,75 @@ describe('authenticated API', () => {
     expect(custom.body).toMatchObject({ prompt: 'Be brief.', customised: true });
     const reset = await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ prompt: classifier.defaultPrompt });
     expect(reset.body.customised).toBe(false);
+  });
+
+  it('flags a customised prompt whose default has changed since it was saved', async () => {
+    const base = () => one<{ prompt_base: string | null }>("SELECT prompt_base FROM agent_classes WHERE name = 'classifier'")!.prompt_base;
+    const view = async () => (await request(app).get('/api/agents').set('cookie', cookie)).body.find((a: { name: string }) => a.name === 'classifier');
+    const flag = () => run("UPDATE agent_classes SET prompt_base = 'Old default.' WHERE name = 'classifier'");
+
+    const saved = await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ prompt: 'Be brief.' });
+    const { defaultPrompt } = saved.body;
+    expect(base()).toBe(defaultPrompt);
+    expect(saved.body).toMatchObject({ customised: true, defaultBefore: null, defaultUnknown: false });
+
+    flag();
+    expect(await view()).toMatchObject({ defaultBefore: 'Old default.', defaultUnknown: false });
+
+    // A save that only changes the model keeps the flag; editing the prompt clears it.
+    await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ model: 'claude-haiku-5-5', prompt: 'Be brief.' });
+    expect((await view()).defaultBefore).toBe('Old default.');
+    await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ prompt: 'Be very brief.' });
+    expect((await view()).defaultBefore).toBe(null);
+    expect(base()).toBe(defaultPrompt);
+
+    // Dismissing records today's default and keeps the prompt.
+    flag();
+    const accepted = await request(app).post('/api/agents/classifier/accept-default').set('cookie', cookie);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toMatchObject({ prompt: 'Be very brief.', customised: true, defaultBefore: null });
+
+    // Resetting to the default clears it.
+    flag();
+    const reset = await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ prompt: defaultPrompt });
+    expect(reset.body).toMatchObject({ customised: false, defaultBefore: null, defaultUnknown: false });
+    expect(base()).toBe(null);
+  });
+
+  it("notes prompts customised before Workshop kept their base, without flagging them", async () => {
+    run("UPDATE agent_classes SET prompt = 'Legacy.', prompt_base = NULL WHERE name = 'merge'");
+    const merge = async () => (await request(app).get('/api/agents').set('cookie', cookie)).body.find((a: { name: string }) => a.name === 'merge');
+    expect(await merge()).toMatchObject({ customised: true, defaultBefore: null, defaultUnknown: true });
+    checkPromptDefaults();
+    expect(one("SELECT id FROM alerts WHERE kind = 'prompt-default' AND ref = 'merge'")).toBeUndefined();
+    await request(app).post('/api/agents/merge/accept-default').set('cookie', cookie);
+    expect(await merge()).toMatchObject({ prompt: 'Legacy.', defaultBefore: null, defaultUnknown: false });
+    run("UPDATE agent_classes SET prompt = NULL, prompt_base = NULL WHERE name = 'merge'");
+  });
+
+  it('raises one alert per default change', async () => {
+    const open = () => all<{ id: number }>("SELECT id FROM alerts WHERE kind = 'prompt-default' AND ref = 'design' AND ack_at IS NULL");
+    run("UPDATE agent_classes SET prompt = 'Mine.', prompt_base = 'Old default.', prompt_alerted = NULL WHERE name = 'design'");
+    checkPromptDefaults();
+    checkPromptDefaults();
+    expect(open()).toHaveLength(1);
+    run("UPDATE alerts SET ack_at = 1 WHERE kind = 'prompt-default' AND ref = 'design'");
+    checkPromptDefaults();
+    expect(open()).toHaveLength(0);
+
+    // A later default change alerts again; dismissing acknowledges it.
+    run("UPDATE agent_classes SET prompt_alerted = 'older' WHERE name = 'design'");
+    checkPromptDefaults();
+    expect(open()).toHaveLength(1);
+    await request(app).post('/api/agents/design/accept-default').set('cookie', cookie);
+    expect(open()).toHaveLength(0);
+    run("UPDATE agent_classes SET prompt = NULL, prompt_base = NULL, prompt_alerted = NULL WHERE name = 'design'");
+  });
+
+  it('refuses to accept the default for an unknown agent', async () => {
+    const res = await request(app).post('/api/agents/nobody/accept-default').set('cookie', cookie);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Unknown agent.');
   });
 
   it('refuses cross-site writes', async () => {
@@ -424,12 +493,31 @@ describe('usage and launch', () => {
     expect(res.body).toMatchObject({ apiRunCapUsd: s.apiRunCapUsd, apiDailyCapUsd: s.apiDailyCapUsd });
   });
 
-  it('accepts a refresh, which a read token may not ask for', async () => {
-    const res = await request(app).post('/api/refresh').set('cookie', cookie);
-    expect(res.status).toBe(202);
-    expect(res.body).toEqual({ ok: true });
+  const progressShape = {
+    state: expect.stringMatching(/^(idle|requested|waiting|running)$/),
+    kind: expect.stringMatching(/^(sync|refresh|scheduled)$/),
+    done: expect.any(Number),
+    total: expect.any(Number),
+  };
+
+  it('reports the sync progress', async () => {
+    const res = await request(app).get('/api/sync').set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(['done', 'kind', 'lastError', 'lastFinishedAt', 'phase', 'repo', 'requestedAt', 'state', 'total']);
+    expect(res.body).toMatchObject(progressShape);
+  });
+
+  it('accepts a sync and a refresh, which a read token may not ask for, and answers with the progress', async () => {
+    for (const path of ['/api/sync', '/api/refresh']) {
+      const res = await request(app).post(path).set('cookie', cookie);
+      expect(res.status).toBe(202);
+      expect(res.body).toMatchObject(progressShape);
+      expect(res.body.requestedAt).toEqual(expect.any(Number));
+    }
     const token = (await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'refresh', scope: 'read' })).body.token;
     expect((await request(app).post('/api/refresh').set('authorization', `Bearer ${token}`)).status).toBe(403);
+    expect((await request(app).post('/api/sync').set('authorization', `Bearer ${token}`)).status).toBe(403);
+    expect((await request(app).get('/api/sync').set('authorization', `Bearer ${token}`)).status).toBe(200);
   });
 
   it('refuses to launch what cannot run', async () => {
@@ -644,6 +732,7 @@ describe('dependencies', () => {
   });
 
   it('builds the priority graph once per request, and again only after tickets or repos change', async () => {
+    await new Promise((r) => setTimeout(r, 600)); // let allocation passes that earlier writes kick() (500 ms later) finish
     publish('tickets');
     graphBuilds.count = 0;
     expect((await request(app).get('/api/dependencies').set('cookie', cookie)).status).toBe(200);

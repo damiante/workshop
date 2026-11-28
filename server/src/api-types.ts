@@ -1,6 +1,6 @@
 // Types shared with the client (imported type-only). Keep this file free of runtime imports.
 
-export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media' | 'activity';
+export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media' | 'activity' | 'sync';
 
 export type Mode = 'paused' | 'scheduled' | 'always';
 
@@ -122,6 +122,10 @@ export interface AgentClassView {
   prompt: string;
   defaultPrompt: string;
   customised: boolean;
+  /** The default the customisation was based on, when it differs from today's `defaultPrompt`. */
+  defaultBefore: string | null;
+  /** Customised before Workshop recorded which default it was based on, so it can't tell whether that changed. */
+  defaultUnknown: boolean;
   /** Fixed instructions Workshop appends; shown read-only. */
   protocol: string;
   maxTurns: number;
@@ -533,7 +537,7 @@ export interface UsageHistory {
   byModel: SpendSeries[];
   byProject: SpendSeries[];
   byConnection: SpendSeries[];
-  /** The tickets that used the most in the range, by cost, highest first; at most 50. */
+  /** The tickets that used the most in the range, by cost, highest first; at most 500. */
   byTicket: TicketSpend[];
   allowance: AllowanceHistory[];
   projection: {
@@ -590,4 +594,21 @@ export interface LoginResponse {
   ok?: boolean;
   /** First sign-in: scan this with an authenticator app, then sign in again with a code. */
   enroll?: { secret: string; uri: string };
+}
+
+/** GET /api/sync: what the GitHub sync is doing (scheduled, Sync now or Refresh). In memory, so it resets on restart. */
+export interface SyncProgress {
+  /** requested: a click was received. waiting: queued behind the pass that's running. */
+  state: 'idle' | 'requested' | 'waiting' | 'running';
+  kind: 'sync' | 'refresh' | 'scheduled';
+  /** sync: done/total count repositories. usage (Refresh only): allowance checks. allocate (Refresh only): starting work. */
+  phase: 'sync' | 'usage' | 'allocate' | null;
+  /** The repository being synced. */
+  repo: string | null;
+  done: number;
+  total: number;
+  requestedAt: number | null;
+  lastFinishedAt: number | null;
+  /** The sync failures of the last pass, if any. */
+  lastError: string | null;
 }

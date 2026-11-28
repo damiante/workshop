@@ -26,7 +26,7 @@ const { bus, publish } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { checkRaiseRate, connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
-const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, syncSoon, tick } = await import('../src/scheduler/loop.ts');
+const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resetSyncProgress, resumeNow, resumePaused, settleManual, syncProgress, syncSoon, tick } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf, priorityGraph } = await import('../src/tickets.ts');
 const { checkingBlockers, syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
@@ -1856,6 +1856,54 @@ describe('breaking large tickets down', () => {
   });
 });
 
+describe('usage of a session that ends without a result', () => {
+  const reply = (id: string, read: number, text: string) => line({ type: 'assistant', parent_tool_use_id: null, message: { id, usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: read, output_tokens: 1 }, content: [{ type: 'text', text }] } });
+  const spend = (id: string) => all<{ input_tokens: number; output_tokens: number; cost_usd: number }>('SELECT input_tokens, output_tokens, cost_usd FROM spend WHERE run_id = ?', id);
+
+  it('records what the agent used before it ran out of time', async () => {
+    // An earlier run of this model sets the price: $1 for 1,000,000 tokens.
+    run("INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd) VALUES ('earlier', 1, 'claude-priced', 'subscription', 990000, 10000, 1)");
+    const env = new FakeEnv({});
+    let release = () => {};
+    env.inspect = async () => ({ running: true, exitCode: 0, oomKilled: false });
+    env.follow = (_id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+      for (const text of [reply('m1', 990, 'x'.repeat(220)), reply('m1', 990, 'y'.repeat(110)), reply('m2', 1990, '')]) onLine({ stream: 'stdout', text });
+      return new Promise<void>((done) => (release = done));
+    };
+    env.kill = async () => release();
+    env.wait = async () => ({ running: false, exitCode: 137, oomKilled: false });
+    fake.env = env;
+    run(
+      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, step, container_id, volume, image, max_turns, timeout_min, step_started_at, started_at)
+       VALUES ('cut-short', 1, 'implement', 'normal', 1, ?, ?, 'claude-priced', 'subscription', 'running', 'run', 'run-container-old', 'v', 'img', 300, 1, ?, ?)`,
+      ids.env,
+      ids.model,
+      Date.now() - 5 * 60_000,
+      Date.now() - 6 * 60_000,
+    );
+    try {
+      await drive('cut-short');
+      expect(getRun('cut-short')).toMatchObject({ status: 'failed', error: 'Stopped after the 1-minute time limit.', input_tokens: 3000, output_tokens: 300 });
+      const [row] = spend('cut-short');
+      expect(row).toMatchObject({ input_tokens: 3000, output_tokens: 300 });
+      expect(row.cost_usd).toBeCloseTo(0.0033, 6);
+    } finally {
+      run("DELETE FROM spend WHERE run_id IN ('earlier', 'cut-short')");
+    }
+  });
+
+  it("leaves a run that printed a result to the result's own figures", async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [reply('m1', 990, 'hello'), line({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.5, structured_output: { outcome: 'done', summary: 'ok', tests: 'ok' }, usage: { input_tokens: 10, output_tokens: 5 } })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    const id = go();
+    await settle(id);
+    expect(spend(id)).toEqual([{ input_tokens: 10, output_tokens: 5, cost_usd: 0.5 }]);
+  });
+});
+
 describe('launchNow', () => {
   const script = () => ({ prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'Done.', tests: 'ok' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
 
@@ -2199,6 +2247,121 @@ describe('allocation', () => {
     expect(second).toBe(first);
     expect(await second).toEqual(await first);
     expect(fake.env.started.filter((spec: StepSpec) => spec.cmd[0] === 'usage-probe')).toHaveLength(1);
+  });
+});
+
+describe('sync progress', () => {
+  type Progress = ReturnType<typeof syncProgress>;
+  let seen: Progress[] = [];
+  const record = (t: string) => t === 'sync' && seen.push(syncProgress());
+  let release = () => {};
+  let gate = Promise.resolve();
+  let mode: ReturnType<typeof getSettings>['mode'] = 'paused';
+
+  beforeEach(() => {
+    mode = getSettings().mode;
+    saveSettings({ mode: 'paused' }); // nothing launches: only the sync is under test
+    const r = getRepo(1)!;
+    run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled) VALUES (?, ?, 'me/other', 'main', 'u', 1)", r.vcs_connection_id, r.ticket_connection_id);
+    gate = new Promise<void>((done) => (release = done));
+    fake.tickets.listChanged = async () => [];
+    resetSyncProgress();
+    seen = [];
+    bus.on('topic', record);
+  });
+  afterEach(async () => {
+    release();
+    bus.off('topic', record);
+    await syncSoon(); // nothing left running when the fakes change
+    run("DELETE FROM repos WHERE full_name = 'me/other'");
+    saveSettings({ mode });
+  });
+
+  it('steps from requested through each repository to idle', async () => {
+    const before = Date.now();
+    await syncSoon();
+    expect(seen[0]).toMatchObject({ state: 'requested', kind: 'sync' });
+    const syncing = seen.filter((p) => p.state === 'running' && p.phase === 'sync');
+    expect(syncing.every((p) => p.total === 2 && p.kind === 'sync')).toBe(true);
+    expect([...new Set(syncing.map((p) => p.done))]).toEqual([0, 1, 2]);
+    expect(syncing.map((p) => p.repo)).toEqual(expect.arrayContaining(['me/app', 'me/other']));
+    expect(seen.at(-1)).toMatchObject({ state: 'idle', kind: 'sync', phase: null, lastError: null });
+    expect(seen.at(-1)!.lastFinishedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it('shows a request made during a running pass as waiting, then runs it', async () => {
+    let listed = 0;
+    fake.tickets.listChanged = async () => {
+      listed++;
+      await gate;
+      return [];
+    };
+    const first = syncSoon();
+    await vi.waitFor(() => expect(listed).toBe(1));
+    expect(syncProgress()).toMatchObject({ state: 'running', repo: 'me/app' });
+    void syncSoon();
+    expect(syncProgress()).toMatchObject({ state: 'waiting', kind: 'sync' });
+    seen = [];
+    release();
+    await first;
+    expect(listed).toBe(3); // me/other was read after the click, so only me/app runs again
+    const states = seen.map((p) => p.state).filter((s, i, a) => s !== a[i - 1]);
+    expect(states).toEqual(['waiting', 'running', 'idle']);
+  });
+
+  it('goes through the sync, the usage checks and starting work on Refresh, and resolves after its sync', async () => {
+    run('DELETE FROM allowance_samples');
+    forgetProbe(ids.model);
+    fake.env = new FakeEnv({ usage: [RATE, result({})] });
+    let listed = 0;
+    fake.tickets.listChanged = async () => {
+      listed++;
+      await gate;
+      return [];
+    };
+    let done = false;
+    const refresh = refreshNow().then(() => (done = true));
+    expect(refreshNow()).toBe(refreshNow()); // a second Refresh joins the first
+    await vi.waitFor(() => expect(listed).toBe(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(done).toBe(false);
+    expect(syncProgress()).toMatchObject({ state: 'running', kind: 'refresh', phase: 'sync' });
+    release();
+    await refresh;
+    expect(fake.env.started.filter((spec: StepSpec) => spec.cmd[0] === 'usage-probe')).toHaveLength(1);
+    const phases = seen.map((p) => p.phase).filter((p, i, a) => p !== a[i - 1]);
+    expect(phases).toEqual([null, 'sync', 'usage', 'allocate', null]);
+    const usage = seen.filter((p) => p.phase === 'usage');
+    expect(usage.every((p) => p.total === 1)).toBe(true);
+    expect(usage.at(-1)!.done).toBe(1);
+    expect(seen.every((p) => p.kind === 'refresh')).toBe(true);
+    expect(seen.at(-1)).toMatchObject({ state: 'idle', kind: 'refresh' });
+  });
+
+  it('records a failing repository and still finishes', async () => {
+    const other = one<{ id: number }>("SELECT id FROM repos WHERE full_name = 'me/other'")!.id;
+    const synced: string[] = [];
+    fake.tickets.listChanged = async (r: { fullName: string }) => {
+      if (r.fullName === 'me/app') throw new Error('Bad credentials');
+      synced.push(r.fullName);
+      return [];
+    };
+    await syncSoon();
+    expect(synced).toEqual(['me/other']);
+    expect(seen.filter((p) => p.state === 'running').at(-1)).toMatchObject({ done: 2, total: 2 });
+    expect(syncProgress()).toMatchObject({ state: 'idle', lastError: "Couldn't sync me/app: Bad credentials" });
+    expect(one('SELECT id FROM alerts WHERE kind = ? AND ref = ?', 'sync-failed', `repo:${other}`)).toBeUndefined();
+    run("DELETE FROM alerts WHERE kind = 'sync-failed'");
+  });
+
+  it('leaves the record alone on a tick with nothing due', async () => {
+    await syncSoon();
+    const last = syncProgress().lastFinishedAt;
+    seen = [];
+    await tick();
+    await new Promise((r) => setTimeout(r, 20)); // the tick's sync runs in the background
+    expect(seen).toEqual([]);
+    expect(syncProgress().lastFinishedAt).toBe(last);
   });
 });
 
