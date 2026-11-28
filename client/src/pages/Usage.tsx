@@ -386,7 +386,7 @@ function SubscriptionUsage({ allowance, now }: { allowance: AllowanceHistory[]; 
           const series = [
             { name: '5-hour', color: SERIES_COLORS[0], points: five },
             { name: 'Weekly', color: SERIES_COLORS[1], points: week },
-            ...(b.enabled ? [{ name: 'Burndown', color: SERIES_COLORS[2], points: line }] : []),
+            ...(b.enabled ? [{ name: 'Burndown (dotted)', color: SERIES_COLORS[3], points: line, dotted: true }] : []),
           ];
           const marks = [
             { label: `5-hour limit ${a.limits.fiveHour}%`, value: a.limits.fiveHour },
