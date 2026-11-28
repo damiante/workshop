@@ -39,6 +39,17 @@ const schemas: Record<string, Schema> = {
   }),
   Limits: object({ fiveHour: num, weekly: num }),
   UsageWindow: object({ pct: num, resetsAt: nullable(int) }),
+  Burndown: object({
+    enabled: bool,
+    ceiling: nullable(num),
+    target: num,
+    otherPerHour: num,
+    workshopPerHour: nullable(num),
+    duty: nullable(num),
+    bound: nullable(enumOf('linear', 'catchUp', 'userCap', 'target')),
+    basis: object({ otherHours: num, workshopHours: num }),
+  }),
+  BurndownWeek: object({ resetsAt: int, enabled: bool, finalPct: nullable(num), heldHours: num, blocked: bool, marginBefore: num, marginAfter: num }),
   AllowanceView: object({
     connectionId: int,
     connectionName: str,
@@ -49,6 +60,7 @@ const schemas: Record<string, Schema> = {
     unknown: bool,
     tokens: object({ fiveHour: int, sevenDay: int }),
     limits: ref('Limits'),
+    burndown: ref('Burndown'),
   }),
   Usage: object({
     allowance: array(ref('AllowanceView')),
@@ -97,7 +109,9 @@ const schemas: Record<string, Schema> = {
     connectionId: int,
     connectionName: str,
     limits: ref('Limits'),
-    samples: array(object({ ts: int, fiveHour: nullable(num), sevenDay: nullable(num) })),
+    burndown: ref('Burndown'),
+    weeks: array(ref('BurndownWeek')),
+    samples: array(object({ ts: int, fiveHour: nullable(num), sevenDay: nullable(num), ceiling: nullable(num), burndown: nullable(bool) })),
     sampledAt: nullable(int),
     blockedUntil: nullable(int),
     unknown: bool,
@@ -300,9 +314,9 @@ const paths: Record<string, Record<string, Op>> = {
   '/usage': { get: { summary: 'Claude allowance and limits per subscription, and today\'s API spend against the caps.', ok: ref('Usage') } },
   '/usage/limits/{connectionId}': {
     put: {
-      summary: "Changes a Claude subscription's 5-hour and weekly limits (percentages, 0 to 100). Send only the ones to change.",
+      summary: "Changes a Claude subscription's 5-hour and weekly limits (percentages, 0 to 100) and whether its weekly limit follows the burndown. Send only the ones to change.",
       params: ['connectionId'],
-      body: { type: 'object', properties: (schemas.Limits as { properties: Record<string, Schema> }).properties },
+      body: { type: 'object', properties: { ...(schemas.Limits as { properties: Record<string, Schema> }).properties, burndown: bool } },
       ok: ref('AllowanceView'),
       errors: [400, 403, 404],
     },

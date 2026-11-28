@@ -4,8 +4,8 @@ import { bucketLabel, foldSeries, GROUPINGS, METRICS, RANGES, readFilters, share
 import { useApi, useNow } from '../api.ts';
 import { Bars, Legend, LineChart, StackedColumns } from '../components/Chart.tsx';
 import { ErrorNote, Panel } from '../components/ui.tsx';
-import { money, tokens } from '../format.ts';
-import { projectionSections, type Cell } from '../projections.ts';
+import { money, tokens, when } from '../format.ts';
+import { burndownSummary, projectionSections, type Cell } from '../projections.ts';
 
 const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 const OTHER_COLOR = 'var(--series-other)';
@@ -377,13 +377,21 @@ function SubscriptionUsage({ allowance, now }: { allowance: AllowanceHistory[]; 
   return (
     <Panel title="Subscription usage">
       <div className="panel-body stack">
-        <p className="small muted">5-hour and weekly usage over the last 7 days, as Workshop read it. Gaps are times nothing was read. Dashed lines are your limits.</p>
+        <p className="small muted">5-hour and weekly usage over the last 7 days, as Workshop read it. Gaps are times nothing was read. Dashed lines are your limits and, with the weekly burndown on, where it stands now.</p>
         {allowance.map((a) => {
           const five = a.samples.flatMap((s): [number, number][] => (s.fiveHour === null ? [] : [[s.ts, s.fiveHour]]));
           const week = a.samples.flatMap((s): [number, number][] => (s.sevenDay === null ? [] : [[s.ts, s.sevenDay]]));
+          const b = a.burndown;
+          const line = b.enabled ? a.samples.flatMap((s): [number, number][] => (s.ceiling === null || s.burndown === false ? [] : [[s.ts, s.ceiling]])) : [];
           const series = [
             { name: '5-hour', color: SERIES_COLORS[0], points: five },
             { name: 'Weekly', color: SERIES_COLORS[1], points: week },
+            ...(b.enabled ? [{ name: 'Burndown', color: SERIES_COLORS[2], points: line }] : []),
+          ];
+          const marks = [
+            { label: `5-hour limit ${a.limits.fiveHour}%`, value: a.limits.fiveHour },
+            { label: `Weekly limit ${a.limits.weekly}%`, value: a.limits.weekly },
+            ...(b.enabled && b.ceiling !== null ? [{ label: `Burndown ceiling ${Math.round(b.ceiling)}%`, value: b.ceiling }] : []),
           ];
           return (
             <div key={a.connectionId} className="stack" style={{ gap: 8 }}>
@@ -397,13 +405,43 @@ function SubscriptionUsage({ allowance, now }: { allowance: AllowanceHistory[]; 
                     start={now - SEVEN_DAYS}
                     end={now}
                     series={series}
-                    marks={[
-                      { label: `5-hour limit ${a.limits.fiveHour}%`, value: a.limits.fiveHour },
-                      { label: `Weekly limit ${a.limits.weekly}%`, value: a.limits.weekly },
-                    ]}
-                    label={`${a.connectionName}: 5-hour and weekly usage over the last 7 days, with limits at ${a.limits.fiveHour}% and ${a.limits.weekly}%.`}
+                    marks={marks}
+                    label={`${a.connectionName}: 5-hour and weekly usage over the last 7 days, with limits at ${a.limits.fiveHour}% and ${a.limits.weekly}%${b.enabled ? ', and the weekly burndown' : ''}.`}
                   />
                 </>
+              )}
+              <p className="small muted">
+                {b.enabled ? '' : 'The weekly burndown is off (Settings). '}
+                {burndownSummary(b)}
+              </p>
+              {a.weeks.length > 0 && (
+                <div className="table-wrap">
+                  <table className="spend-table">
+                    <thead>
+                      <tr>
+                        <th>Week reset</th>
+                        <th>Burndown</th>
+                        <th className="num">Ended at</th>
+                        <th className="num">Held back</th>
+                        <th className="num">Margin</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {a.weeks.map((w) => (
+                        <tr key={w.resetsAt}>
+                          <td>{when(w.resetsAt, now)}</td>
+                          <td>{w.enabled ? 'On' : 'Off'}</td>
+                          <td className="num">
+                            {w.finalPct === null ? '–' : `${Math.round(w.finalPct)}%`}
+                            {w.blocked ? ', limit reported' : ''}
+                          </td>
+                          <td className="num">{`${Math.round(w.heldHours)} h`}</td>
+                          <td className="num">{w.marginAfter === w.marginBefore ? `${w.marginAfter}` : `${w.marginBefore} → ${w.marginAfter}`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           );

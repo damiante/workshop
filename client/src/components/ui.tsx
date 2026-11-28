@@ -6,14 +6,28 @@ export function Status({ tone, children }: { tone: Tone; children: ReactNode }) 
   return <span className={`status ${tone}`}>{children}</span>;
 }
 
-export function Meter({ label, window, threshold }: { label: string; window: UsageWindow | null; threshold: number }) {
+/** A usage bar with your limit as a solid line and, when the weekly burndown is on, its line dotted. */
+export function Meter({ label, window, threshold, burndown = null, target }: { label: string; window: UsageWindow | null; threshold: number; burndown?: number | null; target?: number }) {
   const pct = window && (!window.resetsAt || window.resetsAt > Date.now()) ? window.pct : 0;
+  const line = burndown === null ? threshold : Math.min(threshold, burndown);
+  const title =
+    burndown === null
+      ? `Workshop starts no new agents above ${threshold}%`
+      : `Solid line: your limit, ${threshold}%. Dotted line: the burndown, ${Math.round(burndown)}% now${target === undefined ? '' : `, rising to ${target}% by the reset`}. No new agents start above the lower one.`;
   return (
-    <div className="meter" title={`Workshop starts no new agents above ${threshold}%`}>
+    <div className="meter" title={title}>
       <span>{label}</span>
-      <div className="meter-track" role="meter" aria-label={`${label} allowance used`} aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
-        <div className={`meter-fill${pct > threshold ? ' over' : ''}`} style={{ width: `${Math.min(100, pct)}%` }} />
+      <div
+        className="meter-track"
+        role="meter"
+        aria-label={burndown === null ? `${label} allowance used, limit ${threshold}%` : `${label} allowance used, limit ${threshold}%, burndown ${Math.round(burndown)}%`}
+        aria-valuenow={Math.round(pct)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <div className={`meter-fill${pct > line ? ' over' : ''}`} style={{ width: `${Math.min(100, pct)}%` }} />
         <div className="meter-mark" style={{ left: `${threshold}%` }} />
+        {burndown !== null && <div className="meter-mark burndown" style={{ left: `${Math.min(100, burndown)}%` }} />}
       </div>
       <span className="muted">
         {Math.round(pct)}%{window?.resetsAt ? `, resets ${clock(window.resetsAt)}` : ''}

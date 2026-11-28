@@ -575,6 +575,11 @@ input[type='checkbox'] {
   width: 2px;
   background: var(--text);
 }
+.meter-mark.burndown {
+  width: 0;
+  background: none;
+  border-left: 2px dotted var(--text);
+}
 
 /* Run progress: label, bar and figures in aligned columns */
 

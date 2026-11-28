@@ -2,12 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Router } from 'express';
 import { agentViews, updateAgent } from '../agents.ts';
-import { allowanceOf, allowanceViews, apiSpendSince } from '../allowance.ts';
+import { allowanceOf, allowanceViews, apiSpendSince, forgetBurndown } from '../allowance.ts';
 import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, TicketStatePatch, Usage, UsageRange } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { listMedia, mediaDir, mediaView } from '../media.ts';
-import { getConnection, listConnections, modelsOf, setLimits } from '../providers/index.ts';
+import { getConnection, listConnections, modelsOf, setBurndown, setLimits } from '../providers/index.ts';
 import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews, ticketRunViews } from '../runs.ts';
 import { pushRefusal, startOfDay, withinHours } from '../scheduler/gates.ts';
 import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncSoon } from '../scheduler/loop.ts';
@@ -97,7 +97,10 @@ apiRouter.put('/usage/limits/:connectionId', (req, res) => {
   const limits = { ...c.limits };
   if (b.fiveHour !== undefined) limits.fiveHour = num(b.fiveHour, '5-hour limit', 0, 100);
   if (b.weekly !== undefined) limits.weekly = num(b.weekly, 'Weekly limit', 0, 100);
+  check(b.burndown === undefined || typeof b.burndown === 'boolean', 'Say whether this subscription should follow the weekly burndown.');
   setLimits(c.id, limits);
+  if (b.burndown !== undefined) setBurndown(c.id, b.burndown);
+  forgetBurndown(c.id);
   // Launches and threshold-paused runs are reconsidered at once.
   kick();
   res.json(allowanceOf(c.id, c.name, limits));
@@ -148,6 +151,7 @@ apiRouter.put('/settings', (req, res) => {
   }
   const before = getSettings();
   const next = saveSettings(patch);
+  forgetBurndown(); // operating hours shape the burndown
   // Newly allowed authors may have open tickets that earlier syncs skipped.
   if (patch.authors && patch.authors.join() !== before.authors.join()) run('UPDATE repos SET synced_at = NULL');
   publish('settings');

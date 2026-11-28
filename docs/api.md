@@ -34,9 +34,13 @@ curl -X PUT $WORKSHOP/api/settings -H "Authorization: Bearer $TOKEN" \
 # Read usage: Claude allowance and limits per subscription, and today's API spend against the caps
 curl $WORKSHOP/api/usage -H "Authorization: Bearer $TOKEN"
 
-# Change one subscription's usage limits (connection id from GET /api/usage; send either or both)
+# Change one subscription's usage limits (connection id from GET /api/usage; send any of them)
 curl -X PUT $WORKSHOP/api/usage/limits/3 -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' -d '{"fiveHour":50}'
+
+# Let the weekly burndown decide this subscription's weekly limit
+curl -X PUT $WORKSHOP/api/usage/limits/3 -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"weekly":100,"burndown":true}'
 
 # Lifetime token use and token-equivalent cost, by billing, model, project and month
 curl $WORKSHOP/api/usage/lifetime -H "Authorization: Bearer $TOKEN"
@@ -77,6 +81,8 @@ curl -X POST $WORKSHOP/api/runs/<run id>/stop -H "Authorization: Bearer $TOKEN"
 ```
 
 Usage limits are set per subscription. `PUT /api/settings` with the old global `fiveHourMax` or `weeklyMax` returns 400, and `/api/overview` and `/api/usage` no longer have a `thresholds` field: each `allowance` entry carries its own `limits`.
+
+Each `allowance` entry also has a `burndown`. With `burndown.enabled`, the weekly limit Workshop starts agents under is the lower of `limits.weekly` and `burndown.ceiling`, a line that rises through the week to `burndown.target` (100% minus a margin Workshop adjusts each week) at the reset. Running agents pause only 2 points over it. `ceiling` is computed when it's off too, and is null without a weekly reading. `otherPerHour`, `workshopPerHour` and `duty` are the rates the line is shaped from, and `bound` says which part of the formula set it. `PUT /api/usage/limits/:id` takes `"burndown": true` or `false`; leaving it out keeps the current setting, and anything else returns 400. `/api/usage/history` adds `weeks`, how each closed week ended, and each sample's `ceiling`.
 
 ## Launching
 

@@ -289,6 +289,29 @@ export const MIGRATIONS = [
   `,
   `ALTER TABLE tickets ADD COLUMN parts TEXT; -- JSON: the smaller tickets this one was broken into`,
   `ALTER TABLE runs ADD COLUMN slot TEXT; -- small, standard or large: the host pool the run holds (it may borrow a larger one); null on older rows means its size's own pool`,
+  // Weekly burndown per Claude subscription (#142).
+  `
+  ALTER TABLE connections ADD COLUMN burndown INTEGER NOT NULL DEFAULT 0; -- the weekly limit follows the burndown
+  ALTER TABLE connections ADD COLUMN burndown_margin REAL NOT NULL DEFAULT 3; -- target = 100 - margin; adjusted weekly
+  ALTER TABLE allowance_samples ADD COLUMN active INTEGER; -- this connection's agents in their claude step at the reading; null on older rows
+  ALTER TABLE allowance_samples ADD COLUMN ceiling REAL; -- the burndown ceiling at the reading (on or off); null without a weekly reading
+  ALTER TABLE allowance_samples ADD COLUMN burndown INTEGER; -- the burndown was on at the reading; null on older rows
+  ALTER TABLE allowance_samples ADD COLUMN bound TEXT; -- which term set the ceiling: linear, catchUp, userCap, target
+  CREATE TABLE burndown_weeks (
+    connection_id INTEGER NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+    resets_at INTEGER NOT NULL, -- the weekly window's end, epoch ms
+    enabled INTEGER NOT NULL,
+    final_pct REAL,
+    held_hours REAL NOT NULL,
+    blocked INTEGER NOT NULL,
+    margin_before REAL NOT NULL,
+    margin_after REAL NOT NULL,
+    other_per_hour REAL, -- U
+    workshop_per_hour REAL, -- M
+    five_per_hour REAL, -- f
+    PRIMARY KEY (connection_id, resets_at)
+  );
+  `,
 ];
 
 export let db: DatabaseSync;

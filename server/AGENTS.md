@@ -20,7 +20,8 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/spend.ts` | Lifetime spend ledger: one row per claude invocation, kept past run cleanup. New dimensions are recorded in `recordSpend`, filled in `backfillSpend`, and grouped through `DIMENSIONS` |
 | `src/projection.ts` | Pure projections for the Usage page: when a subscription window reaches a limit, when API spend reaches the daily limit, month-end totals |
 | `src/backfill-spend.ts` | CLI: fill in spend ledger dimensions and missing rows, optionally from an old database copy |
-| `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
+| `src/allowance.ts` | Usage readings and limit blocks per Claude connection, the burndown per connection (cached), and closed weeks (`closeWeeks`, `burndown_weeks`) |
+| `src/burndown.ts` | Pure weekly burndown (#142): learns rates from readings (`learnRates`), the ceiling (`burndownCeiling`), the weekly margin (`nextMargin`) and its constants |
 | `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`, and the code review's routing `stageForRework` and formatters), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |
 | `src/scheduler/loop.ts` | Two serialised passes: allocation (re-attach, settle hand pushes, resume paused runs, the queue, fill every free slot, usage probe, clock topics) runs on every `kick()`; sync (GitHub sync, API merges, then allocation) runs on the 60-second tick, which also checks hosts and cleans up |
@@ -42,6 +43,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
   - `prepare` and `publish` may simply run again;
   - a vanished `run` container is a failure;
   - re-attaching skips log lines already stored for that container (`linesFrom`).
+- With a subscription's weekly burndown on, launches stop at `min(weekly limit, ceiling)`, but running agents pause only `RUN_GRACE_PCT` (2) points over the ceiling, and paused runs resume under it with no grace: the line moves every minute, and each pause and resume rebuilds the prompt cache. The tick also reads every unpaused subscription at least hourly (`probeIdle`), since the burndown learns your own use from readings taken while no agent runs.
 - A run that frees its slot (it ends, fails, publishes, pauses, waits to publish again or is cancelled) calls `onRunSettled`, which `kick()`s the scheduler so the next job starts within a second instead of at the next 60 s tick. `kick()` runs only the allocation pass, so it never waits for a GitHub sync. A run that only lost contact with its host doesn't, so re-attaching can't loop. A host that comes back, or a connection that tests fine, kicks too.
 - The unique index `runs_one_active_per_ticket` enforces one agent per ticket (paused runs included). `launch()` returns null on conflict.
 - `publish` merges in commits that appeared on the remote branch and retries the push; on a conflict it saves the work on `<branch>-unmerged-<sha>` (exit 3). The run then succeeds and the ticket moves to `stage:reconcile`, with what was interrupted kept in `tickets.rescue`; the Merge agent merges the rescue branch and `planTransition` finishes the interrupted stage. A conflict during that reconcile run fails it.

@@ -1,5 +1,6 @@
 import { getAgent } from './agents.ts';
-import { allowanceSamples, allowanceViews, apiSpendSince } from './allowance.ts';
+import { allowanceSamples, allowanceViews, apiSpendSince, burndownWeeks } from './allowance.ts';
+import { weeklyTarget } from './burndown.ts';
 import type { AgentName, AllowanceHistory, BacklogPool, BacklogProjection, BurnRate, LifetimeSpend, SpendSeries, SpendTotals, Stage, TicketSpend, UsageHistory, UsageRange } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import {
@@ -273,12 +274,15 @@ export function usageHistory(range: UsageRange, timeZone: string, now = Date.now
     connectionId: v.connectionId,
     connectionName: v.connectionName,
     limits: v.limits,
+    burndown: v.burndown,
+    weeks: burndownWeeks(v.connectionId),
     samples: allowanceSamples(v.connectionId, now - SEVEN_DAYS),
     sampledAt: v.sampledAt,
     blockedUntil: v.blockedUntil,
     unknown: v.unknown,
     fiveHour: windowProjection(v.fiveHour, FIVE_HOURS, v.limits.fiveHour, v.sampledAt, now),
-    sevenDay: windowProjection(v.sevenDay, SEVEN_DAYS, v.limits.weekly, v.sampledAt, now),
+    // Against the burndown's target, not its moving line: "reaches your 54% limit" means nothing when the line keeps rising.
+    sevenDay: windowProjection(v.sevenDay, SEVEN_DAYS, weeklyTarget(v.limits.weekly, v.burndown), v.sampledAt, now),
     burn: burn(
       recent.filter((r) => r.connection_id === v.connectionId && r.billing !== 'api'),
       one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE connection_id = ? AND billing != 'api'", v.connectionId)?.ts ?? now,
@@ -378,7 +382,7 @@ function backlog(
         else unsized.push(`${a.connectionName} ${label}`);
       };
       sized(a.fiveHour, a.limits.fiveHour, 'five-hour', FIVE_HOURS, '5-hour');
-      sized(a.sevenDay, a.limits.weekly, 'weekly', SEVEN_DAYS, 'weekly');
+      sized(a.sevenDay, weeklyTarget(a.limits.weekly, a.burndown), 'weekly', SEVEN_DAYS, 'weekly'); // the burndown reaches its target at each reset
     }
     if (a.blockedUntil) windows.push({ kind: 'limit', left: 0, perWindow: Infinity, resetsAt: a.blockedUntil, length: Infinity });
     accounts.push(windows);

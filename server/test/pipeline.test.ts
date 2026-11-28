@@ -17,16 +17,17 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
 }));
 
 const { seedAgents, updateAgent } = await import('../src/agents.ts');
-const { allowanceOf, recordLimit, recordProbe } = await import('../src/allowance.ts');
+const { allowanceOf, closeWeeks, forgetRates, recordLimit, recordProbe } = await import('../src/allowance.ts');
+const { allowanceBlock } = await import('../src/scheduler/gates.ts');
 const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
-const { createConnection, reorderConnections, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
+const { createConnection, getConnection, reorderConnections, setBurndown, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
 const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
-const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, syncSoon, tick } = await import('../src/scheduler/loop.ts');
+const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, probeIdle, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, syncSoon, tick } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf } = await import('../src/tickets.ts');
 const { checkingBlockers, syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
@@ -783,6 +784,88 @@ describe('runner', () => {
         low();
         resumePaused(getSettings(), Date.now());
         expect(getRun(limited)!.status).toBe('paused');
+      });
+    });
+
+    describe('with the weekly burndown on', () => {
+      const W = (RESET + 86400) * 1000;
+      const week = (pct: number) => recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct, resetsAt: W });
+      const rateWeek = (pct: number) =>
+        line({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: 0.1, resetsAt: resetsAt() }, seven_day: { utilization: pct / 100, resetsAt: W / 1000 } } } });
+      const ceiling = () => allowanceOf(ids.model).burndown.ceiling!;
+      const gate = (ignoreLimits = false) => allowanceBlock(allowanceOf(ids.model), getSettings(), Date.now(), ignoreLimits);
+      const round = (n: number) => Math.round(n * 10) / 10;
+
+      beforeEach(() => {
+        forgetRates();
+        setLimits(ids.model, { fiveHour: 70, weekly: 100 });
+        setBurndown(ids.model, true);
+        week(10);
+      });
+      afterEach(() => {
+        setBurndown(ids.model, false);
+        forgetRates();
+      });
+
+      it('holds new launches at the line, except a ticket you let past your limits, but lets a running agent carry on within 2 points over it', async () => {
+        const c = ceiling();
+        expect(c).toBeGreaterThan(70); // about a day before the reset
+        expect(c).toBeLessThan(97);
+        week(round(c + 1));
+        expect(gate()).toMatch(/over the burndown ceiling/);
+        expect(gate(true)).toBeNull();
+        setBurndown(ids.model, false);
+        expect(gate()).toBeNull();
+        setBurndown(ids.model, true);
+        const { env, state } = killable([rateWeek(round(c + 1)), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        expect((await settle(go())).status).toBe('succeeded');
+        expect(state.killedAt).toBe(-1);
+      });
+
+      it('pauses a running agent more than 2 points over the line, and resumes it once usage is back under the line', async () => {
+        const c = ceiling();
+        const { env, state } = killable([rateWeek(round(c + 3)), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        const id = go();
+        expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'threshold' });
+        expect(state.killedAt).toBe(3);
+        fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+        week(round(c + 1)); // within the grace, but a paused run resumes only under the line
+        resumePaused(getSettings(), Date.now());
+        expect(getRun(id)!.status).toBe('paused');
+        week(round(c - 1));
+        resumePaused(getSettings(), Date.now());
+        await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+      });
+
+      it('stores who was running and the line with each reading, without re-reading the rates', async () => {
+        const { env } = killable([rateWeek(20), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        await settle(go());
+        const rows = all<{ active: number; ceiling: number; burndown: number; bound: string; seven_day: number }>(
+          "SELECT active, ceiling, burndown, bound, seven_day FROM allowance_samples WHERE connection_id = ? AND source = 'probe' ORDER BY ts, rowid",
+          ids.model,
+        );
+        expect(rows[rows.length - 2]).toMatchObject({ active: 0, burndown: 1, bound: 'linear', seven_day: 10 });
+        expect(rows[rows.length - 1]).toMatchObject({ active: 1, burndown: 1, bound: 'linear', seven_day: 20, ceiling: ceiling() });
+
+        // Readings that would change your own use don't count until the rates are re-read.
+        const before = allowanceOf(ids.model).burndown.otherPerHour;
+        const t = Date.now() - 4 * 3600_000;
+        for (let h = 0; h < 4; h++) {
+          run("INSERT INTO allowance_samples (connection_id, ts, source, seven_day, seven_day_resets, active) VALUES (?, ?, 'probe', ?, ?, 0)", ids.model, t + h * 3600_000 - 60_000, 2 * h, W);
+        }
+        week(20);
+        expect(allowanceOf(ids.model).burndown.otherPerHour).toBe(before);
+        forgetRates();
+        expect(allowanceOf(ids.model).burndown.otherPerHour).toBeGreaterThan(before);
+      });
+
+      it('waits for a new reading when the latest is from before the weekly reset', () => {
+        recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 90, resetsAt: Date.now() - 60_000 });
+        expect(allowanceOf(ids.model).burndown.ceiling).toBeLessThan(0.1);
+        expect(gate()).toBe('Checking allowance');
       });
     });
 
@@ -4274,6 +4357,96 @@ describe('media store', () => {
       fs.mkdirSync(path.join(config.dataDir, 'media', '999'), { recursive: true }); // a folder for a ticket that no longer exists
       sweepMedia(0);
       expect(fs.existsSync(path.join(config.dataDir, 'media', '999'))).toBe(false);
+    });
+  });
+});
+
+describe('the weekly burndown', () => {
+  const H = 3600_000;
+  let conn: number;
+  beforeEach(() => {
+    conn = createConnection('model', 'anthropic', 'Claude B', {}, { oauthToken: 'sk-ant-oat01-b' });
+  });
+  afterEach(() => {
+    run('DELETE FROM connections WHERE id = ?', conn);
+    forgetRates();
+  });
+
+  /** Hourly readings over a week that ended `endedAgo` ms ago, rising evenly to `final`; the first `on` of them with the burndown on. */
+  const pastWeek = (endedAgo: number, final: number, on: number) => {
+    const resetsAt = Date.now() - endedAgo;
+    for (let h = 0; h < 160; h++) {
+      run(
+        "INSERT INTO allowance_samples (connection_id, ts, source, seven_day, seven_day_resets, active, ceiling, burndown) VALUES (?, ?, 'probe', ?, ?, 0, 0, ?)",
+        conn,
+        resetsAt - 165 * H + h * H,
+        (final * h) / 159,
+        resetsAt + (h % 3) * 1000, // a little jitter in the reported reset
+        Number(h < on),
+      );
+    }
+    return resetsAt;
+  };
+  const weeks = () => all<{ resets_at: number; enabled: number; final_pct: number; margin_before: number; margin_after: number; held_hours: number }>('SELECT * FROM burndown_weeks WHERE connection_id = ?', conn);
+
+  it('writes one row per ended week and widens the margin after an overshoot', () => {
+    pastWeek(2 * H, 100, 160);
+    expect(closeWeeks(Date.now())).toBe(true);
+    expect(weeks()).toEqual([expect.objectContaining({ enabled: 1, final_pct: 100, margin_before: 3, margin_after: 5 })]);
+    expect(weeks()[0].held_hours).toBeGreaterThan(100); // every reading was at or over its stored line of 0
+    expect(getConnection(conn)!.burndownMargin).toBe(5);
+    expect(allowanceOf(conn).burndown.target).toBe(95);
+    expect(closeWeeks(Date.now())).toBe(false);
+    expect(weeks()).toHaveLength(1);
+  });
+
+  it('keeps the margin for a week the burndown was on for only a minority of', () => {
+    pastWeek(2 * H, 100, 40);
+    expect(closeWeeks(Date.now())).toBe(false);
+    expect(weeks()).toEqual([expect.objectContaining({ enabled: 0, margin_after: 3 })]);
+  });
+
+  it("counts a usage limit Claude reported at the week's end as an overshoot", () => {
+    const resetsAt = pastWeek(2 * H, 90, 160);
+    run("INSERT INTO allowance_samples (connection_id, ts, source, blocked_until) VALUES (?, ?, 'limit', ?)", conn, resetsAt - 3 * H, resetsAt);
+    closeWeeks(Date.now());
+    expect(weeks()[0]).toMatchObject({ blocked: 1, margin_after: 5 });
+  });
+
+  it('leaves the current week and weeks that ended long ago alone', () => {
+    pastWeek(-2 * H, 50, 160); // still running
+    pastWeek(9 * 24 * H, 50, 160); // partly gone from the readings
+    expect(closeWeeks(Date.now())).toBe(false);
+    expect(weeks()).toHaveLength(0);
+  });
+
+  describe('idle readings', () => {
+    let env: FakeEnv;
+    const probes = () => env.started.filter((spec: StepSpec) => spec.labels?.['workshop.probe'] === String(conn)).length;
+    beforeEach(() => {
+      setConnectionStatus(ids.env, 'ok');
+      env = new FakeEnv({ usage: [RATE, result({})] });
+      fake.env = env;
+    });
+
+    it('reads a subscription idle for over an hour, and one idle for 20 minutes in the half hour before its weekly reset', async () => {
+      const at = (pct: number, weeklyResetsIn: number) => recordProbe(conn, { pct, resetsAt: Date.now() + H }, { pct, resetsAt: Date.now() + weeklyResetsIn });
+      at(10, 48 * H);
+      probeIdle(Date.now() + 50 * 60_000);
+      expect(probes()).toBe(0);
+      probeIdle(Date.now() + 61 * 60_000);
+      await vi.waitFor(() => expect(probes()).toBe(1));
+      at(10, 40 * 60_000);
+      probeIdle(Date.now() + 10 * 60_000);
+      probeIdle(Date.now() + 20 * 60_000);
+      await vi.waitFor(() => expect(probes()).toBe(2));
+    });
+
+    it('skips a paused subscription', () => {
+      recordProbe(conn, { pct: 10, resetsAt: Date.now() + H }, { pct: 10, resetsAt: Date.now() + 48 * H });
+      setConnectionPaused(conn, true);
+      probeIdle(Date.now() + 2 * H);
+      expect(probes()).toBe(0);
     });
   });
 });

@@ -318,6 +318,21 @@ describe('usage limits per subscription', () => {
     expect((await request(app).get('/api/usage').set('cookie', cookie)).body.allowance[0].limits).toEqual({ fiveHour: 50, weekly: 90.5 });
   });
 
+  it('turns the weekly burndown on and off, and keeps it when the body leaves it out', async () => {
+    const res = await request(app).put(`/api/usage/limits/${sub}`).set('cookie', cookie).send({ burndown: true });
+    expect(res.status).toBe(200);
+    expect(res.body.burndown).toMatchObject({ enabled: true, target: 97 });
+    await request(app).put(`/api/usage/limits/${sub}`).set('cookie', cookie).send({ weekly: 100 });
+    const after = (await request(app).get('/api/usage').set('cookie', cookie)).body.allowance[0];
+    expect(after.burndown.enabled).toBe(true);
+    expect(after.limits.weekly).toBe(100);
+    const bad = await request(app).put(`/api/usage/limits/${sub}`).set('cookie', cookie).send({ burndown: 'yes', weekly: 50 });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('Say whether this subscription should follow the weekly burndown.');
+    expect((await request(app).get('/api/usage').set('cookie', cookie)).body.allowance[0].limits.weekly).toBe(100);
+    expect((await request(app).put(`/api/usage/limits/${sub}`).set('cookie', cookie).send({ burndown: false, weekly: 80 })).body.burndown.enabled).toBe(false);
+  });
+
   it('validates the limits', async () => {
     for (const body of [{ fiveHour: 101 }, { weekly: -1 }, { fiveHour: 'lots' }]) {
       const res = await request(app).put(`/api/usage/limits/${sub}`).set('cookie', cookie).send(body);

@@ -1,6 +1,6 @@
 import { getAgent } from '../agents.ts';
 import { clearAlert, raiseAlert } from '../alerts.ts';
-import { allowanceOf, allowanceViews, apiSpendSince, recordProbe } from '../allowance.ts';
+import { allowanceOf, allowanceViews, apiSpendSince, closeWeeks, recordProbe, SAMPLE_RETENTION_MS } from '../allowance.ts';
 import { AGENT_SIZES, type AgentName, type AgentSize, type Billing, type HostView, type QueueItem, type Settings, type TicketOrder } from '../api-types.ts';
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
@@ -25,6 +25,11 @@ const TICK_MS = 60_000;
 /** How long Refresh waits for its allowance checks: a check gives up after 120 s of output, plus time to start it. */
 const REFRESH_PROBE_WAIT_MS = 150_000;
 const HOST_FAILURES_BEFORE_ALERT = 3;
+/** Every subscription gets a reading at least this often, agents or not: the burndown learns your own use from them. */
+export const IDLE_SAMPLE_MS = 60 * 60_000;
+/** Close to a weekly reset readings are kept fresher, so the week's last reading is close to how it ended. */
+const RESET_SAMPLE_MS = 15 * 60_000;
+const RESET_WINDOW_MS = 30 * 60_000;
 
 let lastCleanup = 0;
 let clock: ClockState | null = null;
@@ -136,7 +141,8 @@ async function allocateOnce() {
   probeStale(queue);
   const nextClock: ClockState = {
     withinHours: withinHours(s, new Date(now)),
-    blocks: JSON.stringify(allowanceViews().map((a) => [a.connectionId, a.blockedUntil])),
+    // The burndown's whole points: the meters move with the line.
+    blocks: JSON.stringify(allowanceViews().map((a) => [a.connectionId, a.blockedUntil, a.burndown.ceiling === null ? null : Math.floor(a.burndown.ceiling)])),
     queue: JSON.stringify(queue.map((c) => [c.ticket.id, c.blockedBy])),
   };
   for (const topic of clockTopics(clock, nextClock)) publish(topic);
@@ -158,8 +164,10 @@ const syncPass = serial(syncOnce);
 export async function tick() {
   try {
     await checkHosts();
+    if (closeWeeks(Date.now())) kick(); // a new margin moves the line, so paused runs are reconsidered
     await allocatePass();
     void syncPass(); // GitHub runs on its own: a long sync never holds allocation back
+    probeIdle(Date.now());
     const now = Date.now();
     if (now - lastCleanup > 24 * 3600_000) {
       lastCleanup = now;
@@ -167,6 +175,20 @@ export async function tick() {
     }
   } catch (err) {
     console.error('[scheduler]', err);
+  }
+}
+
+/**
+ * Reads every unpaused subscription whose latest reading is over an hour old, or over 15 minutes old in the half hour
+ * before its weekly reset. Runs while Workshop is paused too: these are the readings your own use is learned from.
+ */
+export function probeIdle(now: number) {
+  for (const a of allowanceViews()) {
+    if (getConnection(a.connectionId)?.paused) continue;
+    const age = a.sampledAt === null ? Infinity : now - a.sampledAt;
+    const resetsAt = a.sevenDay?.resetsAt ?? null;
+    const nearReset = resetsAt !== null && resetsAt > now && resetsAt - now <= RESET_WINDOW_MS;
+    if (age > IDLE_SAMPLE_MS || (nearReset && age > RESET_SAMPLE_MS)) void probeAllowance(a.connectionId).catch(() => {});
   }
 }
 
@@ -624,6 +646,6 @@ async function cleanup(s: Settings) {
   }
   sweepMedia(Date.now() - 30 * 86400_000);
   run('DELETE FROM alerts WHERE ack_at IS NOT NULL AND ack_at < ?', cutoff);
-  run('DELETE FROM allowance_samples WHERE ts < ?', Date.now() - 8 * 86400_000);
+  run('DELETE FROM allowance_samples WHERE ts < ?', Date.now() - SAMPLE_RETENTION_MS);
   sweepExpiredTokens();
 }

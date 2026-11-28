@@ -308,8 +308,44 @@ export interface AllowanceView {
   unknown: boolean;
   /** Tokens (input including cache, plus output) that runs on this connection used in the last 5 hours and 7 days. */
   tokens: { fiveHour: number; sevenDay: number };
-  /** No new agents start on this subscription above these, and its running agents pause. */
+  /** No new agents start on this subscription above these, and its running agents pause. With the burndown on, the weekly one applies as `min(limits.weekly, burndown.ceiling)`. */
   limits: Limits;
+  burndown: Burndown;
+}
+
+/** Which term of the burndown set its ceiling: the even share of the week, raised to catch up, held for your own use, or the target. */
+export type BurndownBound = 'linear' | 'catchUp' | 'userCap' | 'target';
+
+/** A subscription's weekly burndown: a weekly limit that rises to `target` by the reset. */
+export interface Burndown {
+  enabled: boolean;
+  /** Where weekly usage may reach now (percent); null without a weekly reading. Computed when off too. */
+  ceiling: number | null;
+  /** What it aims for at the reset: 100 minus a margin Workshop adjusts each week. */
+  target: number;
+  /** Weekly percentage points per hour: use that isn't Workshop's agents, and the agents' own while running (null until known). */
+  otherPerHour: number;
+  workshopPerHour: number | null;
+  /** Share of the time the 5-hour limit lets agents run, 0 to 1; null until known. */
+  duty: number | null;
+  /** Which term set the ceiling now; null with no ceiling. */
+  bound: BurndownBound | null;
+  /** Hours of readings behind otherPerHour and workshopPerHour. */
+  basis: { otherHours: number; workshopHours: number };
+}
+
+/** How one weekly window ended, and what it did to the burndown's margin. */
+export interface BurndownWeek {
+  resetsAt: number;
+  /** The burndown was on for most of the week's readings. */
+  enabled: boolean;
+  finalPct: number | null;
+  /** Hours the burndown held agents back. */
+  heldHours: number;
+  /** Claude reported a usage limit near the reset. */
+  blocked: boolean;
+  marginBefore: number;
+  marginAfter: number;
 }
 
 export interface HostView {
@@ -484,8 +520,11 @@ export interface AllowanceHistory {
   connectionId: number;
   connectionName: string;
   limits: Limits;
-  /** Readings from the last 7 days, oldest first. */
-  samples: { ts: number; fiveHour: number | null; sevenDay: number | null }[];
+  burndown: Burndown;
+  /** Closed weeks, newest first, up to 8. */
+  weeks: BurndownWeek[];
+  /** Readings from the last 7 days, oldest first. `ceiling` is the burndown's at the reading, `burndown` whether it was on (null on older readings). */
+  samples: { ts: number; fiveHour: number | null; sevenDay: number | null; ceiling: number | null; burndown: boolean | null }[];
   sampledAt: number | null;
   blockedUntil: number | null;
   unknown: boolean;

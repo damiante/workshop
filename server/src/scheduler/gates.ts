@@ -8,8 +8,15 @@ export function inScope(selection: RepoSelection, labels: string[]): boolean {
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
 export function localTime(now: Date, timeZone: string): { day: number; minutes: number } {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(now);
+  let format = formatters.get(timeZone);
+  if (!format) {
+    format = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+    formatters.set(timeZone, format);
+  }
+  const parts = format.formatToParts(now);
   const part = (type: string) => parts.find((p) => p.type === type)!.value;
   return { day: WEEKDAYS.indexOf(part('weekday')), minutes: Number(part('hour')) * 60 + Number(part('minute')) };
 }
@@ -63,21 +70,34 @@ export const ALLOWANCE_MAX_AGE_MS = 10 * 60_000;
 export function allowanceBlock(a: AllowanceView | undefined, s: Settings, now: number, ignoreLimits = false): string | null {
   if (a?.blockedUntil && a.blockedUntil > now) return `Claude reported you're at or near a usage limit; resumes ${formatTime(a.blockedUntil, s.timezone, now)}`;
   if (!a?.sampledAt || now - a.sampledAt > ALLOWANCE_MAX_AGE_MS) return 'Checking allowance';
-  return ignoreLimits ? null : (thresholdBlock(a, a.limits, s, now)?.reason ?? null);
+  if (ignoreLimits) return null;
+  // Just after the weekly reset the reading is from last week: it reads 0% and the line is near 0, so without a
+  // new reading every free slot would start at once.
+  if (a.burndown?.enabled && a.sevenDay?.resetsAt != null && a.sevenDay.resetsAt <= now) return 'Checking allowance';
+  const burndown = a.burndown?.enabled ? a.burndown.ceiling : null;
+  return thresholdBlock(a, a.limits, s, now, burndown)?.reason ?? null;
 }
 
-/** Which usage window is over this subscription's limits, or null. Launches and running agents both stop on it. */
+/**
+ * Which usage window is over this subscription's limits, or null. Launches and running agents both stop on it.
+ * With a `burndown` line, the weekly window stops at the lower of it and the set limit.
+ */
 export function thresholdBlock(
   w: { fiveHour: UsageWindow | null; sevenDay: UsageWindow | null },
   limits: Limits,
   s: Pick<Settings, 'timezone'>,
   now: number,
+  burndown: number | null = null,
 ): { reason: string; resetsAt: number | null } | null {
   const resets = (u: UsageWindow | null) => (u?.resetsAt ? `, resets ${formatTime(u.resetsAt, s.timezone, now)}` : '');
   const five = used(w.fiveHour, now);
   if (five > limits.fiveHour) return { reason: `5-hour allowance at ${Math.round(five)}%${resets(w.fiveHour)}`, resetsAt: w.fiveHour?.resetsAt ?? null };
   const week = used(w.sevenDay, now);
-  if (week > limits.weekly) return { reason: `Weekly allowance at ${Math.round(week)}%${resets(w.sevenDay)}`, resetsAt: w.sevenDay?.resetsAt ?? null };
+  const resetsAt = w.sevenDay?.resetsAt ?? null;
+  if (burndown !== null && burndown < limits.weekly && week > burndown) {
+    return { reason: `Weekly allowance at ${Math.round(week)}%, over the burndown ceiling of ${Math.round(burndown)}%${resets(w.sevenDay)}`, resetsAt };
+  }
+  if (week > limits.weekly) return { reason: `Weekly allowance at ${Math.round(week)}%${resets(w.sevenDay)}`, resetsAt };
   return null;
 }
 

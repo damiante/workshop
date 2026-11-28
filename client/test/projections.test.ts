@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceHistory, BacklogPool, BacklogProjection, BurnRate, UsageHistory, WindowProjection } from '../../server/src/api-types.ts';
-import { projectionSections } from '../src/projections.ts';
+import { burndownSummary, projectionSections } from '../src/projections.ts';
 
 const H = 3600_000;
 const now = Date.parse('2026-11-26T12:00:00Z');
@@ -13,6 +13,8 @@ const sub = (a: Partial<AllowanceHistory>): AllowanceHistory => ({
   connectionId: 1,
   connectionName: 'Claude-1',
   limits: { fiveHour: 70, weekly: 80 },
+  burndown: { enabled: false, ceiling: null, target: 97, otherPerHour: 0.15, workshopPerHour: null, duty: null, bound: null, basis: { otherHours: 0, workshopHours: 0 } },
+  weeks: [],
   samples: [],
   sampledAt: now,
   blockedUntil: null,
@@ -62,6 +64,14 @@ describe('projection windows', () => {
 
   it("doesn't claim a pace in the first minutes of a window", () => {
     expect(five({ fiveHour: win({ ratePerHour: 0 }) })).toBe('Claude-1, 5-hour window: 40% used. Too early in this window to tell its pace; resets at T180.');
+  });
+
+  it('names the burndown target for the weekly window when it is lower than your limit', () => {
+    const week = (limits: { fiveHour: number; weekly: number }, enabled: boolean) =>
+      lines([sub({ limits, burndown: { ...sub({}).burndown, enabled, ceiling: 50 }, sevenDay: win({ limitAt: now + 3 * 60_000 }) })])[1];
+    expect(week({ fiveHour: 70, weekly: 100 }, true)).toBe('Claude-1, weekly window: 40% used, 10.0% an hour. Reaches the 97% burndown target at T3 and resets at T180.');
+    expect(week({ fiveHour: 70, weekly: 80 }, true)).toBe('Claude-1, weekly window: 40% used, 10.0% an hour. Reaches your 80% limit at T3 and resets at T180.');
+    expect(week({ fiveHour: 70, weekly: 100 }, false)).toBe('Claude-1, weekly window: 40% used, 10.0% an hour. Reaches your 100% limit at T3 and resets at T180.');
   });
 
   it('says why there is no projection', () => {
@@ -185,5 +195,18 @@ describe('projections burn rate', () => {
       },
     ]);
     expect(sections([], projection({ burn: rate(1, 1000) })).burn.map((r) => r.name)).toEqual(['API']);
+  });
+});
+
+describe('burndownSummary', () => {
+  const b = sub({}).burndown;
+  it('says where the line is, why, and what it is shaped from', () => {
+    expect(burndownSummary({ ...b, ceiling: 54.4, bound: 'linear', otherPerHour: 0.2, basis: { otherHours: 30, workshopHours: 1 } })).toBe(
+      'Burndown 54% now (rising evenly), aiming for 97% at the reset. Your own use about 4.8% a day (30 hours of readings); not enough readings of agents running yet (1 hour).',
+    );
+    expect(burndownSummary({ ...b, ceiling: 70, bound: 'catchUp', workshopPerHour: 1.25, duty: 0.6 })).toBe(
+      'Burndown 70% now (raised to catch up), aiming for 97% at the reset. Your own use about 3.6% a day (0 hours of readings); agents add about 1.3% an hour while running, 60% of the time under your 5-hour limit.',
+    );
+    expect(burndownSummary(b)).toMatch(/^Burndown: needs a reading from this week, aiming for 97%/);
   });
 });

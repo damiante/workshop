@@ -54,6 +54,7 @@ describe('allowance gate', () => {
     unknown: false,
     tokens: { fiveHour: 0, sevenDay: 0 },
     limits: { fiveHour: 70, weekly: 80 },
+    burndown: { enabled: false, ceiling: null, target: 97, otherPerHour: 0.15, workshopPerHour: null, duty: null, bound: null, basis: { otherHours: 0, workshopHours: 0 } },
     ...over,
   });
 
@@ -105,6 +106,28 @@ describe('allowance gate', () => {
     expect(thresholdBlock({ fiveHour: { pct: 70, resetsAt: null }, sevenDay: { pct: 80, resetsAt: null } }, L, s(), now)).toBeNull();
     expect(thresholdBlock({ fiveHour: { pct: 95, resetsAt: now - 1 }, sevenDay: null }, L, s(), now)).toBeNull();
     expect(thresholdBlock({ fiveHour: five, sevenDay: null }, { fiveHour: 80, weekly: 80 }, s(), now)).toBeNull();
+  });
+
+  it('stops the weekly window at the lower of the set limit and the burndown, and names the line it hit', () => {
+    const L: Limits = { fiveHour: 70, weekly: 80 };
+    const w = (pct: number) => ({ fiveHour: null, sevenDay: { pct, resetsAt: now + 86400_000 } });
+    expect(thresholdBlock(w(52), L, s(), now, 50)?.reason).toMatch(/^Weekly allowance at 52%, over the burndown ceiling of 50%, resets /);
+    expect(thresholdBlock(w(49), L, s(), now, 50)).toBeNull();
+    // A burndown above the set limit leaves the set limit in charge.
+    expect(thresholdBlock(w(85), L, s(), now, 95)?.reason).toMatch(/^Weekly allowance at 85%, resets /);
+    expect(thresholdBlock(w(79), L, s(), now, 95)).toBeNull();
+  });
+
+  it('applies the burndown only when it is on, and never to a ticket you let past your limits', () => {
+    const on = (ceiling: number | null, enabled = true) => ({ ...a().burndown, enabled, ceiling });
+    expect(allowanceBlock(a({ burndown: on(40) }), s(), now)).toMatch(/over the burndown ceiling of 40%/);
+    expect(allowanceBlock(a({ burndown: on(40, false) }), s(), now)).toBeNull();
+    expect(allowanceBlock(a({ burndown: on(null) }), s(), now)).toBeNull();
+    expect(allowanceBlock(a({ burndown: on(40) }), s(), now, true)).toBeNull();
+    // A fresh reading from before the weekly reset needs a new one first.
+    const lastWeek = { sevenDay: { pct: 90, resetsAt: now - 60_000 } };
+    expect(allowanceBlock(a({ ...lastWeek, burndown: on(0.1) }), s(), now)).toBe('Checking allowance');
+    expect(allowanceBlock(a({ ...lastWeek, burndown: on(0.1, false) }), s(), now)).toBeNull();
   });
 });
 

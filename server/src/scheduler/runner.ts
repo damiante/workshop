@@ -3,6 +3,7 @@ import type { AgentName, AgentSize, Billing } from '../api-types.ts';
 import { getAgent, promptFor, type AgentRow } from '../agents.ts';
 import { clearAlert, raiseAlert } from '../alerts.ts';
 import { allowanceOf, DEFAULT_LIMITS, recordLimit, recordProbe } from '../allowance.ts';
+import { burndownLine } from '../burndown.ts';
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
 import { publish } from '../events.ts';
@@ -389,9 +390,11 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     const now = Date.now();
     const stored = r.model_connection_id ? allowanceOf(r.model_connection_id) : null;
     const limits = stored?.limits ?? DEFAULT_LIMITS;
-    const own = claude.usage ? thresholdBlock(claude.usage, limits, s, now) : null;
+    // Running agents get a few points over the burndown, so they don't pause and resume each time the line moves.
+    const line = burndownLine(stored?.burndown, true);
+    const own = claude.usage ? thresholdBlock(claude.usage, limits, s, now, line) : null;
     if (own || !stored) return own;
-    return stored.sampledAt && now - stored.sampledAt <= ALLOWANCE_MAX_AGE_MS ? thresholdBlock(stored, limits, s, now) : null;
+    return stored.sampledAt && now - stored.sampledAt <= ALLOWANCE_MAX_AGE_MS ? thresholdBlock(stored, limits, s, now, line) : null;
   };
   // Why the agent should stop at the next turn boundary, if it should. A pause you asked for wins, then a
   // paused subscription (the tick moves the run to another one).

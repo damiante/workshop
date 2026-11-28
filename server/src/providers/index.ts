@@ -25,6 +25,8 @@ interface Row {
   five_hour_max: number;
   weekly_max: number;
   paused: number;
+  burndown: number;
+  burndown_margin: number;
 }
 
 export interface Connection<C = Record<string, unknown>, S = Record<string, string>> {
@@ -41,6 +43,9 @@ export interface Connection<C = Record<string, unknown>, S = Record<string, stri
   /** Usage limits (percentages); only Claude subscriptions use them. */
   limits: Limits;
   paused: boolean;
+  /** The weekly limit follows the burndown (Claude subscriptions only), and the margin it keeps under 100%. */
+  burndown: boolean;
+  burndownMargin: number;
 }
 
 function fromRow(row: Row): Connection {
@@ -57,6 +62,8 @@ function fromRow(row: Row): Connection {
     updatedAt: row.updated_at,
     limits: { fiveHour: row.five_hour_max, weekly: row.weekly_max },
     paused: Boolean(row.paused),
+    burndown: Boolean(row.burndown),
+    burndownMargin: row.burndown_margin,
   };
 }
 
@@ -124,6 +131,16 @@ export function updateConnection(id: number, patch: { name?: string; config?: ob
 
 export function setLimits(id: number, limits: Limits) {
   run('UPDATE connections SET five_hour_max = ?, weekly_max = ? WHERE id = ?', limits.fiveHour, limits.weekly, id);
+  publish('allowance');
+}
+
+export function setBurndown(id: number, on: boolean) {
+  run('UPDATE connections SET burndown = ? WHERE id = ?', Number(on), id);
+  publish('allowance');
+}
+
+export function setBurndownMargin(id: number, margin: number) {
+  run('UPDATE connections SET burndown_margin = ? WHERE id = ?', margin, id);
   publish('allowance');
 }
 
