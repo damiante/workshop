@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LiveStream, MAX_BACKOFF_MS, coalesce, retryDelay, retryable, SILENCE_MS, type LiveOptions, type SourceLike } from '../src/live.ts';
+import { LiveStream, MAX_BACKOFF_MS, coalesce, dispatch, retryDelay, retryable, SILENCE_MS, type LiveOptions, type SourceLike } from '../src/live.ts';
 
 class FakeSource implements SourceLike {
   readyState = 0;
@@ -232,6 +232,19 @@ describe('coalesce', () => {
     c.cancel();
     vi.advanceTimersByTime(1000);
     expect(fn).not.toHaveBeenCalled();
+  });
+});
+
+describe('dispatch', () => {
+  it('only calls listeners subscribed to the topic', () => {
+    const runsOnly = { topics: new Set(['runs']), fn: vi.fn() };
+    const withActivity = { topics: new Set(['runs', 'activity']), fn: vi.fn() };
+    dispatch([runsOnly, withActivity], 'activity');
+    expect(runsOnly.fn).not.toHaveBeenCalled();
+    expect(withActivity.fn).toHaveBeenCalledTimes(1);
+    dispatch([runsOnly, withActivity], 'runs');
+    expect(runsOnly.fn).toHaveBeenCalledTimes(1);
+    expect(withActivity.fn).toHaveBeenCalledTimes(2);
   });
 });
 

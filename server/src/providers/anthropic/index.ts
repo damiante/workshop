@@ -104,6 +104,14 @@ export interface ClaudeRun {
     inputTokens?: number;
     outputTokens?: number;
   };
+  /**
+   * Tokens used so far, added up from each API response as it arrives, for a session that ends without a result
+   * (killed at a limit, paused between turns, out of memory). Input is exact. Output is an estimate from what the
+   * agent wrote, because a response's own output count isn't final when it is printed.
+   */
+  spent?: { inputTokens: number; outputTokens: number; responses: number };
+  /** Ids of the API responses already counted in `spent`: one response is printed once per content block. */
+  counted?: Set<string>;
   /** The subscription's 5-hour and weekly usage, reported with every API response. */
   usage?: { fiveHour: UsageWindow | null; sevenDay: UsageWindow | null };
   /** Set when Claude hit a usage limit or started billing paid overage. */
@@ -122,6 +130,43 @@ export interface ClaudeRun {
 }
 
 type Block = { type: string; id?: string; tool_use_id?: string; text?: string; name?: string; input?: Record<string, unknown> };
+
+/**
+ * Characters of visible output per output token, measured over finished runs. It is this low because thinking is
+ * billed as output but printed empty; treat the result as a rough figure.
+ */
+const CHARS_PER_OUTPUT_TOKEN = 1.1;
+
+const inputOf = (u: Record<string, number | undefined>) => (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+
+/** Adds one printed assistant message to the running count: its response's input once, and what it wrote. */
+function countResponse(run: ClaudeRun, message: { id?: string; usage?: Record<string, number | undefined> }, content: Block[]) {
+  if (!message.usage) return;
+  const spent = (run.spent ??= { inputTokens: 0, outputTokens: 0, responses: 0 });
+  const counted = (run.counted ??= new Set());
+  if (message.id && !counted.has(message.id)) {
+    counted.add(message.id);
+    spent.inputTokens += inputOf(message.usage);
+    spent.responses++;
+  }
+  let chars = 0;
+  for (const block of content) {
+    if (block.type === 'text') chars += block.text?.length ?? 0;
+    else if (block.type === 'tool_use') chars += (block.name?.length ?? 0) + JSON.stringify(block.input ?? {}).length;
+  }
+  spent.outputTokens += Math.round(chars / CHARS_PER_OUTPUT_TOKEN);
+}
+
+/** Every model's tokens in a result's `modelUsage`, which also covers requests the session made on the side. */
+function modelTotals(modelUsage: unknown): { inputTokens: number; outputTokens: number } | null {
+  if (!modelUsage || typeof modelUsage !== 'object') return null;
+  const models = Object.values(modelUsage as Record<string, Record<string, number | undefined>>);
+  if (!models.length) return null;
+  return {
+    inputTokens: models.reduce((n, m) => n + (m.inputTokens ?? 0) + (m.cacheCreationInputTokens ?? 0) + (m.cacheReadInputTokens ?? 0), 0),
+    outputTokens: models.reduce((n, m) => n + (m.outputTokens ?? 0), 0),
+  };
+}
 
 function describeBlock(block: Block): string | undefined {
   if (block.type === 'text' && block.text?.trim()) return block.text.trim().split('\n')[0];
@@ -153,6 +198,8 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
     case 'assistant':
       // A request that failed outright (e.g. "Not logged in") arrives as an assistant message with `error`.
       if (event.error) run.apiError = event.error;
+      // Subagents' responses too: they are usage like any other.
+      if (event.message) countResponse(run, event.message, content);
       for (const block of content) {
         run.activity = describeBlock(block)?.slice(0, 200) ?? run.activity;
         if (topLevel && block.type === 'tool_use' && block.id) run.openTools = [...(run.openTools ?? []), block.id];
@@ -179,6 +226,9 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
       // A session can go on after the agent reports (a background task finishing, a ScheduleWakeup firing),
       // and those turns needn't return a result. The latest one reported stands.
       const reported = run.result?.structured;
+      // `usage` counts the agent's own turns; `modelUsage` adds what the session spent besides (subagents,
+      // compaction), and is what `total_cost_usd` is the price of.
+      const totals = modelTotals(event.modelUsage);
       run.result = {
         subtype: event.subtype,
         isError: Boolean(event.is_error) && reported === undefined,
@@ -186,8 +236,8 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
         text: event.result,
         errors: event.errors ?? [],
         costUsd: event.total_cost_usd,
-        inputTokens: (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0),
-        outputTokens: usage.output_tokens,
+        inputTokens: totals?.inputTokens ?? inputOf(usage),
+        outputTokens: totals?.outputTokens ?? usage.output_tokens,
       };
       break;
     }

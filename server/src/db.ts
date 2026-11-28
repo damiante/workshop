@@ -312,6 +312,11 @@ export const MIGRATIONS = [
     PRIMARY KEY (connection_id, resets_at)
   );
   `,
+  `
+  -- The default instructions a customised prompt was based on; null: not customised, or customised before Workshop recorded it (#155).
+  ALTER TABLE agent_classes ADD COLUMN prompt_base TEXT;
+  ALTER TABLE agent_classes ADD COLUMN prompt_alerted TEXT; -- sha256 of the default last raised as an alert
+  `,
 ];
 
 export let db: DatabaseSync;

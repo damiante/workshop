@@ -11,11 +11,11 @@ import { hitUsageLimit, readClaudeLine, type ClaudeRun } from '../providers/anth
 import { limitsFor, type DockerConfig } from '../providers/docker/index.ts';
 import { untar } from '../providers/docker/tar.ts';
 import { environmentOf, getConnection, modelsOf } from '../providers/index.ts';
-import type { ContainerState, Environment, StepSpec } from '../providers/types.ts';
+import type { ContainerState, CreatedTicket, Environment, StepSpec } from '../providers/types.ts';
 import { collectAgentMedia, deleteMedia, fetchTicketImages, listMedia, mediaFiles, warn, type IssueImage } from '../media.ts';
 import { ACTIVE_STATUSES, activity, appendLog, getRun, linesFrom, readLog, type RunRow } from '../runs.ts';
 import { getSettings } from '../settings.ts';
-import { recordSpend } from '../spend.ts';
+import { estimateCost, recordSpend } from '../spend.ts';
 import {
   addLinks,
   branchOf,
@@ -46,8 +46,9 @@ import {
 } from '../tickets.ts';
 import { imageFor, label, moveTo, parseLabels, REPO_IMAGE_DIR, repoImageTag } from '../workflow/labels.ts';
 import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
-import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, protocolText, publishes, taskPrompt } from '../workflow/prompts.ts';
+import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, INDEX_BODY, INDEX_PATH, protocolText, publishes, taskPrompt } from '../workflow/prompts.ts';
 import { BLOCKING_AGENTS, isLarge, MAX_NOTICED, MAX_SPLIT_DEPTH, parseResult, schemaFor, type AgentResult, type Handoff, type Noticed, type Part, type Rescue, type SplitRule, type WorkResult } from '../workflow/schemas.ts';
+import { bestMatch, type Similarity } from '../workflow/similar.ts';
 import { planTransition, type Plan } from '../workflow/transitions.ts';
 import { check } from '../http/util.ts';
 import { ALLOWANCE_MAX_AGE_MS, formatTime, isRateLimited, isTransient, joinRefs, PUBLISH_GIVE_UP_MS, publishRetryMinutes, thresholdBlock } from './gates.ts';
@@ -277,14 +278,21 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
     const branch = branchOf(t);
     const docPath = docPathOf(t);
     const rescue = rescueOf(t);
-    const openTickets =
-      r.agent === 'classifier'
-        ? all<{ number: number; title: string; body: string; author: string }>(
-            "SELECT number, title, body, author FROM tickets WHERE repo_id = ? AND state = 'open' AND id != ? ORDER BY updated_at DESC",
-            ctx.repo.id,
-            t.id,
-          ).filter((o) => isAllowedAuthor(o.author))
-        : undefined;
+    // The Classifier sees the most recent in its prompt; it and agents that may raise prerequisites get all of them in the index.
+    const indexed = r.agent === 'classifier' || (blockers && BLOCKING_AGENTS.includes(r.agent));
+    const open = indexed
+      ? all<{ number: number; title: string; body: string; author: string; labels: string }>(
+          "SELECT number, title, body, author, labels FROM tickets WHERE repo_id = ? AND state = 'open' AND id != ? ORDER BY updated_at DESC",
+          ctx.repo.id,
+          t.id,
+        ).filter((o) => isAllowedAuthor(o.author))
+      : [];
+    if (indexed) {
+      files[INDEX_PATH.replace('/work/', '')] = open
+        .map((o) => JSON.stringify({ number: o.number, title: o.title, labels: JSON.parse(o.labels), body: o.body.slice(0, INDEX_BODY) }) + '\n')
+        .join('');
+    }
+    const openTickets = r.agent === 'classifier' ? open : undefined;
     const imageLabels: Record<string, string> = await ctx.env.imageLabels(ctx.image).catch(() => ({}));
     const environment = environmentText(capabilitiesOf(imageLabels), imageLabels[ENVIRONMENT_LABEL]);
     files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch, publishes: publishes(r.agent), noticed: mayRaise(ctx.repo, t, r.agent), blockers: blockers && BLOCKING_AGENTS.includes(r.agent) })}\n\n${environment}`;
@@ -300,6 +308,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
       omittedComments: comments.length - included.length,
       review: review.map((x) => ({ ...x, body: local(x.body) })),
       openTickets,
+      indexed: indexed ? open.length : undefined,
       raiseBlockers: blockers && r.agent === 'classifier',
       ui: Boolean(t.ui),
       media: stored.map((m) => ({ name: m.name, source: m.source, runId: m.run_id, caption: m.caption })),
@@ -477,15 +486,16 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
       } else if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
         // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
+        // Only the activity text changed, so only the views that show it refetch.
         const wait = lastPublished + 3000 - Date.now();
         if (wait <= 0) {
           lastPublished = Date.now();
-          publish('runs');
+          publish('activity');
         } else if (!trailing) {
           trailing = setTimeout(() => {
             trailing = undefined;
             lastPublished = Date.now();
-            publish('runs');
+            publish('activity');
           }, wait);
         }
       }
@@ -501,16 +511,17 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   clearTimeout(trailing);
   activity.delete(r.id);
   publish('runs');
-  if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
   const res = claude.result;
-  setRun(r.id, { exit_code: state.exitCode });
+  // A session that was killed or paused prints no result, so its usage comes from the responses counted on the way.
   if (res) recordSpend(r, res);
+  else if (claude.spent?.responses) recordSpend(r, { ...claude.spent, costUsd: estimateCost(r.model, claude.spent.inputTokens + claude.spent.outputTokens) });
+  if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
+  setRun(r.id, { exit_code: state.exitCode });
 
   if (claude.limit && r.model_connection_id) recordLimit(r.model_connection_id, claude.limit.resetsAt ?? Date.now() + 3600_000);
   if (pausedFor && res?.structured === undefined) {
-    // Killed between turns, so the session resumes cleanly. A killed segment prints no result, so its
-    // tokens and cost don't reach the spend ledger: acceptable for subscription runs, an undercount for
-    // API runs you pause by hand (see docs/workshop/80-feature-manual-pause.md).
+    // Killed between turns, so the session resumes cleanly. A killed segment prints no result; its usage was
+    // recorded above from the responses counted on the way (output and cost as estimates).
     setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: pausedFor.resetsAt, pause_reason: pausedFor.kind, pause_requested_at: null });
     await markRunning(ctx.ticket, false);
     return false;
@@ -621,6 +632,32 @@ const mayRaise = (repo: RepoRow, t: TicketRow, agent: AgentName) => Boolean(repo
 const mayRaiseBlockers = (repo: RepoRow, t: TicketRow, agent: AgentName) =>
   Boolean(repo.raise_tickets) && (agent === 'classifier' || BLOCKING_AGENTS.includes(agent)) && !labelsOf(t).includes(label.raised);
 
+/**
+ * Stores a ticket Workshop just opened from what the reply already holds, so other runs see it, in the open-ticket
+ * index and as a similarity candidate, before the next sync. No extra request; the sync later updates it as usual.
+ * Left to the sync if it already has it, and skipped, as the sync would, if Workshop isn't an allowed author.
+ */
+function storeCreated(repo: RepoRow, made: CreatedTicket, t: { title: string; body: string; labels: string[] }) {
+  const author = made.author ?? sourceFor(repo).selfLogin();
+  if (!isAllowedAuthor(author)) return;
+  const now = new Date().toISOString();
+  run(
+    `INSERT INTO tickets (repo_id, number, node_id, title, body, url, author, state, labels, updated_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?) ON CONFLICT (repo_id, number) DO NOTHING`,
+    repo.id,
+    made.number,
+    made.nodeId ?? null,
+    t.title,
+    t.body,
+    made.url,
+    author,
+    JSON.stringify(t.labels),
+    made.updatedAt ?? now,
+    made.createdAt ?? now,
+  );
+  publish('tickets');
+}
+
 const sameTitle = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
 const MAX_RAISED_TITLE = 200;
 const MAX_RAISED_BODY = 20_000;
@@ -642,7 +679,9 @@ async function raiseNoticed(ctx: Ctx, t: TicketRow, result: AgentResult): Promis
     if ([...before, ...open].some((x) => sameTitle(x.title, title))) continue;
     const body = `${n.body.trim().slice(0, MAX_RAISED_BODY)}\n\n---\n_Workshop's ${AGENT_INFO[r.agent].label} agent noticed this while working on #${t.number}. It's outside that ticket, so nothing was changed for it there._`;
     const made = await source.createTicket(repoRef(ctx.repo), { title, body, labels: [label.raised] });
-    run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: made.number, url: made.url, title, runId: r.id }]), t.id);
+    storeCreated(ctx.repo, made, { title, body, labels: [label.raised] });
+    run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: made.number, url: made.url, title, runId: r.id, at: Date.now() }]), t.id);
+    checkRaiseRate(ctx.repo);
   }
   // Prerequisites are listed on their own.
   return raisedOf(getTicket(t.id)!).filter((x) => x.runId === r.id && !x.blocker);
@@ -653,7 +692,11 @@ interface Prerequisite {
   title: string;
   /** An open ticket that already had this title, rather than one Workshop opened. */
   existing: boolean;
+  /** Linked because it is similar to this proposed title, rather than the same. */
+  instead?: string;
 }
+
+const score = (s: Similarity) => `title ${s.title.toFixed(2)} with ${s.shared} shared keyword${s.shared === 1 ? '' : 's'}, text ${s.text.toFixed(2)}`;
 
 /**
  * Opens (or finds) a ticket for each prerequisite the agent says its ticket waits for. A prerequisite this ticket
@@ -675,22 +718,67 @@ async function raiseBlockers(ctx: Ctx, t: TicketRow, wanted: Noticed[], agent: A
       made.push({ number: earlier.number, title: earlier.title, existing: false });
       continue;
     }
-    const open = all<{ number: number; title: string }>("SELECT number, title FROM tickets WHERE repo_id = ? AND state = 'open' AND id != ?", t.repo_id, t.id).find((x) => sameTitle(x.title, title));
+    const others = all<TicketRow>("SELECT * FROM tickets WHERE repo_id = ? AND state = 'open' AND id != ?", t.repo_id, t.id);
+    const open = others.find((x) => sameTitle(x.title, title));
     if (open) {
       made.push({ number: open.number, title: open.title, existing: true });
+      continue;
+    }
+    // A similar open prerequisite-type ticket (one agents raised, including any opened moments ago by another run), or
+    // one raised here, is linked instead. Not one that waits for this ticket: that would be a cycle. Only local data: no GitHub requests.
+    const self = refKey(`#${t.number}`, ctx.repo.full_name);
+    const closed = new Set(all<{ number: number }>("SELECT number FROM tickets WHERE repo_id = ? AND state != 'open'", t.repo_id).map((x) => x.number));
+    const candidates = [
+      ...others
+        .filter((o) => labelsOf(o).includes(label.raised) && isAllowedAuthor(o.author) && !blockersOf(o).some((b) => refKey(b, ctx.repo.full_name) === self))
+        .map((o) => ({ number: o.number, title: o.title, body: o.body })),
+      ...before.filter((x) => x.number !== t.number && !closed.has(x.number)).map((x) => ({ number: x.number, title: x.title, body: '' })),
+    ];
+    const similar = bestMatch({ title, body: n.body }, candidates);
+    if (similar) {
+      const m = similar.match;
+      appendLog(r.id, { step: 'workshop', stream: 'stdout', text: `Linked existing #${m.number} "${m.title}" instead of opening "${title}" (${score(similar.score)}).` });
+      made.push({ number: m.number, title: m.title, existing: true, instead: title });
       continue;
     }
     const body = `${n.body.trim().slice(0, MAX_RAISED_BODY)}\n\n---\n_Workshop's ${AGENT_INFO[agent].label} agent raised this as a prerequisite of #${t.number}, which waits until this ticket is closed._`;
     const labels = [label.raised, ...(labelsOf(t).includes(label.nominated) ? [label.nominated] : [])];
     const ticket = await source.createTicket(repoRef(ctx.repo), { title, body, labels });
-    run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: ticket.number, url: ticket.url, title, runId: r.id, blocker: true }]), t.id);
+    storeCreated(ctx.repo, ticket, { title, body, labels });
+    run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: ticket.number, url: ticket.url, title, runId: r.id, blocker: true, at: Date.now() }]), t.id);
+    checkRaiseRate(ctx.repo);
     made.push({ number: ticket.number, title, existing: false });
   }
   return made.filter((m, i) => m.number !== t.number && made.findIndex((x) => x.number === m.number) === i);
 }
 
 const blockersLine = (made: Prerequisite[]) =>
-  made.length ? `Prerequisite tickets this one waits for:\n${made.map((m) => `- #${m.number} ${m.title}${m.existing ? ' (already open)' : ''}`).join('\n')}` : '';
+  made.length
+    ? `Prerequisite tickets this one waits for:\n${made
+        .map((m) => `- #${m.number} ${m.title}${m.instead ? ` (linked existing #${m.number} instead of opening a new ticket for "${m.instead}")` : m.existing ? ' (already open)' : ''}`)
+        .join('\n')}`
+    : '';
+
+/**
+ * Raises a `raise-rate` alert while agents have opened more tickets in the repository in the last hour than the
+ * `raiseAlertPerHour` setting allows, and clears it otherwise. It only reports: agents may still open tickets.
+ */
+export function checkRaiseRate(repo: RepoRow) {
+  const since = Date.now() - 3600_000;
+  const count = all<{ raised: string }>('SELECT raised FROM tickets WHERE repo_id = ? AND raised IS NOT NULL', repo.id)
+    .flatMap((row) => JSON.parse(row.raised) as Raised[])
+    .filter((x) => (x.at ?? 0) >= since).length;
+  const limit = getSettings().raiseAlertPerHour;
+  const ref = `repo:${repo.id}`;
+  if (count > limit) {
+    raiseAlert(
+      'warning',
+      'raise-rate',
+      `Agents opened ${count} tickets in ${repo.full_name} in the last hour, more than the limit of ${limit}. Check that they aren't duplicates, or turn off "Agents open tickets for what they notice" for this repository.`,
+      ref,
+    );
+  } else clearAlert('raise-rate', ref);
+}
 
 const raisedLine = (raised: Raised[]) =>
   raised.length ? `Noticed outside this ticket, and opened as ${raised.length === 1 ? 'its own ticket' : 'their own tickets'}:\n${raised.map((x) => `- #${x.number} ${x.title}`).join('\n')}` : '';

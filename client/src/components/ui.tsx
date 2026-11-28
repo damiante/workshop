@@ -37,13 +37,14 @@ export function Meter({ label, window, threshold, burndown = null, target }: { l
 }
 
 /** A bar for how much of a run's limit is used, e.g. turns of max turns. */
-export function Progress({ label, value, max, text }: { label: string; value: number; max: number; text: string }) {
+/** `over` (a full bar turns the error colour) defaults to the bar being full; pass false for a progress count. */
+export function Progress({ label, value, max, text, over = value >= max }: { label: string; value: number; max: number; text: string; over?: boolean }) {
   const pct = max > 0 ? Math.min(100, (value / max) * 100) : 100;
   return (
     <div className="meter">
       <span>{label}</span>
       <div className="meter-track" role="meter" aria-label={label} aria-valuenow={value} aria-valuemin={0} aria-valuemax={max}>
-        <div className={`meter-fill${value >= max ? ' over' : ''}`} style={{ width: `${pct}%` }} />
+        <div className={`meter-fill${over ? ' over' : ''}`} style={{ width: `${pct}%` }} />
       </div>
       <span className="muted">{text}</span>
     </div>

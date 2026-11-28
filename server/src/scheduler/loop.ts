@@ -1,7 +1,7 @@
 import { getAgent } from '../agents.ts';
 import { clearAlert, raiseAlert } from '../alerts.ts';
 import { allowanceOf, allowanceViews, apiSpendSince, closeWeeks, recordProbe, SAMPLE_RETENTION_MS } from '../allowance.ts';
-import { AGENT_SIZES, type AgentName, type AgentSize, type Billing, type HostView, type QueueItem, type Settings, type TicketOrder } from '../api-types.ts';
+import { AGENT_SIZES, type AgentName, type AgentSize, type Billing, type HostView, type QueueItem, type Settings, type SyncProgress, type TicketOrder } from '../api-types.ts';
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
 import { sweepMedia } from '../media.ts';
@@ -13,12 +13,12 @@ import { appendLog, deleteLog, getRun, RUNNING_SQL, type RunRow } from '../runs.
 import { check } from '../http/util.ts';
 import { sweepExpiredTokens } from '../http/tokens.ts';
 import { getSettings } from '../settings.ts';
-import { activeRunId, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, priorityGraph, setBypassLimits, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
+import { activeRunId, activeRunIds, blockersOf, vcsFor, getRepo, getTicket, isAllowedAuthor, labelsOf, openTicketsSql, priorityGraph, setBypassLimits, setPrioritised, setPush, ticketInScope, type RepoRow, type TicketRow } from '../tickets.ts';
 import { agentSize, nextStep, parseLabels } from '../workflow/labels.ts';
 import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, freeSlot, inScope, localTime, modeBlock, place, poolFor, priorityAhead, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
-import { abortRun, cancelPause, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
+import { abortRun, cancelPause, checkRaiseRate, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
 import { checkingBlockers, syncRepo } from './sync.ts';
 
 const TICK_MS = 60_000;
@@ -87,8 +87,43 @@ export function kick() {
   setTimeout(() => void allocatePass(), 500);
 }
 
-/** Fills free slots now, then syncs every repository (or right after the sync that's running) and allocates again. */
+const IDLE: SyncProgress = { state: 'idle', kind: 'scheduled', phase: null, repo: null, done: 0, total: 0, requestedAt: null, lastFinishedAt: null, lastError: null };
+let progress: SyncProgress = { ...IDLE };
+/** A Sync now or Refresh that no sync pass has picked up yet. */
+let requested: 'sync' | 'refresh' | null = null;
+/** The Refresh in flight: it owns the progress record until it ends. */
+let refreshing: Promise<void> | null = null;
+/** The Refresh in flight is waiting for its sync, so sync passes report to it. */
+let refreshSyncing = false;
+
+function setProgress(patch: Partial<SyncProgress>) {
+  progress = { ...progress, ...patch };
+  publish('sync');
+}
+
+/** What the sync is doing now (scheduled, Sync now or Refresh), and when it last finished. In memory only. */
+export const syncProgress = (): SyncProgress => ({ ...progress });
+
+/** For tests: forget the record and any pending request. */
+export function resetSyncProgress() {
+  progress = { ...IDLE };
+  requested = null;
+}
+
+/** Records a click: waiting behind the pass that's running, or requested when none is. */
+function markRequested(kind: 'sync' | 'refresh') {
+  const now = Date.now();
+  if (progress.state === 'running') setProgress({ state: 'waiting', kind, requestedAt: now });
+  else setProgress({ state: 'requested', kind, requestedAt: now, phase: null, repo: null, done: 0, total: 0 });
+  if (requested !== 'refresh') requested = kind;
+}
+
+/**
+ * Fills free slots now, then syncs every repository (or right after the sync that's running) and allocates again.
+ * Marks the progress record requested first; during a Refresh it joins that Refresh instead.
+ */
 export function syncSoon() {
+  if (!refreshing) markRequested('sync');
   lastSync.clear();
   void allocatePass();
   return syncPass();
@@ -97,24 +132,56 @@ export function syncSoon() {
 /**
  * Runs the checks the timer runs, now: syncs every repository, re-reads the usage of subscriptions
  * that are over their limits or unchecked (even one whose last check just failed), and allocates. A usage limit
- * Claude reported keeps its reset time. The sync runs in the background and allocates again when it ends. Waits
- * (up to REFRESH_PROBE_WAIT_MS) for the allowance checks, then runs another allocation pass with the new readings,
- * and resolves after it.
+ * Claude reported keeps its reset time. The checks start at once, and so does an allocation pass with what's
+ * already startable. Waits for the sync, then (up to REFRESH_PROBE_WAIT_MS from the start) for the allowance
+ * checks, then runs another allocation pass with the new readings, and resolves after it. The progress record
+ * goes through the phases sync, usage and allocate. A Refresh made while one runs joins it.
  */
-export async function refreshNow() {
-  lastSync.clear();
-  probeFailedAt.clear();
-  const s = getSettings();
-  const now = Date.now();
-  const checks = allowanceViews()
-    .filter((a) => !a.blockedUntil && allowanceBlock(a, s, now))
-    .map((a) => probeAllowance(a.connectionId, true).catch(() => {}));
-  // Sync, and fill slots with what's already startable while the checks run.
-  void syncPass();
-  void allocatePass();
-  if (!checks.length) return;
-  await withTimeout(Promise.all(checks), REFRESH_PROBE_WAIT_MS).catch(() => {});
-  await allocatePass(); // allocate again with the new readings (a running pass re-runs instead)
+export function refreshNow(): Promise<void> {
+  if (refreshing) return refreshing;
+  refreshing = refreshOnce().finally(() => (refreshing = null));
+  return refreshing;
+}
+
+async function refreshOnce() {
+  markRequested('refresh');
+  try {
+    lastSync.clear();
+    probeFailedAt.clear();
+    const s = getSettings();
+    const now = Date.now();
+    let checked = 0;
+    let counting = false;
+    const checks = allowanceViews()
+      .filter((a) => !a.blockedUntil && allowanceBlock(a, s, now))
+      .map((a) =>
+        probeAllowance(a.connectionId, true)
+          .catch(() => {})
+          .finally(() => {
+            checked++;
+            if (counting) setProgress({ done: checked });
+          }),
+      );
+    const probed = withTimeout(Promise.all(checks), REFRESH_PROBE_WAIT_MS).catch(() => {});
+    // Fill slots with what's already startable while the sync and the checks run.
+    void allocatePass();
+    refreshSyncing = true;
+    try {
+      await syncPass();
+    } finally {
+      refreshSyncing = false;
+    }
+    if (checks.length) {
+      counting = true;
+      setProgress({ state: 'running', phase: 'usage', repo: null, done: checked, total: checks.length });
+      await probed;
+      counting = false;
+    }
+    setProgress({ state: 'running', phase: 'allocate', repo: null, done: 0, total: 0 });
+    await allocatePass(); // allocate again with the new readings (a running pass re-runs instead)
+  } finally {
+    setProgress({ state: 'idle', phase: null, repo: null, done: 0, total: 0, lastFinishedAt: Date.now() });
+  }
 }
 
 /** Starts the best ready candidate again and again, until no ready one fits a free slot. Returns the last queue built. */
@@ -152,11 +219,31 @@ async function allocateOnce() {
 /** Fills free slots from the local queue. Passes never overlap; calls during one share its single re-run. */
 export const allocatePass = serial(allocateOnce);
 
-/** Syncs the repositories that are due, merges approved pull requests, then allocates with what changed. */
+/**
+ * Syncs the repositories that are due, merges approved pull requests, then allocates with what changed.
+ * Reports to the progress record when it reads a repository or answers a click. A timer pass with nothing
+ * due leaves it alone, and so does a pass during a Refresh that has finished its own sync.
+ */
 async function syncOnce() {
-  await syncRepos();
-  await mergeApproved(getSettings().mode === 'paused');
-  await allocatePass();
+  const due = dueRepos();
+  const tracked = refreshing ? refreshSyncing : due.length > 0 || requested !== null;
+  if (tracked) {
+    const kind = refreshing ? 'refresh' : (requested ?? 'scheduled');
+    requested = null;
+    setProgress({ state: 'running', kind, phase: 'sync', repo: null, done: 0, total: due.length, lastError: null });
+  }
+  try {
+    const failures = await syncRepos(due, tracked);
+    if (tracked) setProgress({ repo: null, lastError: failures.join(' ') || null });
+    await mergeApproved(getSettings().mode === 'paused');
+    await allocatePass();
+  } finally {
+    // A Refresh carries on with its own phases. A click during this pass is picked up by serial's re-run.
+    if (tracked && !refreshing) {
+      if (requested) setProgress({ state: 'waiting' });
+      else setProgress({ state: 'idle', phase: null, repo: null, done: 0, total: 0, lastFinishedAt: Date.now() });
+    }
+  }
 }
 
 const syncPass = serial(syncOnce);
@@ -168,6 +255,8 @@ export async function tick() {
     await allocatePass();
     void syncPass(); // GitHub runs on its own: a long sync never holds allocation back
     probeIdle(Date.now());
+    // Every repository, so the alert clears once the hour has passed, even after raising was turned off.
+    for (const repo of all<RepoRow>('SELECT * FROM repos')) checkRaiseRate(repo);
     const now = Date.now();
     if (now - lastCleanup > 24 * 3600_000) {
       lastCleanup = now;
@@ -266,18 +355,29 @@ export function reattachRuns() {
   }
 }
 
-async function syncRepos() {
+/** The enabled repositories whose last sync is older than the poll interval. */
+function dueRepos() {
   const s = getSettings();
-  for (const repo of all<RepoRow>('SELECT * FROM repos WHERE enabled = 1')) {
-    if (Date.now() - (lastSync.get(repo.id) ?? 0) < s.pollMinutes * 60_000) continue;
+  return all<RepoRow>('SELECT * FROM repos WHERE enabled = 1').filter((repo) => Date.now() - (lastSync.get(repo.id) ?? 0) >= s.pollMinutes * 60_000);
+}
+
+/** Syncs each repository in turn, counting them in the progress record when `track` is set. Returns the failures. */
+async function syncRepos(due: RepoRow[], track: boolean) {
+  const failures: string[] = [];
+  for (const [i, repo] of due.entries()) {
     lastSync.set(repo.id, Date.now());
+    if (track) setProgress({ repo: repo.full_name });
     try {
       await syncRepo(repo);
       clearAlert('sync-failed', `repo:${repo.id}`);
     } catch (err) {
-      raiseAlert('warning', 'sync-failed', `Couldn't sync ${repo.full_name}: ${(err as Error).message}`, `repo:${repo.id}`);
+      const message = `Couldn't sync ${repo.full_name}: ${(err as Error).message}`;
+      raiseAlert('warning', 'sync-failed', message, `repo:${repo.id}`);
+      failures.push(message);
     }
+    if (track) setProgress({ done: i + 1 });
   }
+  return failures;
 }
 
 /** Clears hand pushes that are finished or no longer eligible, and priority and limit bypasses on closed tickets. */
@@ -491,10 +591,11 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     githubBlock.set(r.id, until ? `GitHub's rate limit is used up until ${formatTime(until, s.timezone, now)}` : null);
   }
   const graph = priorityGraph();
+  const active = activeRunIds();
   const out: (Candidate & { priority: number; repoPriority: number; boosted: boolean })[] = [];
   for (const t of rows) {
     const repo = repos.get(t.repo_id)!;
-    if (!isAllowedAuthor(t.author) || !ticketInScope(t, repo) || activeRunId(t.id)) continue;
+    if (!isAllowedAuthor(t.author) || !ticketInScope(t, repo) || active.has(t.id)) continue;
     const step = nextStep(parseLabels(labelsOf(t)), true);
     if (!step) continue;
     if (step.kind === 'merge' && t.pr_status !== 'conflict') continue; // merged through the API, no agent needed
@@ -540,9 +641,10 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
   // fits a free slot, so a higher repo's ticket wins a slot it can use and leaves the rest to others.
   const queued = out.map((c) => ({ repo: c.repo.full_name, priority: c.repoPriority }));
   for (const c of out) if (!c.pushed && !c.boosted) c.after = priorityAhead(c.repoPriority, queued);
-  // Pushed, prioritised, then tickets more open work waits on. The sort is stable, so the ticket
-  // order setting (from the query) decides ties.
-  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.unblocks - a.unblocks || b.repoPriority - a.repoPriority || a.priority - b.priority);
+  // Pushed, prioritised, repository priority, then tickets more open work waits on, then step. So
+  // within a repo the dependency graph decides, and across repos repository priority wins. The sort
+  // is stable, so the ticket order setting (from the query) decides ties.
+  return out.sort((a, b) => Number(b.pushed) - Number(a.pushed) || Number(b.boosted) - Number(a.boosted) || b.repoPriority - a.repoPriority || b.unblocks - a.unblocks || a.priority - b.priority);
 }
 
 export function queueView(): QueueItem[] {

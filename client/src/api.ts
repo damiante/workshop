@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { AuthState, Topic } from '../../server/src/api-types.ts';
-import { LiveStream, coalesce, retryable, retryDelay } from './live.ts';
+import { LiveStream, coalesce, dispatch, retryable, retryDelay } from './live.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -45,7 +45,7 @@ function liveStream() {
     url: () => '/api/events',
     onMessage: (data) => {
       const { topic } = JSON.parse(data) as { topic: Topic };
-      for (const l of listeners) if (l.topics.has(topic)) l.fn();
+      dispatch(listeners, topic);
     },
     // After a reconnect, events may have been missed: refresh everything once.
     onReconnect: notifyAll,

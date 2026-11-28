@@ -3,11 +3,11 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { seedAgents } from '../src/agents.ts';
+import { checkPromptDefaults, seedAgents } from '../src/agents.ts';
 import { createApp } from '../src/app.ts';
 import { initCrypto, totp } from '../src/crypto.ts';
 import { DatabaseSync } from 'node:sqlite';
-import { initDb, MIGRATIONS, one, run } from '../src/db.ts';
+import { all, initDb, MIGRATIONS, one, run } from '../src/db.ts';
 import { mediaDir } from '../src/media.ts';
 import { createConnection } from '../src/providers/index.ts';
 import { publish } from '../src/events.ts';
@@ -26,6 +26,13 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
   ticketsOf: () => fakeTickets,
   vcsOf: () => fakeVcs,
 }));
+
+// Counts priority graph builds: each one runs implicitPriority once.
+const graphBuilds = vi.hoisted(() => ({ count: 0 }));
+vi.mock('../src/scheduler/gates.ts', async (importOriginal) => {
+  const gates = await importOriginal<typeof import('../src/scheduler/gates.ts')>();
+  return { ...gates, implicitPriority: (...args: Parameters<typeof gates.implicitPriority>) => (graphBuilds.count++, gates.implicitPriority(...args)) };
+});
 
 const PASSWORD = 'correct horse battery'; // see vitest.config.ts
 const app = (() => {
@@ -87,6 +94,18 @@ describe('authenticated API', () => {
     expect((await request(app).get('/api/settings').set('cookie', cookie)).body.ticketOrder).toBe('created-desc');
   });
 
+  it('validates and saves the alert limit for opened tickets', async () => {
+    expect((await request(app).get('/api/settings').set('cookie', cookie)).body.raiseAlertPerHour).toBe(10);
+    for (const bad of [0, 2.5, 'many']) {
+      const res = await request(app).put('/api/settings').set('cookie', cookie).send({ raiseAlertPerHour: bad });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Alert limit for opened tickets must be a whole number from 1 to 1000.');
+    }
+    const ok = await request(app).put('/api/settings').set('cookie', cookie).send({ raiseAlertPerHour: 25 });
+    expect(ok.body.raiseAlertPerHour).toBe(25);
+    expect((await request(app).get('/api/settings').set('cookie', cookie)).body.raiseAlertPerHour).toBe(25);
+  });
+
   it('treats a prompt equal to the default as not customised', async () => {
     const agents = (await request(app).get('/api/agents').set('cookie', cookie)).body;
     const classifier = agents.find((a: { name: string }) => a.name === 'classifier');
@@ -94,6 +113,75 @@ describe('authenticated API', () => {
     expect(custom.body).toMatchObject({ prompt: 'Be brief.', customised: true });
     const reset = await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ prompt: classifier.defaultPrompt });
     expect(reset.body.customised).toBe(false);
+  });
+
+  it('flags a customised prompt whose default has changed since it was saved', async () => {
+    const base = () => one<{ prompt_base: string | null }>("SELECT prompt_base FROM agent_classes WHERE name = 'classifier'")!.prompt_base;
+    const view = async () => (await request(app).get('/api/agents').set('cookie', cookie)).body.find((a: { name: string }) => a.name === 'classifier');
+    const flag = () => run("UPDATE agent_classes SET prompt_base = 'Old default.' WHERE name = 'classifier'");
+
+    const saved = await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ prompt: 'Be brief.' });
+    const { defaultPrompt } = saved.body;
+    expect(base()).toBe(defaultPrompt);
+    expect(saved.body).toMatchObject({ customised: true, defaultBefore: null, defaultUnknown: false });
+
+    flag();
+    expect(await view()).toMatchObject({ defaultBefore: 'Old default.', defaultUnknown: false });
+
+    // A save that only changes the model keeps the flag; editing the prompt clears it.
+    await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ model: 'claude-haiku-5-5', prompt: 'Be brief.' });
+    expect((await view()).defaultBefore).toBe('Old default.');
+    await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ prompt: 'Be very brief.' });
+    expect((await view()).defaultBefore).toBe(null);
+    expect(base()).toBe(defaultPrompt);
+
+    // Dismissing records today's default and keeps the prompt.
+    flag();
+    const accepted = await request(app).post('/api/agents/classifier/accept-default').set('cookie', cookie);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toMatchObject({ prompt: 'Be very brief.', customised: true, defaultBefore: null });
+
+    // Resetting to the default clears it.
+    flag();
+    const reset = await request(app).put('/api/agents/classifier').set('cookie', cookie).send({ prompt: defaultPrompt });
+    expect(reset.body).toMatchObject({ customised: false, defaultBefore: null, defaultUnknown: false });
+    expect(base()).toBe(null);
+  });
+
+  it("notes prompts customised before Workshop kept their base, without flagging them", async () => {
+    run("UPDATE agent_classes SET prompt = 'Legacy.', prompt_base = NULL WHERE name = 'merge'");
+    const merge = async () => (await request(app).get('/api/agents').set('cookie', cookie)).body.find((a: { name: string }) => a.name === 'merge');
+    expect(await merge()).toMatchObject({ customised: true, defaultBefore: null, defaultUnknown: true });
+    checkPromptDefaults();
+    expect(one("SELECT id FROM alerts WHERE kind = 'prompt-default' AND ref = 'merge'")).toBeUndefined();
+    await request(app).post('/api/agents/merge/accept-default').set('cookie', cookie);
+    expect(await merge()).toMatchObject({ prompt: 'Legacy.', defaultBefore: null, defaultUnknown: false });
+    run("UPDATE agent_classes SET prompt = NULL, prompt_base = NULL WHERE name = 'merge'");
+  });
+
+  it('raises one alert per default change', async () => {
+    const open = () => all<{ id: number }>("SELECT id FROM alerts WHERE kind = 'prompt-default' AND ref = 'design' AND ack_at IS NULL");
+    run("UPDATE agent_classes SET prompt = 'Mine.', prompt_base = 'Old default.', prompt_alerted = NULL WHERE name = 'design'");
+    checkPromptDefaults();
+    checkPromptDefaults();
+    expect(open()).toHaveLength(1);
+    run("UPDATE alerts SET ack_at = 1 WHERE kind = 'prompt-default' AND ref = 'design'");
+    checkPromptDefaults();
+    expect(open()).toHaveLength(0);
+
+    // A later default change alerts again; dismissing acknowledges it.
+    run("UPDATE agent_classes SET prompt_alerted = 'older' WHERE name = 'design'");
+    checkPromptDefaults();
+    expect(open()).toHaveLength(1);
+    await request(app).post('/api/agents/design/accept-default').set('cookie', cookie);
+    expect(open()).toHaveLength(0);
+    run("UPDATE agent_classes SET prompt = NULL, prompt_base = NULL, prompt_alerted = NULL WHERE name = 'design'");
+  });
+
+  it('refuses to accept the default for an unknown agent', async () => {
+    const res = await request(app).post('/api/agents/nobody/accept-default').set('cookie', cookie);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('Unknown agent.');
   });
 
   it('refuses cross-site writes', async () => {
@@ -420,12 +508,31 @@ describe('usage and launch', () => {
     expect(res.body).toMatchObject({ apiRunCapUsd: s.apiRunCapUsd, apiDailyCapUsd: s.apiDailyCapUsd });
   });
 
-  it('accepts a refresh, which a read token may not ask for', async () => {
-    const res = await request(app).post('/api/refresh').set('cookie', cookie);
-    expect(res.status).toBe(202);
-    expect(res.body).toEqual({ ok: true });
+  const progressShape = {
+    state: expect.stringMatching(/^(idle|requested|waiting|running)$/),
+    kind: expect.stringMatching(/^(sync|refresh|scheduled)$/),
+    done: expect.any(Number),
+    total: expect.any(Number),
+  };
+
+  it('reports the sync progress', async () => {
+    const res = await request(app).get('/api/sync').set('cookie', cookie);
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(['done', 'kind', 'lastError', 'lastFinishedAt', 'phase', 'repo', 'requestedAt', 'state', 'total']);
+    expect(res.body).toMatchObject(progressShape);
+  });
+
+  it('accepts a sync and a refresh, which a read token may not ask for, and answers with the progress', async () => {
+    for (const path of ['/api/sync', '/api/refresh']) {
+      const res = await request(app).post(path).set('cookie', cookie);
+      expect(res.status).toBe(202);
+      expect(res.body).toMatchObject(progressShape);
+      expect(res.body.requestedAt).toEqual(expect.any(Number));
+    }
     const token = (await request(app).post('/api/tokens').set('cookie', cookie).send({ name: 'refresh', scope: 'read' })).body.token;
     expect((await request(app).post('/api/refresh').set('authorization', `Bearer ${token}`)).status).toBe(403);
+    expect((await request(app).post('/api/sync').set('authorization', `Bearer ${token}`)).status).toBe(403);
+    expect((await request(app).get('/api/sync').set('authorization', `Bearer ${token}`)).status).toBe(200);
   });
 
   it('refuses to launch what cannot run', async () => {
@@ -616,6 +723,27 @@ describe('dependencies', () => {
     link(two, 'Me/Lib', 5, 'open');
     link(two, 'me/lib', 5, 'open'); // the same link, spelled differently: shown once
     link(one2, 'stranger/tool', 7, 'closed', 'Fix the tool');
+    publish('tickets');
+  });
+
+  it('builds the priority graph once per request, and again only after tickets or repos change', async () => {
+    await new Promise((r) => setTimeout(r, 600)); // let allocation passes that earlier writes kick() (500 ms later) finish
+    publish('tickets');
+    graphBuilds.count = 0;
+    expect((await request(app).get('/api/dependencies').set('cookie', cookie)).status).toBe(200);
+    expect(graphBuilds.count).toBe(1);
+    await request(app).get('/api/dependencies').set('cookie', cookie);
+    await request(app).get('/api/tickets').set('cookie', cookie);
+    expect(graphBuilds.count).toBe(1);
+    publish('runs');
+    await request(app).get('/api/dependencies').set('cookie', cookie);
+    expect(graphBuilds.count).toBe(1);
+    publish('tickets');
+    await request(app).get('/api/dependencies').set('cookie', cookie);
+    expect(graphBuilds.count).toBe(2);
+    publish('repos');
+    await request(app).get('/api/dependencies').set('cookie', cookie);
+    expect(graphBuilds.count).toBe(3);
   });
 
   it('needs sign-in', async () => {
@@ -674,6 +802,7 @@ describe('OpenAPI', () => {
 
   it.each([
     ['/overview', 'Overview'],
+    ['/status', 'StatusSummary'],
     ['/settings', 'Settings'],
     ['/usage', 'Usage'],
     ['/usage/lifetime', 'LifetimeSpend'],
@@ -968,6 +1097,101 @@ describe('dismissing Needs you items', () => {
   });
 });
 
+describe('Needs you in the overview', () => {
+  it('lists each attention state with the same view as the ticket page', async () => {
+    const { run, one } = await import('../src/db.ts');
+    const id = one<{ id: number }>('SELECT id FROM tickets WHERE number = 4')!.id;
+    const set = (labels: string[], prStatus: string | null = null) =>
+      run('UPDATE tickets SET labels = ?, pr_status = ?, dismissed = NULL WHERE id = ?', JSON.stringify(labels), prStatus, id);
+    const lists = async () => {
+      const o = (await request(app).get('/api/overview').set('cookie', cookie)).body;
+      const find = (l: { id: number }[]) => l.find((t) => t.id === id);
+      return { needs: find(o.needsYou), dismissed: find(o.dismissed) };
+    };
+    const ticket = async () => (await request(app).get(`/api/tickets/${id}`).set('cookie', cookie)).body.ticket;
+    const expectAttention = async (attention: string | null) => {
+      const { needs, dismissed } = await lists();
+      expect(dismissed).toBeUndefined();
+      if (!attention) return expect(needs).toBeUndefined();
+      expect(needs).toMatchObject({ attention, dismissed: false });
+      expect(needs).toEqual(await ticket());
+    };
+
+    try {
+      set(['workshop/stage:implement', 'workshop/needs-info']);
+      await expectAttention('question');
+      set(['workshop/stage:implement', 'workshop/failed']);
+      await expectAttention('failed');
+      set(['workshop/stage:pr-review']);
+      await expectAttention('review');
+      set(['workshop/stage:pr-review'], 'changes_requested');
+      await expectAttention(null);
+      set(['workshop/stage:implement', 'workshop/needs-info', 'workshop/skip']);
+      await expectAttention(null);
+
+      set(['workshop/stage:pr-review']);
+      run("INSERT INTO runs (id, ticket_id, agent, attempt, model, billing, status, started_at) VALUES ('r-needs-active', ?, 'review', 1, 'm', 'subscription', 'running', 1)", id);
+      await expectAttention(null);
+      run("DELETE FROM runs WHERE id = 'r-needs-active'");
+
+      set(['workshop/stage:implement', 'workshop/needs-info']);
+      expect((await request(app).put(`/api/tickets/${id}/dismissed`).set('cookie', cookie).send({ dismissed: true })).status).toBe(200);
+      const { needs, dismissed } = await lists();
+      expect(needs).toBeUndefined();
+      expect(dismissed).toMatchObject({ attention: 'question', dismissed: true });
+      expect(dismissed).toEqual(await ticket());
+    } finally {
+      run("DELETE FROM runs WHERE id = 'r-needs-active'");
+      set(['workshop/stage:implement']);
+    }
+  });
+});
+
+describe('the overview queue', () => {
+  it('returns the front of the queue and counts all of it', async () => {
+    const { run, all } = await import('../src/db.ts');
+    const ids = Array.from({ length: 10 }, (_, i) =>
+      Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, ?, 'T', '', 'u', 'me', 'open', '[\"workshop/stage:design\", \"workshop/nominated\"]', '2026-10-13T00:00:00Z')", 700 + i).lastInsertRowid),
+    );
+    try {
+      const { queueView } = await import('../src/scheduler/loop.ts');
+      const full = queueView();
+      expect(full.length).toBeGreaterThanOrEqual(10);
+      const o = (await request(app).get('/api/overview').set('cookie', cookie)).body;
+      expect(o.queue).toHaveLength(8);
+      expect(o.queueTotal).toBe(full.length);
+      expect(o.queue).toEqual(JSON.parse(JSON.stringify(full.slice(0, 8))));
+    } finally {
+      run(`DELETE FROM tickets WHERE id IN (${ids.join(', ')})`);
+    }
+    expect(all('SELECT id FROM tickets WHERE number >= 700 AND number < 710')).toEqual([]);
+  });
+});
+
+describe('status', () => {
+  it('reports the mode and counts open alerts', async () => {
+    const { run, one } = await import('../src/db.ts');
+    const status = async () => (await request(app).get('/api/status').set('cookie', cookie)).body;
+    const before = (await status()).openAlerts;
+    expect(before).toBe(one<{ n: number }>('SELECT COUNT(*) AS n FROM alerts WHERE ack_at IS NULL')!.n);
+    const a = Number(run("INSERT INTO alerts (level, kind, message, ref, created_at) VALUES ('error', 'status-a', 'm', NULL, 0)").lastInsertRowid);
+    const b = Number(run("INSERT INTO alerts (level, kind, message, ref, created_at) VALUES ('error', 'status-b', 'm', NULL, 0)").lastInsertRowid);
+    try {
+      run('UPDATE alerts SET ack_at = 1 WHERE id = ?', a);
+      expect((await status()).openAlerts).toBe(before + 1);
+    } finally {
+      run('DELETE FROM alerts WHERE id IN (?, ?)', a, b);
+    }
+
+    const mode = (await status()).mode;
+    for (const m of ['paused', 'always']) {
+      await request(app).put('/api/settings').set('cookie', cookie).send({ mode: m });
+      expect((await status()).mode).toBe(m);
+    }
+    await request(app).put('/api/settings').set('cookie', cookie).send({ mode });
+  });
+});
+
 describe('prioritising a ticket', () => {
   it('sets and removes priority, and refuses closed tickets', async () => {
     const { run, one } = await import('../src/db.ts');
@@ -1024,6 +1248,7 @@ describe('prioritising a ticket', () => {
       expect((await ticket(a)).prioritisedFor).toEqual([]);
     } finally {
       run('DELETE FROM tickets WHERE id IN (?, ?)', a, b);
+      publish('tickets');
     }
   });
 });

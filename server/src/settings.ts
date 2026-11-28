@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS: Settings = {
   authors: [],
   ticketOrder: 'updated-asc',
   retentionDays: 30,
+  raiseAlertPerHour: 10,
 };
 
 export function getSettings(): Settings {

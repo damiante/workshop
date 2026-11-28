@@ -1,20 +1,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router } from 'express';
-import { agentViews, updateAgent } from '../agents.ts';
+import { acceptDefault, agentViews, updateAgent } from '../agents.ts';
 import { allowanceOf, allowanceViews, apiSpendSince, forgetBurndown } from '../allowance.ts';
-import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, TicketStatePatch, Usage, UsageRange } from '../api-types.ts';
+import type { AgentClassView, AgentName, AlertView, LogEntry, ModelOption, TicketLifecycle, TicketMedia, Overview, Settings, StatusSummary, TicketStatePatch, Usage, UsageRange } from '../api-types.ts';
 import { all, one, run } from '../db.ts';
 import { bus, openSse, publish } from '../events.ts';
 import { listMedia, mediaDir, mediaView } from '../media.ts';
 import { getConnection, listConnections, modelsOf, setBurndown, setLimits } from '../providers/index.ts';
 import { ACTIVE_STATUSES, getRun, logBus, readLog, runView, runViews, ticketRunViews } from '../runs.ts';
 import { pushRefusal, startOfDay, withinHours } from '../scheduler/gates.ts';
-import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncSoon } from '../scheduler/loop.ts';
+import { hostViews, kick, launchNow, queueView, refreshNow, resumeNow, syncProgress, syncSoon } from '../scheduler/loop.ts';
 import { requestPause, stopRun } from '../scheduler/runner.ts';
 import { getSettings, saveSettings, TICKET_ORDERS } from '../settings.ts';
 import { lifetimeSpend, USAGE_RANGES, usageHistory } from '../spend.ts';
-import { activeRunId, dependencyGraphs, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, setBypassLimits, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
+import { activeRunId, dependencyGraphs, editLabels, getRepo, getTicket, isAllowedAuthor, labelsOf, listTicketViews, needsYouViews, setBypassLimits, setDismissed, setPrioritised, setPush, ticketInScope, ticketView } from '../tickets.ts';
 import { label, SIZES, STAGES, stateEdits } from '../workflow/labels.ts';
 import { CONTENT_TYPES, extType, validName } from '../workflow/media.ts';
 import { AGENT_NAMES } from '../workflow/prompts.ts';
@@ -22,6 +22,8 @@ import { OPENAPI } from './openapi.ts';
 import { check, HttpError, int, num } from './util.ts';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+/** How much of the queue the overview returns: what the Dashboard shows. */
+const OVERVIEW_QUEUE_LIMIT = 8;
 
 function alertViews(where: string, limit: number): AlertView[] {
   return all<{ id: number; level: AlertView['level']; kind: string; message: string; ref: string | null; created_at: number; ack_at: number | null }>(
@@ -51,8 +53,8 @@ export const apiRouter = Router();
 
 apiRouter.get('/overview', (_req, res) => {
   const s = getSettings();
-  const tickets = listTicketViews();
-  const waiting = tickets.filter((t) => t.attention);
+  const waiting = needsYouViews();
+  const queue = queueView();
   const overview: Overview = {
     mode: s.mode,
     withinHours: withinHours(s, new Date()),
@@ -61,11 +63,23 @@ apiRouter.get('/overview', (_req, res) => {
     publishWaiting: runViews("runs.status = 'publishing' AND runs.publish_retry_at IS NOT NULL"),
     needsYou: waiting.filter((t) => !t.dismissed),
     dismissed: waiting.filter((t) => t.dismissed),
-    queue: queueView(),
+    queue: queue.slice(0, OVERVIEW_QUEUE_LIMIT),
+    queueTotal: queue.length,
     hosts: hostViews(),
     alerts: alertViews('ack_at IS NULL', 20),
   };
   res.json(overview);
+});
+
+apiRouter.get('/status', (_req, res) => {
+  const s = getSettings();
+  const status: StatusSummary = {
+    mode: s.mode,
+    withinHours: withinHours(s, new Date()),
+    allowance: allowanceViews(),
+    openAlerts: one<{ n: number }>('SELECT COUNT(*) AS n FROM alerts WHERE ack_at IS NULL')!.n,
+  };
+  res.json(status);
 });
 
 apiRouter.get('/usage/lifetime', (_req, res) => {
@@ -143,6 +157,7 @@ apiRouter.put('/settings', (req, res) => {
     patch.ticketOrder = b.ticketOrder;
   }
   if (b.retentionDays !== undefined) patch.retentionDays = int(b.retentionDays, 'Retention', 1, 365);
+  if (b.raiseAlertPerHour !== undefined) patch.raiseAlertPerHour = int(b.raiseAlertPerHour, 'Alert limit for opened tickets', 1, 1000);
   if (b.authors !== undefined) {
     check(Array.isArray(b.authors) && b.authors.every((a: unknown) => typeof a === 'string'), 'Authors must be a list of GitHub usernames.');
     const authors = [...new Set<string>(b.authors.map((a: string) => a.trim().replace(/^@/, '')).filter(Boolean))];
@@ -192,6 +207,13 @@ apiRouter.put('/agents/:name', (req, res) => {
   if ('timeoutMin' in b) patch.timeoutMin = int(b.timeoutMin, 'Time limit', 5, 1440);
   updateAgent(name, patch);
   kick();
+  res.json(agentViews().find((a) => a.name === name));
+});
+
+apiRouter.post('/agents/:name/accept-default', (req, res) => {
+  const name = req.params.name as AgentName;
+  check(AGENT_NAMES.includes(name), 'Unknown agent.', 404);
+  acceptDefault(name);
   res.json(agentViews().find((a) => a.name === name));
 });
 
@@ -331,14 +353,18 @@ apiRouter.put('/tickets/:id/state', async (req, res) => {
   res.json(ticketView(t, repo));
 });
 
+apiRouter.get('/sync', (_req, res) => {
+  res.json(syncProgress());
+});
+
 apiRouter.post('/sync', (_req, res) => {
-  syncSoon();
-  res.status(202).json({ ok: true });
+  void syncSoon();
+  res.status(202).json(syncProgress());
 });
 
 apiRouter.post('/refresh', (_req, res) => {
   void refreshNow();
-  res.status(202).json({ ok: true });
+  res.status(202).json(syncProgress());
 });
 
 function ticketParam(idParam: string) {

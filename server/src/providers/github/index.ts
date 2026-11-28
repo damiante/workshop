@@ -320,7 +320,7 @@ export class GitHubApp implements VcsHost, TicketSource {
   async createTicket(repo: RepoRef, t: { title: string; body: string; labels: string[] }) {
     const kit = await this.kit(repo);
     const { data } = await kit.request('POST /repos/{owner}/{repo}/issues', { ...split(repo), ...t });
-    return { number: data.number, url: data.html_url };
+    return { number: data.number, url: data.html_url, nodeId: data.node_id, author: data.user?.login, createdAt: data.created_at, updatedAt: data.updated_at };
   }
 
   async comment(repo: RepoRef, number: number, body: string) {

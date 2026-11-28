@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import type { ConnectionView, Overview, RepoView, RunView, Settings, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi, useNow } from '../api.ts';
+import { SyncButton } from '../components/SyncButton.tsx';
 import { ErrorNote, Panel, Status } from '../components/ui.tsx';
 import { AGENT_LABEL, clock, duration, runStatus } from '../format.ts';
 
@@ -92,28 +93,21 @@ function setupSteps(connections: ConnectionView[], repos: RepoView[], settings: 
 }
 
 export function Dashboard() {
-  const { data, error } = useApi<Overview>('/overview', ['runs', 'tickets', 'alerts', 'connections', 'settings', 'allowance', 'agents', 'repos']);
+  const { data, error } = useApi<Overview>('/overview', ['runs', 'activity', 'tickets', 'alerts', 'connections', 'settings', 'allowance', 'agents', 'repos']);
   const { data: connections } = useApi<ConnectionView[]>('/connections', ['connections']);
   const { data: repos } = useApi<RepoView[]>('/repos', ['repos']);
   const { data: settings } = useApi<Settings>('/settings', ['settings']);
   const now = useNow();
   const [showDismissed, setShowDismissed] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   if (!data) return <ErrorNote error={error} />;
 
   const steps = setupSteps(connections ?? [], repos ?? [], settings, data);
   const waiting = data.queue.find((q) => q.blockedBy);
-  const refresh = () => {
-    setRefreshing(true);
-    api('/refresh', { body: {} }).finally(() => setTimeout(() => setRefreshing(false), 1500));
-  };
   return (
     <div className="stack">
       <div className="spread">
         <h1>Dashboard</h1>
-        <button onClick={refresh} disabled={refreshing} title="Sync tickets, check Claude usage and start or resume what's ready, without waiting for the next check">
-          {refreshing ? 'Checking…' : 'Refresh'}
-        </button>
+        <SyncButton action="/refresh" label="Refresh" title="Sync tickets, check Claude usage and start or resume what's ready, without waiting for the next check" />
       </div>
       {steps.length > 0 && (
         <Panel title="Finish setting up">
@@ -171,15 +165,16 @@ export function Dashboard() {
         </Panel>
         <Panel title="Up next" action={<Link to="/tickets">All tickets</Link>}>
           {data.queue.length ? (
-            <ul className="list">
-              {data.queue.slice(0, 8).map((q) => (
-                <li key={q.ticketId} className="stack" style={{ gap: 4 }}>
-                  <div className="spread">
-                    <span>
-                      <Link to={`/tickets/${q.ticketId}`}>{q.ticket}</Link>: {q.title}
-                    </span>
-                    <span className="tag">{q.next}</span>
-                  </div>
+            <>
+              <ul className="list">
+                {data.queue.map((q) => (
+                  <li key={q.ticketId} className="stack" style={{ gap: 4 }}>
+                    <div className="spread">
+                      <span>
+                        <Link to={`/tickets/${q.ticketId}`}>{q.ticket}</Link>: {q.title}
+                      </span>
+                      <span className="tag">{q.next}</span>
+                    </div>
       {data.publishWaiting.length > 0 && (
         <Panel title="Waiting to publish">
           <p className="small muted">These agents have finished and their work is saved. Workshop publishes it to GitHub when GitHub answers again; they don't use an agent slot.</p>
@@ -192,16 +187,22 @@ export function Dashboard() {
           </ul>
         </Panel>
       )}
-                  {q.push && <span className="small muted">Pushed by you</span>}
-                  {q.prioritised && !q.push && <span className="small muted">Prioritised by you</span>}
-                  {!q.push && !q.prioritised && q.prioritisedFor.length > 0 && <span className="small muted">Prioritised for {q.prioritisedFor.join(', ')}</span>}
-                  {q.after.length > 0 && <span className="small muted">After {q.after.join(', ')} (higher priority)</span>}
-                  {q.unblocks > 0 && <span className="small muted">Unblocks {q.unblocks} open {q.unblocks === 1 ? 'ticket' : 'tickets'}</span>}
-                  {q.bypassLimits && <span className="small muted">Ignores your usage limits</span>}
-                  {q.blockedBy && <span className="small muted">Waiting: {q.blockedBy}</span>}
-                </li>
-              ))}
-            </ul>
+                    {q.push && <span className="small muted">Pushed by you</span>}
+                    {q.prioritised && !q.push && <span className="small muted">Prioritised by you</span>}
+                    {!q.push && !q.prioritised && q.prioritisedFor.length > 0 && <span className="small muted">Prioritised for {q.prioritisedFor.join(', ')}</span>}
+                    {q.after.length > 0 && <span className="small muted">After {q.after.join(', ')} (higher priority)</span>}
+                    {q.unblocks > 0 && <span className="small muted">Unblocks {q.unblocks} open {q.unblocks === 1 ? 'ticket' : 'tickets'}</span>}
+                    {q.bypassLimits && <span className="small muted">Ignores your usage limits</span>}
+                    {q.blockedBy && <span className="small muted">Waiting: {q.blockedBy}</span>}
+                  </li>
+                ))}
+              </ul>
+              {data.queueTotal > data.queue.length && (
+                <p className="small muted" style={{ padding: '8px 16px' }}>
+                  And {data.queueTotal - data.queue.length} more in the queue.
+                </p>
+              )}
+            </>
           ) : (
             <p className="empty">No tickets are ready for an agent.</p>
           )}

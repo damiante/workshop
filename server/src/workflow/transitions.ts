@@ -147,7 +147,7 @@ export function planTransition(ctx: PlanContext, result: AgentResult): Plan {
   // Keep partial work on the branch so you can see it while answering. The Code reviewer has nothing to keep.
   if (r.outcome === 'needs_info') return { add: [label.needsInfo], remove: [], publish: ctx.agent !== 'code-review', comment: questionsComment(ctx, r.questions) };
   // Partial work is kept, as with needs_info; the stage runs again once the prerequisites close.
-  if (r.outcome === 'blocked') return { ...planWait(ctx.agent, [], r.raise_blockers ?? [], r.summary), publish: true };
+  if (r.outcome === 'blocked') return { ...planWait(ctx.agent, r.blocked_by ?? [], r.raise_blockers ?? [], r.summary), publish: true };
 
   const doc = `[\`${ctx.docPath}\`](${ctx.docUrl})`;
   switch (ctx.agent) {

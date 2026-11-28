@@ -36,6 +36,7 @@ const schemas: Record<string, Schema> = {
     pollMinutes: int,
     authors: array(str),
     retentionDays: int,
+    raiseAlertPerHour: int,
   }),
   Limits: object({ fiveHour: num, weekly: num }),
   UsageWindow: object({ pct: num, resetsAt: nullable(int) }),
@@ -210,6 +211,20 @@ const schemas: Record<string, Schema> = {
   DependencyEdge: { ...object({ blocker: str, ticket: str }), description: '`blocker` must finish before `ticket`; both are node refs.' },
   DependencyGraph: object({ repoId: int, repo: str, nodes: array(ref('DependencyNode')), edges: array(ref('DependencyEdge')) }),
   MediaItem: object({ name: str, source: str, runId: nullable(str), caption: nullable(str), size: int, createdAt: int, url: str }),
+  SyncProgress: {
+    ...object({
+      state: { ...enumOf('idle', 'requested', 'waiting', 'running'), description: 'requested: the request was received. waiting: queued behind the sync pass that is running.' },
+      kind: enumOf('sync', 'refresh', 'scheduled'),
+      phase: { ...nullable(enumOf('sync', 'usage', 'allocate')), description: 'sync: done and total count repositories. usage (Refresh only): Claude usage checks. allocate (Refresh only): starting work.' },
+      repo: { ...nullable(str), description: 'The repository being synced.' },
+      done: int,
+      total: int,
+      requestedAt: nullable(int),
+      lastFinishedAt: { ...nullable(int), description: 'Null until the first sync since Workshop started.' },
+      lastError: { ...nullable(str), description: 'Why repositories failed to sync in the last pass.' },
+    }),
+    description: 'What the GitHub sync is doing (on the timer, Sync now or Refresh). Kept in memory, so it resets when Workshop restarts.',
+  },
   TicketLifecycle: object({ ticket: ref('TicketView'), runs: array(ref('RunView')), media: array(ref('MediaItem')) }),
   TicketMedia: object({ ticketId: int, ticket: str, title: str, items: array(ref('MediaItem')) }),
   TicketStatePatch: object(
@@ -243,8 +258,15 @@ const schemas: Record<string, Schema> = {
     needsYou: array(ref('TicketView')),
     dismissed: array(ref('TicketView')),
     queue: array(ref('QueueItem')),
+    queueTotal: int,
     hosts: array(ref('HostView')),
     alerts: array(ref('AlertView')),
+  }),
+  StatusSummary: object({
+    mode: ref('Mode'),
+    withinHours: bool,
+    allowance: array(ref('AllowanceView')),
+    openAlerts: int,
   }),
   AgentClassView: object({
     name: ref('AgentName'),
@@ -257,6 +279,8 @@ const schemas: Record<string, Schema> = {
     prompt: str,
     defaultPrompt: str,
     customised: bool,
+    defaultBefore: { ...nullable(str), description: 'The default the customised instructions were based on, when it differs from defaultPrompt' },
+    defaultUnknown: { ...bool, description: 'Customised before Workshop recorded which default they were based on' },
     protocol: str,
     maxTurns: int,
     timeoutMin: int,
@@ -310,7 +334,8 @@ function operation(method: string, op: Op) {
 }
 
 const paths: Record<string, Record<string, Op>> = {
-  '/overview': { get: { summary: 'Status: mode, running agents, queue, hosts, allowance and open alerts.', ok: ref('Overview') } },
+  '/overview': { get: { summary: 'Status: mode, running agents, the front of the queue, hosts, allowance and open alerts.', ok: ref('Overview') } },
+  '/status': { get: { summary: 'Mode, operating hours, Claude allowance and the number of open alerts: what the top bar and sidebar show.', ok: ref('StatusSummary') } },
   '/usage': { get: { summary: 'Claude allowance and limits per subscription, and today\'s API spend against the caps.', ok: ref('Usage') } },
   '/usage/limits/{connectionId}': {
     put: {
@@ -339,6 +364,9 @@ const paths: Record<string, Record<string, Op>> = {
   '/agents': { get: { summary: 'Agent classes and their model settings and prompts.', ok: array(ref('AgentClassView')) } },
   '/agents/{name}': {
     put: { summary: 'Changes one agent class. Send only the fields to change.', params: ['name'], body: { type: 'object' }, ok: ref('AgentClassView'), errors: [400, 403, 404] },
+  },
+  '/agents/{name}/accept-default': {
+    post: { summary: "Marks a customised agent's instructions as checked against the current default, which clears the out-of-date flag.", params: ['name'], ok: ref('AgentClassView'), errors: [403, 404] },
   },
   '/hosts/{id}': {
     put: {
@@ -430,12 +458,16 @@ const paths: Record<string, Record<string, Op>> = {
       errors: [400, 404],
     },
   },
-  '/sync': { post: { summary: 'Asks Workshop to sync tickets from GitHub soon.', status: '202', errors: [403] } },
+  '/sync': {
+    get: { summary: 'Progress of the GitHub sync: whether one is requested, waiting or running, how far it is, and when the last one finished.', ok: ref('SyncProgress') },
+    post: { summary: 'Asks Workshop to sync tickets from GitHub now (or right after the sync that is running). Answers at once with the progress record; follow it at GET /api/sync.', status: '202', ok: ref('SyncProgress'), errors: [403] },
+  },
   '/refresh': {
     post: {
       summary:
-        "Runs the checks Workshop's timer runs, now: syncs tickets from GitHub, re-reads the Claude usage of subscriptions that are over your limits or haven't been checked recently (waiting up to about 2.5 minutes for those checks), then starts or resumes agents in every free slot that a ready ticket fits. Answers at once; the checks finish in the background.",
+        "Runs the checks Workshop's timer runs, now: syncs tickets from GitHub, re-reads the Claude usage of subscriptions that are over your limits or haven't been checked recently (waiting up to about 2.5 minutes for those checks), then starts or resumes agents in every free slot that a ready ticket fits. Answers at once with the progress record; follow it at GET /api/sync.",
       status: '202',
+      ok: ref('SyncProgress'),
       errors: [403],
     },
   },
