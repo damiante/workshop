@@ -168,9 +168,10 @@ describe('scheduling helpers', () => {
     expect(place([borrowable], 'small')).toEqual({ hostId: 1, slot: 'standard' });
   });
 
-  it('leaves a larger slot to a ready candidate of that size', () => {
+  it('leaves a larger slot to a larger ready candidate', () => {
     const h = sizedHost(1, [1, 1], [1, 0], [1, 0]);
-    expect(place([h], 'small', ['standard'])).toEqual({ hostId: 1, slot: 'large' });
+    // Standard could borrow large too, so small leaves both to it.
+    expect(place([h], 'small', ['standard'])).toBeNull();
     expect(place([h], 'small', ['standard', 'large'])).toBeNull();
     expect(place([sizedHost(1, [1, 1], [1, 0])], 'small', ['standard'])).toBeNull();
     // The waiting candidate itself still gets its own pool.
@@ -179,6 +180,21 @@ describe('scheduling helpers', () => {
     expect(place([sizedHost(1, [1, 1], [1, 0])], 'small', ['large'])).toBeNull();
     // A waiting small candidate claims nothing larger.
     expect(place([h], 'small', ['small'])).toEqual({ hostId: 1, slot: 'standard' });
+  });
+
+  it('gives a slot two borrowers want to the larger one', () => {
+    // Small and standard full, one large slot free; small and standard ready, no large.
+    const h = sizedHost(1, [1, 1], [1, 1], [1, 0]);
+    const ready = ['small', 'small', 'small', 'standard', 'standard'] as const;
+    expect(place([h], 'standard', [...ready])).toEqual({ hostId: 1, slot: 'large' });
+    expect(place([h], 'small', [...ready])).toBeNull();
+    // Only small ready: it still borrows the large slot.
+    expect(place([h], 'small', ['small', 'small'])).toEqual({ hostId: 1, slot: 'large' });
+    // Standard and large ready, one large slot free: large gets it.
+    const full = sizedHost(1, [1, 0], [1, 1], [1, 0]);
+    const mixed = [...Array<'standard'>(5).fill('standard'), 'large', 'large'] as const;
+    expect(place([full], 'large', [...mixed])).toEqual({ hostId: 1, slot: 'large' });
+    expect(place([full], 'standard', [...mixed])).toBeNull();
   });
 
   it('finishes work in flight first', () => {

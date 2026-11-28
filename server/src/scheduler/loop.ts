@@ -468,7 +468,7 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const size = agentSize(agent, parseLabels(labelsOf(t)), Boolean(t.ui));
     out.push({ ticket: t, repo, agent, mode, blockedBy, hostId: null, size, slot: null, modelConnectionId: useConnection?.id ?? null, model: cls.model, billing: cls.billing, pushed: Boolean(t.push), prioritised: Boolean(t.prioritised), bypassLimits: Boolean(t.bypass_limits), prioritisedFor, after: [], unblocks: graph.unblocks(t, repo), boosted, priority: stepPriority(step), repoPriority: repo.priority });
   }
-  // Hosts come last: a borrower leaves a larger pool to a ready candidate whose own pool it is.
+  // Hosts come last: a borrower leaves a larger pool to a larger ready candidate that could use it.
   // allocate rebuilds the queue after every start, so the borrower gets whatever is left.
   const waiting = out.filter((c) => !c.blockedBy).map((c) => c.size);
   const hostFor = new Map(AGENT_SIZES.map((size) => [size, place(hosts, size, waiting)]));
