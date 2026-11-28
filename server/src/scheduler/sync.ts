@@ -46,10 +46,11 @@ export async function syncRepo(repo: RepoRow) {
     const complete = await syncBlockers(repo, changed);
     await syncReviews(repo);
     if (complete) run('UPDATE repos SET synced_at = ? WHERE id = ?', started, repo.id);
-    if (changed.length) publish('tickets');
   } finally {
     // A failed or rate-limited sync leaves the stored holds as they were, as before this set existed.
     for (const id of checking) checkingBlockers.delete(id);
+    // Even after a failure part way: the tickets stored so far must reach the views and the cached priority graph.
+    if (changed.length) publish('tickets');
   }
 }
 

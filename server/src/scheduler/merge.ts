@@ -1,5 +1,6 @@
 import { raiseAlert } from '../alerts.ts';
 import { run } from '../db.ts';
+import { publish } from '../events.ts';
 import { deleteMedia } from '../media.ts';
 import type { MergeRules } from '../providers/types.ts';
 import { getSettings } from '../settings.ts';
@@ -14,6 +15,7 @@ export async function finishMerged(t: TicketRow) {
   if (t.state !== 'closed') await sourceFor(repo).close(repoRef(repo), t.number);
   await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running]);
   run("UPDATE tickets SET state = 'closed', pr_status = 'merged' WHERE id = ?", t.id);
+  publish('tickets');
   deleteMedia(t.id);
   // The merge already succeeded, so a branch that won't delete (or is already gone) is only logged.
   const vcs = vcsFor(repo);
@@ -30,6 +32,7 @@ export async function stopAfterClosedPr(t: TicketRow) {
   await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running, label.needsInfo]);
   await sourceFor(repo).close(repoRef(repo), t.number, 'not_planned');
   run("UPDATE tickets SET state = 'closed', pr_status = 'closed' WHERE id = ?", t.id);
+  publish('tickets');
   await sourceFor(repo).comment(
     repoRef(repo),
     t.number,

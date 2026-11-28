@@ -52,7 +52,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 
 ## Invariants: don't break these
 
-- **Every state change a view shows must `publish` its topic.** Clock-driven state goes through `clockTopics` in the scheduler tick.
+- **Every state change a view shows must `publish` its topic.** Clock-driven state goes through `clockTopics` in the scheduler tick. The priority graph (`priorityGraph()`) is cached until the `tickets` or `repos` topic fires, so a write to a ticket's state, `blocked_by` or `prioritised`, or to a repo, that doesn't publish leaves queue order and the Dependencies page stale.
 - **No git credentials in the `run` container.** Tokens go only to `prepare` (read) and `publish` (write), through env vars, never onto the volume. `pipeline.test.ts` checks this.
 - **Secrets never reach the browser.** `toView()` masks them. Edits with an empty secret field keep the stored value.
 - **Exactly one Claude credential per container** (`launchEnv`): with both set, Claude Code would bill the API key.

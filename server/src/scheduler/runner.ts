@@ -650,6 +650,7 @@ function storeCreated(repo: RepoRow, made: CreatedTicket, t: { title: string; bo
     made.updatedAt ?? now,
     made.createdAt ?? now,
   );
+  publish('tickets');
 }
 
 const sameTitle = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();

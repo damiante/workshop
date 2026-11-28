@@ -27,6 +27,13 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
   vcsOf: () => fakeVcs,
 }));
 
+// Counts priority graph builds: each one runs implicitPriority once.
+const graphBuilds = vi.hoisted(() => ({ count: 0 }));
+vi.mock('../src/scheduler/gates.ts', async (importOriginal) => {
+  const gates = await importOriginal<typeof import('../src/scheduler/gates.ts')>();
+  return { ...gates, implicitPriority: (...args: Parameters<typeof gates.implicitPriority>) => (graphBuilds.count++, gates.implicitPriority(...args)) };
+});
+
 const PASSWORD = 'correct horse battery'; // see vitest.config.ts
 const app = (() => {
   initCrypto('test-secret-key');
@@ -613,6 +620,26 @@ describe('dependencies', () => {
     link(two, 'Me/Lib', 5, 'open');
     link(two, 'me/lib', 5, 'open'); // the same link, spelled differently: shown once
     link(one2, 'stranger/tool', 7, 'closed', 'Fix the tool');
+    publish('tickets');
+  });
+
+  it('builds the priority graph once per request, and again only after tickets or repos change', async () => {
+    publish('tickets');
+    graphBuilds.count = 0;
+    expect((await request(app).get('/api/dependencies').set('cookie', cookie)).status).toBe(200);
+    expect(graphBuilds.count).toBe(1);
+    await request(app).get('/api/dependencies').set('cookie', cookie);
+    await request(app).get('/api/tickets').set('cookie', cookie);
+    expect(graphBuilds.count).toBe(1);
+    publish('runs');
+    await request(app).get('/api/dependencies').set('cookie', cookie);
+    expect(graphBuilds.count).toBe(1);
+    publish('tickets');
+    await request(app).get('/api/dependencies').set('cookie', cookie);
+    expect(graphBuilds.count).toBe(2);
+    publish('repos');
+    await request(app).get('/api/dependencies').set('cookie', cookie);
+    expect(graphBuilds.count).toBe(3);
   });
 
   it('needs sign-in', async () => {
@@ -1021,6 +1048,7 @@ describe('prioritising a ticket', () => {
       expect((await ticket(a)).prioritisedFor).toEqual([]);
     } finally {
       run('DELETE FROM tickets WHERE id IN (?, ?)', a, b);
+      publish('tickets');
     }
   });
 });

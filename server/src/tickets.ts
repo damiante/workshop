@@ -1,6 +1,6 @@
-import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, TicketRefView, TicketView } from './api-types.ts';
+import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, TicketRefView, TicketView, Topic } from './api-types.ts';
 import { all, one, run } from './db.ts';
-import { publish } from './events.ts';
+import { bus, publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
 import type { RepoRef, TicketLink } from './providers/types.ts';
 import { mediaCount } from './media.ts';
@@ -219,6 +219,7 @@ export const linkCount = (ticketId: number) => one<{ n: number }>('SELECT count(
 export function dependencyGraphs(): DependencyGraph[] {
   const repos = all<RepoRow>('SELECT * FROM repos');
   const byId = new Map(repos.map((r) => [r.id, r]));
+  const graph = priorityGraph();
   return repos
     .filter((r) => r.enabled)
     .sort((a, b) => a.full_name.localeCompare(b.full_name))
@@ -241,7 +242,7 @@ export function dependencyGraphs(): DependencyGraph[] {
       const nodes = new Map<string, DependencyNode>();
       for (const t of rows) {
         const r = byId.get(t.repo_id)!;
-        const node = { ref: refOf(r.full_name, t.number), number: t.number, title: t.title, url: t.url, state: t.state, held: blockersOf(t).length > 0, ticket: ticketView(t, r) };
+        const node = { ref: refOf(r.full_name, t.number), number: t.number, title: t.title, url: t.url, state: t.state, held: blockersOf(t).length > 0, ticket: ticketView(t, r, graph) };
         nodes.set(linkKey(r.full_name, t.number), node);
       }
       const seen = new Set<string>();
@@ -341,8 +342,22 @@ export interface PriorityGraph {
   unblocks(t: TicketRow, repo: RepoRow): number;
 }
 
+/**
+ * The graph is built from open tickets in enabled repos, their blockers and prioritised flags, and repo names, so it's
+ * kept until the `tickets` or `repos` topic says one of those may have changed. Building it walks every open ticket,
+ * so doing that per view stalls the server. It's never patched in place: priority and counts are transitive.
+ */
+let cachedGraph: PriorityGraph | null = null;
+bus.on('topic', (topic: Topic) => {
+  if (topic === 'tickets' || topic === 'repos') cachedGraph = null;
+});
+
 /** Implicit priority, worked out from the open tickets' stored blockers. Nothing of it is stored. */
 export function priorityGraph(): PriorityGraph {
+  return (cachedGraph ??= buildPriorityGraph());
+}
+
+function buildPriorityGraph(): PriorityGraph {
   const rows = all<{ id: number; number: number; prioritised: number; blocked_by: string; full_name: string }>(
     openTicketsSql.replace('SELECT t.*', 'SELECT t.id, t.number, t.prioritised, t.blocked_by, r.full_name'),
   );
@@ -357,11 +372,11 @@ export function priorityGraph(): PriorityGraph {
     const prefix = `${repo.full_name.toLowerCase()}#`;
     return key.startsWith(prefix) ? `#${key.slice(prefix.length)}` : full;
   };
-  return {
+  return Object.freeze<PriorityGraph>({
     prioritisedFor: (t, repo) => (graph.get(refKey(`#${t.number}`, repo.full_name)) ?? []).map((k) => ({ ref: displayRef(k, repo), ticketId: known.get(k)?.id ?? null })),
     resolve: (ref, repo) => ({ ref, ticketId: known.get(refKey(ref, repo.full_name))?.id ?? null }),
     unblocks: (t, repo) => counts.get(refKey(`#${t.number}`, repo.full_name)) ?? 0,
-  };
+  });
 }
 
 export function ticketView(t: TicketRow, repo: RepoRow, graph: PriorityGraph = priorityGraph()): TicketView {

@@ -22,12 +22,12 @@ const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
 const { createConnection, reorderConnections, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
-const { bus } = await import('../src/events.ts');
+const { bus, publish } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { checkRaiseRate, connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
 const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, syncSoon, tick } = await import('../src/scheduler/loop.ts');
-const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf } = await import('../src/tickets.ts');
+const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf, priorityGraph } = await import('../src/tickets.ts');
 const { checkingBlockers, syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
@@ -2766,6 +2766,26 @@ describe('sync', () => {
       expect(buildQueue().find((c) => c.ticket.id === 1)?.blockedBy).toBe('Depends on #2');
     });
 
+    it('rebuilds the cached priority graph when a sync changes what a ticket waits on', async () => {
+      const blocker = Number(run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 2, 'Expose the API', '', 'u', 'me', 'open', '[]', '2026-10-13T00:00:00Z')").lastInsertRowid);
+      publish('tickets');
+      try {
+        const before = priorityGraph();
+        expect(before.unblocks(getTicket(blocker)!, repo())).toBe(0);
+        expect(priorityGraph()).toBe(before); // kept while nothing changes
+        fake.tickets.listChanged = async () => [remote({ labels: [], openBlockers: 1 })];
+        fake.tickets.blockers = vi.fn(async () => [open(2)]);
+        await syncRepo(repo());
+        expect(priorityGraph()).not.toBe(before);
+        expect(priorityGraph().unblocks(getTicket(blocker)!, repo())).toBe(1);
+        expect(ticketView(getTicket(1)!, repo()).dependsOn).toEqual([{ ref: '#2', ticketId: blocker }]);
+      } finally {
+        run("UPDATE tickets SET blocked_by = '[]' WHERE id = 1");
+        run('DELETE FROM tickets WHERE id = ?', blocker);
+        publish('tickets');
+      }
+    });
+
     it('releases a held ticket when its blocker closes, even though the ticket did not change', async () => {
       run(`UPDATE tickets SET blocked_by = '["#2"]' WHERE id = 1`);
       fake.tickets.listChanged = async () => [];
@@ -4092,8 +4112,11 @@ describe('nominated tickets only', () => {
 describe('ticket order', () => {
   const implement = JSON.stringify([label.size('s'), label.stage('implement')]);
   const numbers = () => buildQueue().map((c) => c.ticket.number);
-  const add = (n: number, updated: string, created: string | null, labels = implement, blockedBy: string[] = [], repo = 1) =>
+  // Published like every real write, so the cached priority graph sees it.
+  const add = (n: number, updated: string, created: string | null, labels = implement, blockedBy: string[] = [], repo = 1) => {
     run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at, created_at) VALUES (?, ?, 'T', '', 'u', 'me', 'open', ?, ?, ?, ?)", repo, n, labels, JSON.stringify(blockedBy), updated, created);
+    publish('tickets');
+  };
   /** Tickets not waiting on another ticket, in queue order. */
   const startable = () => buildQueue().filter((c) => !c.blockedBy?.startsWith('Depends on')).map((c) => c.ticket.number);
   /** `count` open tickets, numbered from `from`, that wait on `ref`. */
@@ -4109,6 +4132,7 @@ describe('ticket order', () => {
   });
   afterEach(() => {
     run('DELETE FROM tickets WHERE number BETWEEN 10 AND 49');
+    publish('tickets');
     saveSettings({ ticketOrder: 'updated-asc' });
   });
 
@@ -4180,6 +4204,7 @@ describe('ticket order', () => {
     } finally {
       run('DELETE FROM tickets WHERE repo_id = ?', lib);
       run('DELETE FROM repos WHERE id = ?', lib);
+      publish('repos');
     }
   });
 
