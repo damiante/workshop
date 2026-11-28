@@ -27,8 +27,13 @@ case "${1:-}" in
 
   run)
     cd repo
+    # No background work: claude -p doesn't exit while any is alive, and each finished task can wake the
+    # agent for another turn and another result. This also drops the Agent tool's run_in_background. A long
+    # command blocks for up to 30 minutes instead of being moved to the background at the Bash timeout.
+    export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 BASH_DEFAULT_TIMEOUT_MS=1800000 BASH_MAX_TIMEOUT_MS=1800000
     args=(-p --model "$MODEL" --output-format stream-json --verbose
       --dangerously-skip-permissions --permission-prompts none
+      --disallowedTools ScheduleWakeup CronCreate CronDelete CronList
       --json-schema "$(cat /work/.workshop/schema.json)")
     if [ -n "${EFFORT:-}" ]; then args+=(--effort "$EFFORT"); fi
     if [ -n "${MAX_TURNS:-}" ]; then args+=(--max-turns "$MAX_TURNS"); fi

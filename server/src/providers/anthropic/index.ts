@@ -119,6 +119,8 @@ export interface ClaudeRun {
    * so stopping the agent here loses nothing. False after any other line.
    */
   boundary?: boolean;
+  /** Ids of the background tasks (commands, subagents) the latest `background_tasks_changed` listed as still running. */
+  backgroundTasks?: string[];
 }
 
 type Block = { type: string; id?: string; tool_use_id?: string; text?: string; name?: string; input?: Record<string, unknown> };
@@ -149,6 +151,7 @@ export function readClaudeLine(run: ClaudeRun, line: string): ClaudeRun {
     case 'system':
       if (event.subtype === 'init') run.sessionId = event.session_id;
       if (event.subtype === 'api_retry') run.apiError = event.error;
+      if (event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks)) run.backgroundTasks = event.tasks.map((t: { task_id?: string }) => String(t?.task_id));
       break;
     case 'assistant':
       // A request that failed outright (e.g. "Not logged in") arrives as an assistant message with `error`.

@@ -803,6 +803,9 @@ describe('runner', () => {
     const toolResult = (id: string) => line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
     const DONE = result({ outcome: 'done', summary: 'Done.' });
     const PUSHED = line({ before: '', after: 'def5678', ahead: 1 });
+    const STOPPED = 'Workshop stopped the container: the agent had returned its result, but Claude Code was still running.';
+    const tasks = (...ids: string[]) =>
+      line({ type: 'system', subtype: 'background_tasks_changed', tasks: ids.map((task_id) => ({ task_id, task_type: 'local_bash', description: 'npm test' })) });
 
     /** A host whose run container prints what the test says, when it says it, until it's killed or finishes. */
     const live = () => {
@@ -921,7 +924,61 @@ describe('runner', () => {
       expect(r).toMatchObject({ status: 'succeeded', summary: 'Done.' });
       expect(fake.env.spec('publish')).toBeDefined();
       expect(all("SELECT id FROM alerts WHERE kind = 'container-killed'")).toHaveLength(0);
-      expect(readLog(id).map((e) => e.text)).toContain('Workshop stopped the container: the agent had returned its result, but something it started was still running.');
+      expect(readLog(id).map((e) => e.text)).toContain(STOPPED);
+    });
+
+    it('keeps a container running while a background task is listed, and publishes the later result', async () => {
+      const { stream, say } = live();
+      const id = go();
+      await say(toolUse('a'), toolResult('a'));
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        await say(tasks('bg1'), result({ outcome: 'failed', summary: 'Not committed yet.' }));
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS * 10);
+        expect(stream.killed).toBe(false);
+        // The task finishes and wakes the agent, which finishes the work and reports again, then exits.
+        await say(tasks('bg1'), toolUse('b'), toolResult('b'), DONE);
+      } finally {
+        vi.useRealTimers();
+      }
+      stream.end();
+      const r = await settle(id);
+      expect(r).toMatchObject({ status: 'succeeded', summary: 'Done.' });
+      expect(readLog(id).map((e) => e.text)).not.toContain(STOPPED);
+    });
+
+    it('stops the container once the background task list empties after the result', async () => {
+      const { stream, say } = live();
+      const id = go();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        await say(tasks('bg1'), DONE);
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS * 2);
+        expect(stream.killed).toBe(false);
+        await say(tasks());
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS - 1000);
+        expect(stream.killed).toBe(false);
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(stream.killed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(await settle(id)).toMatchObject({ status: 'succeeded', summary: 'Done.' });
+    });
+
+    it("stops a container that stays up after an error result, and reports the agent's own error", async () => {
+      const { stream, say } = live();
+      const id = go();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        await say(line({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['The API went away.'] }));
+        await vi.advanceTimersByTimeAsync(RESULT_GRACE_MS);
+        expect(stream.killed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(await settle(id)).toMatchObject({ status: 'failed', error: 'The API went away.' });
+      expect(all("SELECT id FROM alerts WHERE kind = 'container-killed'")).toHaveLength(0);
     });
 
     it('honours a request made while the run is starting at the first boundary of the run step', async () => {
