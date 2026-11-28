@@ -132,8 +132,8 @@ const DAY = 86400_000;
 const HOUR = 3600_000;
 const RANGE_DAYS: Record<Exclude<UsageRange, '24h' | 'all'>, number> = { '7d': 7, '30d': 30, '90d': 90 };
 export const USAGE_RANGES: UsageRange[] = ['24h', '7d', '30d', '90d', 'all'];
-/** How many tickets the Usage page's cost per ticket lists. */
-const TICKET_ROWS = 50;
+/** How many tickets the Usage page's cost per ticket can search and sort; it shows the top 10. */
+const TICKET_ROWS = 500;
 
 /** 'YYYY-MM-DD' a number of calendar days before `key`; calendar arithmetic, so DST can't skip or repeat a day. */
 const dayBefore = (key: string, days: number) => {

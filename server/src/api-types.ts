@@ -516,7 +516,7 @@ export interface UsageHistory {
   byModel: SpendSeries[];
   byProject: SpendSeries[];
   byConnection: SpendSeries[];
-  /** The tickets that used the most in the range, by cost, highest first; at most 50. */
+  /** The tickets that used the most in the range, by cost, highest first; at most 500. */
   byTicket: TicketSpend[];
   allowance: AllowanceHistory[];
   projection: {
