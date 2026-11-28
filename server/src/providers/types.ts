@@ -32,6 +32,16 @@ export interface RemoteTicket {
   totalBlockers?: number;
 }
 
+/** A ticket Workshop just opened, from the reply to the request that opened it. Fields the source didn't return are left out. */
+export interface CreatedTicket {
+  number: number;
+  url: string;
+  nodeId?: string;
+  author?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 /** Another ticket this one is linked to. `repo` is the full name. */
 export interface TicketLink {
   repo: string;
@@ -73,7 +83,7 @@ export interface TicketSource {
   /** Marks `blocker` (a ticket in the same repo) as blocking `number`. Idempotent. Returns the blocker. */
   addBlocker(repo: RepoRef, number: number, blocker: number): Promise<TicketLink>;
   /** Opens a ticket as Workshop's own identity. */
-  createTicket(repo: RepoRef, t: { title: string; body: string; labels: string[] }): Promise<{ number: number; url: string }>;
+  createTicket(repo: RepoRef, t: { title: string; body: string; labels: string[] }): Promise<CreatedTicket>;
 }
 
 export interface GitAccess {

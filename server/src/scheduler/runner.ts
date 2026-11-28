@@ -10,7 +10,7 @@ import { hitUsageLimit, readClaudeLine, type ClaudeRun } from '../providers/anth
 import { limitsFor, type DockerConfig } from '../providers/docker/index.ts';
 import { untar } from '../providers/docker/tar.ts';
 import { environmentOf, getConnection, modelsOf } from '../providers/index.ts';
-import type { ContainerState, Environment, StepSpec } from '../providers/types.ts';
+import type { ContainerState, CreatedTicket, Environment, StepSpec } from '../providers/types.ts';
 import { collectAgentMedia, deleteMedia, fetchTicketImages, listMedia, mediaFiles, warn, type IssueImage } from '../media.ts';
 import { ACTIVE_STATUSES, activity, appendLog, getRun, linesFrom, readLog, type RunRow } from '../runs.ts';
 import { getSettings } from '../settings.ts';
@@ -616,6 +616,31 @@ const mayRaise = (repo: RepoRow, t: TicketRow, agent: AgentName) => Boolean(repo
 const mayRaiseBlockers = (repo: RepoRow, t: TicketRow, agent: AgentName) =>
   Boolean(repo.raise_tickets) && (agent === 'classifier' || BLOCKING_AGENTS.includes(agent)) && !labelsOf(t).includes(label.raised);
 
+/**
+ * Stores a ticket Workshop just opened from what the reply already holds, so other runs see it, in the open-ticket
+ * index and as a similarity candidate, before the next sync. No extra request; the sync later updates it as usual.
+ * Left to the sync if it already has it, and skipped, as the sync would, if Workshop isn't an allowed author.
+ */
+function storeCreated(repo: RepoRow, made: CreatedTicket, t: { title: string; body: string; labels: string[] }) {
+  const author = made.author ?? sourceFor(repo).selfLogin();
+  if (!isAllowedAuthor(author)) return;
+  const now = new Date().toISOString();
+  run(
+    `INSERT INTO tickets (repo_id, number, node_id, title, body, url, author, state, labels, updated_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?) ON CONFLICT (repo_id, number) DO NOTHING`,
+    repo.id,
+    made.number,
+    made.nodeId ?? null,
+    t.title,
+    t.body,
+    made.url,
+    author,
+    JSON.stringify(t.labels),
+    made.updatedAt ?? now,
+    made.createdAt ?? now,
+  );
+}
+
 const sameTitle = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
 const MAX_RAISED_TITLE = 200;
 const MAX_RAISED_BODY = 20_000;
@@ -637,6 +662,7 @@ async function raiseNoticed(ctx: Ctx, t: TicketRow, result: AgentResult): Promis
     if ([...before, ...open].some((x) => sameTitle(x.title, title))) continue;
     const body = `${n.body.trim().slice(0, MAX_RAISED_BODY)}\n\n---\n_Workshop's ${AGENT_INFO[r.agent].label} agent noticed this while working on #${t.number}. It's outside that ticket, so nothing was changed for it there._`;
     const made = await source.createTicket(repoRef(ctx.repo), { title, body, labels: [label.raised] });
+    storeCreated(ctx.repo, made, { title, body, labels: [label.raised] });
     run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: made.number, url: made.url, title, runId: r.id, at: Date.now() }]), t.id);
     checkRaiseRate(ctx.repo);
   }
@@ -681,12 +707,13 @@ async function raiseBlockers(ctx: Ctx, t: TicketRow, wanted: Noticed[], agent: A
       made.push({ number: open.number, title: open.title, existing: true });
       continue;
     }
-    // A similar open ticket, or one raised here, is linked instead. Not one that waits for this ticket: that would be a cycle.
+    // A similar open prerequisite-type ticket (one agents raised, including any opened moments ago by another run), or
+    // one raised here, is linked instead. Not one that waits for this ticket: that would be a cycle. Only local data: no GitHub requests.
     const self = refKey(`#${t.number}`, ctx.repo.full_name);
     const closed = new Set(all<{ number: number }>("SELECT number FROM tickets WHERE repo_id = ? AND state != 'open'", t.repo_id).map((x) => x.number));
     const candidates = [
       ...others
-        .filter((o) => isAllowedAuthor(o.author) && !blockersOf(o).some((b) => refKey(b, ctx.repo.full_name) === self))
+        .filter((o) => labelsOf(o).includes(label.raised) && isAllowedAuthor(o.author) && !blockersOf(o).some((b) => refKey(b, ctx.repo.full_name) === self))
         .map((o) => ({ number: o.number, title: o.title, body: o.body })),
       ...before.filter((x) => x.number !== t.number && !closed.has(x.number)).map((x) => ({ number: x.number, title: x.title, body: '' })),
     ];
@@ -700,6 +727,7 @@ async function raiseBlockers(ctx: Ctx, t: TicketRow, wanted: Noticed[], agent: A
     const body = `${n.body.trim().slice(0, MAX_RAISED_BODY)}\n\n---\n_Workshop's ${AGENT_INFO[agent].label} agent raised this as a prerequisite of #${t.number}, which waits until this ticket is closed._`;
     const labels = [label.raised, ...(labelsOf(t).includes(label.nominated) ? [label.nominated] : [])];
     const ticket = await source.createTicket(repoRef(ctx.repo), { title, body, labels });
+    storeCreated(ctx.repo, ticket, { title, body, labels });
     run('UPDATE tickets SET raised = ? WHERE id = ?', JSON.stringify([...before, { number: ticket.number, url: ticket.url, title, runId: r.id, blocker: true, at: Date.now() }]), t.id);
     checkRaiseRate(ctx.repo);
     made.push({ number: ticket.number, title, existing: false });

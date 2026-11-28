@@ -293,3 +293,21 @@ describe('GitHub pushToDefault', () => {
     await expect(gh({ refuse: 422 }).app.pushToDefault(main, 'workshop/1-x', 'm')).resolves.toEqual({ ok: false, message: 'Update is not a fast forward' });
   });
 });
+
+describe('GitHub createTicket', () => {
+  it("returns what the create reply holds, with one request, so Workshop can store the ticket before the next sync", async () => {
+    const app = new GitHubApp({ appId: 1, slug: 'workshop', owner: 'me', htmlUrl: '', installations: [1] }, { privateKey: 'unused' });
+    const data = { number: 41, html_url: 'https://github.com/me/app/issues/41', node_id: 'I_41', user: { login: 'workshop[bot]' }, created_at: '2026-11-28T00:00:00Z', updated_at: '2026-11-28T00:00:01Z' };
+    const request = vi.fn(async () => ({ data }));
+    vi.spyOn(app as unknown as { kit: () => unknown }, 'kit').mockResolvedValue({ request });
+    await expect(app.createTicket(repo, { title: 'T', body: 'B', labels: ['workshop/raised'] })).resolves.toEqual({
+      number: 41,
+      url: 'https://github.com/me/app/issues/41',
+      nodeId: 'I_41',
+      author: 'workshop[bot]',
+      createdAt: '2026-11-28T00:00:00Z',
+      updatedAt: '2026-11-28T00:00:01Z',
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+});

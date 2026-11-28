@@ -2878,7 +2878,10 @@ describe('tickets for what agents notice', () => {
     let next = 40;
     fake.tickets.createTicket = vi.fn(async () => ({ number: ++next, url: `https://github.com/me/app/issues/${next}` }));
   });
-  afterEach(() => run('UPDATE repos SET raise_tickets = 0 WHERE id = 1'));
+  afterEach(() => {
+    run('UPDATE repos SET raise_tickets = 0 WHERE id = 1');
+    run('DELETE FROM tickets WHERE id != 1');
+  });
 
   it('opens a ticket for each, labelled and traced back, and says so on the ticket', async () => {
     fake.env = env();
@@ -3187,6 +3190,70 @@ describe('raising blockers', () => {
       run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 14, 'Outcome modifiers for saving throws', '', 'u', 'stranger', 'open', '[]', '2026-10-13T00:00:00Z')");
       await settle(classify());
       expect(fake.tickets.createTicket).toHaveBeenCalledTimes(1);
+    });
+
+    it("doesn't match a similar ticket that agents didn't raise", async () => {
+      insertWith(12, 'Outcome modifiers for saving throws', 'Effects change what a save does.', []);
+      await settle(classify());
+      expect(fake.tickets.createTicket).toHaveBeenCalledTimes(1);
+      expect(fake.tickets.addBlocker.mock.calls.map((c: unknown[]) => c[2])).toEqual([41]);
+    });
+
+    it('stores a ticket it opens at once, from the reply, so a raise from another ticket before the next sync links it', async () => {
+      fake.tickets.createTicket = vi.fn(async () => ({ number: 41, url: 'https://github.com/me/app/issues/41', nodeId: 'I_41', author: 'bot[bot]', createdAt: '2026-11-28T00:00:00Z', updatedAt: '2026-11-28T00:00:01Z' }));
+      await settle(classify());
+      expect(one<any>('SELECT * FROM tickets WHERE repo_id = 1 AND number = 41')).toMatchObject({
+        node_id: 'I_41',
+        title: 'Save outcome modifiers',
+        body: expect.stringContaining('changes a save outcome'),
+        url: 'https://github.com/me/app/issues/41',
+        author: 'bot[bot]',
+        state: 'open',
+        labels: JSON.stringify([label.raised]),
+        created_at: '2026-11-28T00:00:00Z',
+        updated_at: '2026-11-28T00:00:01Z',
+      });
+
+      run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 4, 'Add a cleric domain', '', 'u', 'me', 'open', '[]', '2026-10-13T00:00:00Z')");
+      const other = one<{ id: number }>('SELECT id FROM tickets WHERE repo_id = 1 AND number = 4')!.id;
+      fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'blocked', raise_blockers: [{ title: 'Modifiers for the outcome of a saving throw', body: 'Same thing.' }], reason: 'Needs it.' })] });
+      const r = await settle(launch({ ticketId: other, agent: 'classifier', mode: 'normal', attempt: 1, environmentId: ids.env, modelConnectionId: ids.model, model: 'claude-sonnet-5-5', billing: 'subscription' })!);
+      expect(r.status).toBe('succeeded');
+      expect(fake.tickets.createTicket).toHaveBeenCalledTimes(1);
+      expect(fake.tickets.addBlocker).toHaveBeenLastCalledWith(expect.anything(), 4, 41);
+      expect(readLog(r.id).map((e) => e.text)).toContainEqual(expect.stringMatching(/^Linked existing #41 "Save outcome modifiers"/));
+    });
+
+    it('falls back to its own login and the current time when the reply lacks them', async () => {
+      await settle(classify());
+      expect(one<any>('SELECT author, state, created_at FROM tickets WHERE repo_id = 1 AND number = 41')).toMatchObject({ author: 'bot[bot]', state: 'open', created_at: expect.any(String) });
+    });
+
+    it('makes no GitHub request for the check: a match costs only the addBlocker a plain blocked_by makes', async () => {
+      insertWith(12, 'Outcome modifiers for saving throws', 'Effects change what a save does.');
+      const record = () => {
+        const calls: string[] = [];
+        const real = fake.tickets;
+        fake.tickets = new Proxy(real, {
+          get: (target, key) => {
+            const v = target[key];
+            return typeof v === 'function' && key !== 'selfLogin' ? (...a: unknown[]) => (calls.push(String(key)), v.apply(target, a)) : v;
+          },
+        });
+        return () => ((fake.tickets = real), calls);
+      };
+      let stop = record();
+      await settle(classify({ raise_blockers: undefined, blocked_by: [12] }));
+      const plain = stop();
+      run("UPDATE tickets SET labels = '[]', blocked_by = '[]' WHERE id = 1");
+      run('DELETE FROM runs');
+      stop = record();
+      await settle(classify());
+      const matched = stop();
+      expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+      expect(matched).toEqual(plain);
+      expect(matched.filter((c) => c === 'addBlocker')).toHaveLength(1);
+      expect(matched).not.toContainEqual(expect.stringMatching(/^(listChanged|blockers|createTicket)$/));
     });
 
     it('collapses two similar proposals from one run into one ticket', async () => {

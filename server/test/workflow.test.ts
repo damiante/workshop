@@ -857,6 +857,18 @@ describe('similar tickets', () => {
     expect(isDuplicate(similarity(t('convert between spell slots and a feature resource'), t('regain uses by spending a spell slot')))).toBe(false);
   });
 
+  // Real duplicates raised in damiante/dnd-campaigner: the first three should match; the last two are different
+  // mechanisms that only share a word.
+  it.each([
+    ['overlay-declared roll offers that spend a resource die and add it to a roll', "data-declared feature reactions on 'attack missed you' and data-declared add-die roll offers paid from a feature pool", true],
+    ['bonus Hit Points on spell-slot healing', 'heal-caster rider after a slot-cast healing spell that restores HP to another creature', true],
+    ['heal-caster rider after a slot-cast healing spell that restores HP to another creature', 'trigger and rider for a spell cast with a slot that restores Hit Points', true],
+    ['maximize healing dice (spells and Channel Divinity) modifier', 'spend a resource to maximise damage dice of a matching damage roll', false],
+    ['feature reaction that forces a save on the creature that hit you', 'pre-damage reaction trigger that can grant resistance to one instance of damage', false],
+  ])('%s vs %s: duplicate %s', (a, b, duplicate) => {
+    expect(isDuplicate(similarity(t(a), t(b)))).toBe(duplicate);
+  });
+
   it('counts strongly overlapping bodies', () => {
     const body = 'The engine needs a hook that changes the outcome of a saving throw after the roll.';
     expect(isDuplicate(similarity(t('Save outcome hook', body), t('Modify saving throws', body)))).toBe(true);

@@ -112,3 +112,11 @@ The exact-title reuse, the `blocked_by` handling, `MAX_NOTICED` and the rule tha
 - **Index size.** About 2,400 tickets at roughly 700 bytes is about 1.7 MB per run, sent through `putArchive`. That's acceptable; no cap is added.
 - **Scanning.** Scoring compares one proposal against about 2,400 tickets, at most 3 times per publish: cheap.
 - **Untrusted text.** The index holds only tickets from allowed authors, the same set the prompt's list uses.
+
+## Review rework
+
+The owner's review asked for three changes, all without extra GitHub requests:
+
+- `createTicket` returns what GitHub's create reply already holds (node id, author, times), and `raiseBlockers` and `raiseNoticed` store the new ticket in `tickets` at once (`storeCreated`; `ON CONFLICT DO NOTHING`, since a row the sync already wrote is at least as fresh). Raises from different runs seconds apart now see each other.
+- The similarity candidates are open `workshop/raised` tickets plus this ticket's own raises, not every open ticket, and the rule is looser: titles at least 0.25 with 3 shared keywords, or title plus body at least 0.3. Five real pairs from damiante/dnd-campaigner are test fixtures: the first three match, the last two don't.
+- A test asserts that a matching raise makes exactly one GitHub call (`addBlocker`).

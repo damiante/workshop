@@ -1,14 +1,15 @@
 /**
  * Keyword similarity between a proposed prerequisite ticket and an open one, so Workshop can link an existing
- * ticket instead of opening a near-duplicate. Deliberately simple and conservative: the agent's own search of the
- * open-ticket index is the main defence, and this catches the obvious misses.
+ * ticket instead of opening a near-duplicate. Deliberately simple: the agent's own search of the open-ticket index is
+ * the main defence, and this catches the obvious misses. The candidates are only tickets agents raised, so the
+ * thresholds can be loose; they're tuned on real duplicates (see the fixtures in workflow.test.ts).
  */
 
 /** A proposal is a duplicate when its title scores at least this much and shares `MIN_SHARED` title keywords… */
-export const TITLE_THRESHOLD = 0.4;
-export const MIN_SHARED = 2;
+export const TITLE_THRESHOLD = 0.25;
+export const MIN_SHARED = 3;
 /** …or when title and body together score at least this much. */
-export const TEXT_THRESHOLD = 0.4;
+export const TEXT_THRESHOLD = 0.3;
 /** How much of each body counts. */
 export const BODY_CHARS = 500;
 
