@@ -108,7 +108,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   publish('tickets'); // tests write rows directly, so drop the cached priority graph
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, handoff = NULL, rework = NULL, prioritised = 0, bypass_limits = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, handoff = NULL, rework = NULL, follow_ups = NULL, prioritised = 0, bypass_limits = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.modelsFor = null;
@@ -159,6 +159,7 @@ const finding = (over: object = {}) => ({
   detail: 'The theme toggle has no test.',
   evidence: 'Read test/theme.test.ts.',
   fix: 'Add one.',
+  consequence: 'Breaking the toggle goes unnoticed.',
   ...over,
 });
 const severe = (over: object = {}) => finding({ severity: 'severe', title: 'Toggle crashes', detail: 'Clicking it throws.', evidence: 'Ran npm test: 1 failed.', fix: 'Guard the null.', ...over });
@@ -3670,6 +3671,81 @@ describe('pushing to the default branch', () => {
     await mergeApproved(false);
     expect(fake.vcs.merge).toHaveBeenCalledWith(expect.anything(), 7);
     expect(fake.vcs.pushToDefault).not.toHaveBeenCalled();
+  });
+
+  describe('follow-up tickets for what the code review leaves', () => {
+    const minor = finding({ severity: 'minor', title: 'Rename the toggle', consequence: '' });
+    const second = finding({ title: 'No test for the dark palette', detail: 'Nothing checks the palette.' });
+    const comments = () => fake.tickets.comment.mock.calls.map((c: any[]) => c[2] as string);
+
+    beforeEach(() => {
+      // The round's reworks are used up, so the moderate findings that remain don't send the ticket back.
+      run('UPDATE tickets SET labels = ?, rework = ?, raised = NULL WHERE id = 1', JSON.stringify([label.size('s'), label.stage('code-review')]), JSON.stringify({ count: 3, findings: [finding()] }));
+      run("UPDATE repos SET raise_tickets = 1, rework_on = 'moderate' WHERE id = 1");
+      let next = 40;
+      fake.tickets.createTicket = vi.fn(async () => ({ number: ++next, url: `https://github.com/me/app/issues/${next}` }));
+    });
+    afterEach(() => {
+      run("UPDATE repos SET raise_tickets = 0, rework_on = 'severe' WHERE id = 1");
+      run('DELETE FROM tickets WHERE id != 1');
+    });
+
+    it('pushes, then opens one for the moderate finding naming the ticket and the commit, and none for the minor one', async () => {
+      const { r, env } = await review([finding(), minor]);
+      expect(r.status).toBe('succeeded');
+      expect(String(env.spec('run')!.files!['.workshop/system.md'])).toContain('Severe and moderate findings send the ticket back automatically; minor ones go to the owner.');
+      await vi.waitFor(() => expect(getTicket(1)!.state).toBe('closed'));
+      expect(labels()).not.toContain(label.needsInfo);
+      expect(fake.vcs.pushToDefault).toHaveBeenCalledTimes(1);
+      expect(fake.tickets.createTicket).toHaveBeenCalledTimes(1);
+      const [, made] = fake.tickets.createTicket.mock.calls[0];
+      expect(made).toMatchObject({ title: 'No test for the toggle', labels: [label.raised] });
+      expect(made.body).toContain('**What goes wrong:** Breaking the toggle goes unnoticed.');
+      expect(made.body).toContain('the work for #3, which was pushed to `main` as [`abcdef1`](https://github.com/me/app/commit/abcdef1234)');
+      expect(comments().some((c: string) => c.includes('Rename the toggle') && c.includes('Workshop opens a follow-up ticket'))).toBe(true);
+      expect(comments().at(-1)).toMatch(/pushed this to `main` as \[`abcdef1`\][\s\S]*- #41 No test for the toggle$/);
+      expect(JSON.parse(getTicket(1)!.raised!)).toMatchObject([{ number: 41, runId: r.id }]);
+      expect(getTicket(1)!.follow_ups).toBeNull();
+    });
+
+    it("doesn't open one whose title an open ticket already has", async () => {
+      run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 50, 'No test for the toggle', '', 'u', 'me', 'open', '[]', '2026-10-12T00:00:00Z')");
+      await review([finding()]);
+      await vi.waitFor(() => expect(getTicket(1)!.state).toBe('closed'));
+      expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+      expect(comments().at(-1)).toContain('- No test for the toggle: already open as #50');
+    });
+
+    it("opens none with the setting off", async () => {
+      run('UPDATE repos SET raise_tickets = 0 WHERE id = 1');
+      await review([finding()]);
+      await vi.waitFor(() => expect(getTicket(1)!.state).toBe('closed'));
+      expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+      expect(comments().at(-1)).not.toContain('Follow-up');
+    });
+
+    it('after a failure part-way, finishes on the next check without pushing again or opening a ticket twice', async () => {
+      let next = 40;
+      fake.tickets.createTicket = vi.fn(async () => {
+        if (next === 41) {
+          next++;
+          throw Object.assign(new Error('Server error'), { status: 502 });
+        }
+        return { number: ++next, url: `https://github.com/me/app/issues/${next}` };
+      });
+      await review([finding(), second]);
+      await vi.waitFor(() => expect(fake.tickets.createTicket).toHaveBeenCalledTimes(2));
+      expect(getTicket(1)!.state).toBe('open');
+      expect(JSON.parse(getTicket(1)!.follow_ups!)).toMatchObject({ commit: { sha: 'abcdef1234' } });
+
+      await mergeApproved(false);
+      expect(fake.vcs.pushToDefault).toHaveBeenCalledTimes(1);
+      expect(fake.vcs.branchState).toHaveBeenCalledTimes(1);
+      expect(fake.tickets.createTicket).toHaveBeenCalledTimes(3);
+      expect(fake.tickets.createTicket.mock.calls.map((c: any[]) => c[1].title)).toEqual(['No test for the toggle', 'No test for the dark palette', 'No test for the dark palette']);
+      expect(getTicket(1)).toMatchObject({ state: 'closed', follow_ups: null });
+      expect(comments().at(-1)).toContain('- #41 No test for the toggle\n- #43 No test for the dark palette');
+    });
   });
 });
 

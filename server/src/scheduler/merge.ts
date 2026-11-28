@@ -4,8 +4,10 @@ import { publish } from '../events.ts';
 import { deleteMedia } from '../media.ts';
 import type { MergeRules } from '../providers/types.ts';
 import { getSettings } from '../settings.ts';
-import { branchOf, editLabels, getRepo, labelsOf, repoRef, rescueOf, sourceFor, vcsFor, type TicketRow } from '../tickets.ts';
+import { branchOf, editLabels, followUpsOf, getRepo, labelsOf, repoRef, rescueOf, sourceFor, vcsFor, type TicketRow } from '../tickets.ts';
 import { label, moveTo } from '../workflow/labels.ts';
+import type { FollowUps } from '../workflow/schemas.ts';
+import { raiseFollowUps } from './raise.ts';
 
 const setPrStatus = (t: TicketRow, status: string) => run('UPDATE tickets SET pr_status = ? WHERE id = ?', status, t.id);
 
@@ -14,7 +16,7 @@ export async function finishMerged(t: TicketRow) {
   const repo = getRepo(t.repo_id)!;
   if (t.state !== 'closed') await sourceFor(repo).close(repoRef(repo), t.number);
   await editLabels(t, [], [...moveTo(labelsOf(t), null).remove, label.running]);
-  run("UPDATE tickets SET state = 'closed', pr_status = 'merged' WHERE id = ?", t.id);
+  run("UPDATE tickets SET state = 'closed', pr_status = 'merged', follow_ups = NULL WHERE id = ?", t.id);
   publish('tickets');
   deleteMedia(t.id);
   // The merge already succeeded, so a branch that won't delete (or is already gone) is only logged.
@@ -95,12 +97,16 @@ export function pushMessage(t: { number: number; title: string }, subjects: stri
 
 /**
  * In a repository that takes work straight on its default branch: brings the ticket's branch up to date, then
- * puts its files on the default branch as one commit and finishes the ticket. No pull request is involved.
+ * puts its files on the default branch as one commit, opens tickets for the code review's remaining findings and
+ * finishes the ticket. No pull request is involved.
  */
 async function pushToDefault(t: TicketRow): Promise<'merged' | 'agent' | 'waiting'> {
   const repo = getRepo(t.repo_id)!;
-  const vcs = vcsFor(repo);
   const ref = repoRef(repo);
+  const follow = followUpsOf(t);
+  // An earlier attempt pushed, then failed opening the follow-ups: don't push (or merge) again.
+  if (follow?.commit) return finishPush(t, follow.commit, follow);
+  const vcs = vcsFor(repo);
   const branch = branchOf(t);
   const state = await vcs.branchState(ref, branch);
   if (state.ahead === 0) {
@@ -120,7 +126,19 @@ async function pushToDefault(t: TicketRow): Promise<'merged' | 'agent' | 'waitin
     raiseAlert('warning', 'merge-failed', `Couldn't push ${repo.full_name}#${t.number} to ${repo.default_branch}: ${pushed.message}`, `ticket:${t.id}`);
     return 'waiting';
   }
-  await sourceFor(repo).comment(ref, t.number, `Workshop pushed this to \`${repo.default_branch}\` as [\`${pushed.sha.slice(0, 7)}\`](${pushed.url}).`);
+  const commit = { sha: pushed.sha, url: pushed.url };
+  // Recorded first, so a retry after a failure from here on doesn't push again.
+  if (follow) run('UPDATE tickets SET follow_ups = ? WHERE id = ?', JSON.stringify({ ...follow, commit }), t.id);
+  return finishPush(t, commit, follow);
+}
+
+/** After the push: opens the follow-up tickets, says what was pushed, and finishes the ticket. */
+async function finishPush(t: TicketRow, commit: { sha: string; url: string }, follow: FollowUps | null): Promise<'merged'> {
+  const repo = getRepo(t.repo_id)!;
+  const lines = follow ? await raiseFollowUps(t, follow, commit) : [];
+  const pushed = `Workshop pushed this to \`${repo.default_branch}\` as [\`${commit.sha.slice(0, 7)}\`](${commit.url}).`;
+  const list = lines.length ? `\n\nFollow-up tickets for the code review's remaining findings:\n${lines.join('\n')}` : '';
+  await sourceFor(repo).comment(repoRef(repo), t.number, pushed + list);
   await finishMerged(t);
   return 'merged';
 }

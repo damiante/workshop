@@ -1,4 +1,4 @@
-import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, TicketRefView, TicketView, Topic } from './api-types.ts';
+import type { DependencyGraph, DependencyNode, Push, RepoSelection, RepoView, ReworkOn, TicketRefView, TicketView, Topic } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import { bus, publish } from './events.ts';
 import { getConnection, ticketsOf, vcsOf } from './providers/index.ts';
@@ -6,7 +6,7 @@ import type { RepoRef, TicketLink } from './providers/types.ts';
 import { mediaCount } from './media.ts';
 import { getSettings } from './settings.ts';
 import { dependencyBlock, implicitPriority, inScope, waitingCounts } from './scheduler/gates.ts';
-import type { Handoff, Rescue, Rework } from './workflow/schemas.ts';
+import type { FollowUps, Handoff, Rescue, Rework } from './workflow/schemas.ts';
 import { branchFor, describeStep, label, nextStep, parseLabels } from './workflow/labels.ts';
 
 export interface RepoRow {
@@ -25,6 +25,7 @@ export interface RepoRow {
   merge_without_review: number;
   raise_tickets: number;
   push_to_default: number;
+  rework_on: ReworkOn;
   merge_warning: string | null;
 }
 
@@ -55,6 +56,8 @@ export interface TicketRow {
   handoff: string | null;
   raised: string | null;
   rework: string | null;
+  /** JSON `FollowUps`: code review findings to open as tickets once the work is pushed to the default branch. */
+  follow_ups: string | null;
   /** JSON: the smaller tickets this one was broken into. */
   parts: string | null;
   dismissed: string | null;
@@ -104,6 +107,7 @@ export function splitDepth(t: Pick<TicketRow, 'repo_id' | 'number'>): number {
 }
 
 export const reworkOf = (t: TicketRow): Rework | null => (t.rework ? JSON.parse(t.rework) : null);
+export const followUpsOf = (t: TicketRow): FollowUps | null => (t.follow_ups ? JSON.parse(t.follow_ups) : null);
 
 export const repoRef = (r: RepoRow): RepoRef => ({ fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url });
 
@@ -281,6 +285,7 @@ export function repoView(r: RepoRow): RepoView {
     mergeWarning: r.merge_without_review ? r.merge_warning : null,
     raiseTickets: Boolean(r.raise_tickets),
     pushToDefault: Boolean(r.push_to_default),
+    reworkOn: r.rework_on,
   };
 }
 

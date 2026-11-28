@@ -98,7 +98,12 @@ export interface RepoView {
   raiseTickets: boolean;
   /** Push reviewed work straight to the default branch as one commit, with no pull request and no review by you. */
   pushToDefault: boolean;
+  /** The lowest code review severity that sends a ticket back to design or implementation. */
+  reworkOn: ReworkOn;
 }
+
+/** The lowest code review severity that sends a ticket back for rework. */
+export type ReworkOn = 'severe' | 'moderate' | 'minor';
 
 export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'code-review' | 'merge';
 export type Billing = 'subscription' | 'api';

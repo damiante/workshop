@@ -49,7 +49,7 @@ export function agentViews(): AgentClassView[] {
       prompt: promptFor(row),
       defaultPrompt: DEFAULT_PROMPTS[name],
       customised: row.prompt !== null,
-      protocol: protocolText({ branch: 'workshop/<number>-<title>', base: '<default branch>', publishes: publishes(name) }),
+      protocol: protocolText({ branch: 'workshop/<number>-<title>', base: '<default branch>', publishes: publishes(name), review: name === 'code-review' ? 'severe' : undefined }),
       maxTurns: row.max_turns,
       timeoutMin: row.timeout_min,
     };

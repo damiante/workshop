@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
-import type { ConnectionKind, ConnectionView, FieldDef, Installation, ProviderInfo, RepoView, TestResult } from '../../../server/src/api-types.ts';
+import type { ConnectionKind, ConnectionView, FieldDef, Installation, ProviderInfo, RepoView, ReworkOn, TestResult } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
 import { ErrorNote, Modal, Panel, Status } from '../components/ui.tsx';
 import { repoChanges, type RepoDraft } from '../repo-settings.ts';
@@ -306,7 +306,7 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
     setEnabling(enabled);
     onChange(repo.id, { enabled }).finally(() => setEnabling(null));
   };
-  const saved = (): RepoDraft => ({ selection: repo.selection, priority: String(repo.priority), image: repo.image ?? '', mergeWithoutReview: repo.mergeWithoutReview, raiseTickets: repo.raiseTickets, pushToDefault: repo.pushToDefault });
+  const saved = (): RepoDraft => ({ selection: repo.selection, priority: String(repo.priority), image: repo.image ?? '', mergeWithoutReview: repo.mergeWithoutReview, raiseTickets: repo.raiseTickets, pushToDefault: repo.pushToDefault, reworkOn: repo.reworkOn });
   const [draft, setDraft] = useState(saved);
   const [saving, setSaving] = useState(false);
   const changes = repoChanges(repo, draft);
@@ -350,6 +350,16 @@ function RepoRow({ repo, onChange }: { repo: RepoView; onChange: (id: number, bo
               <select style={{ width: 'auto' }} value={draft.selection} onChange={(e) => setDraft({ ...draft, selection: e.target.value })}>
                 <option value="all">All open tickets</option>
                 <option value="nominated">Only nominated tickets</option>
+              </select>
+            </label>
+            <label className="row small" title="The lowest code review severity that sends a ticket back to design or implementation. Workshop sends it back at most 3 times per review round.">
+              <span className="muted" style={{ whiteSpace: 'nowrap' }}>
+                Send back for rework on
+              </span>
+              <select style={{ width: 'auto' }} value={draft.reworkOn} onChange={(e) => setDraft({ ...draft, reworkOn: e.target.value as ReworkOn })}>
+                <option value="severe">Severe findings only</option>
+                <option value="moderate">Moderate and severe findings</option>
+                <option value="minor">All findings</option>
               </select>
             </label>
             <label className="row small">

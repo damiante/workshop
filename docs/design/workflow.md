@@ -63,9 +63,9 @@ When several tickets in a repository are ready, tickets other open tickets wait 
 | Design adversary | done | `stage:implement` | Push the revised doc; comment a summary |
 | Design or Implementation | blocked | no label change | Push partial work; link the `blocked_by` numbers and open or link the `raise_blockers` prerequisites as blocked-by; comment them. The stage runs again once they close |
 | Implementation | done | `stage:code-review` | Push; store the summary for the pull request (`tickets.handoff`); comment |
-| Code reviewer | done, nothing severe | `stage:pr-review` | Open the pull request with the Implementation summary and a Code review section, or comment on the existing one after a review round. Request your review |
-| Code reviewer | done, severe findings, no rework yet this round | `stage:design` (M/L/XL, design at fault) or `stage:implement` | Store the severe findings (`tickets.rework`); comment them. Nothing is pushed |
-| Code reviewer | done, severe findings after the rework | `stage:pr-review` (plus `needs-info` with Merge without review) | Open or update the pull request with the findings flagged at the top |
+| Code reviewer | done, nothing at or above the rework threshold | `stage:pr-review` | Open the pull request with the Implementation summary and a Code review section, or comment on the existing one after a review round. Request your review |
+| Code reviewer | done, findings at or above the threshold, reworks left this round | `stage:design` (M/L/XL, design at fault) or `stage:implement` | Store those findings (`tickets.rework`); comment them. Nothing is pushed |
+| Code reviewer | done, qualifying findings after `MAX_REWORKS` or an unfixed repeat | `stage:pr-review` (plus `needs-info` with Merge without review) | Open or update the pull request with the findings flagged at the top |
 | Merge | done | none | Push the conflict resolution, then merge through the API |
 | Merge (reconcile) | done | the interrupted stage's labels | Push, delete the rescue branch, then finish the interrupted stage (for example store the Implementation summary and move to code review) |
 | Any agent | needs_info | `needs-info` added, stage unchanged | Push any partial work (not the Code reviewer's); comment the numbered questions with an @mention |
@@ -79,14 +79,17 @@ Every ticket gets a code review after Implementation, before the pull request op
 
 Each finding has a severity and a cause:
 
-- **severe**: verified and glaring. The change doesn't do what the ticket or your review asks, breaks existing behaviour, loses data, opens a security hole, crashes on an ordinary path, fails the repository's own checks, or follows a design that can't work. "When in doubt, it isn't severe."
-- **moderate**: an edge-path bug, a missing test, a clear deviation from the conventions or design.
-- **minor**: style, naming, comments and docs.
+- **severe**: verified and glaring. The change doesn't do what the ticket or your review asks, breaks existing behaviour, loses data, opens a security hole, crashes on an ordinary path, fails the repository's own checks, or follows a design that can't work.
+- **moderate**: only a problem the reviewer verified that has a concrete consequence: a specific input or situation and what goes wrong (wrong output, a crash on an unusual path, data shown to the wrong person, changed behaviour with no test covering it).
+- **minor**: everything else: style, naming, refactors, "could be cleaner", speculative risks, missing tests for code that didn't change, convention deviations with no behavioural effect. "When in doubt, choose the lower severity."
+- **consequence**: the input or situation and what goes wrong. Workshop treats a severe or moderate finding with an empty `consequence` as minor (`effectiveFindings`), so a vague finding can't send a ticket back or raise one.
 - **cause**: `design` when the fix changes the design's approach, otherwise `implementation`.
 
-Workshop routes on these fields, not on the reviewer's opinion (`stageForRework` in `transitions.ts`). A severe finding sends the ticket back to design when the cause is the design and the ticket has one (M, L, XL), otherwise to implementation. The severe findings are stored in `tickets.rework` and given to the Design, Design adversary, Implementation and the next Code reviewer runs. After a rework, the Code reviewer marks each severe finding it was sent back for that still holds with `repeat`. A new severe problem sends the ticket back again; a repeated one means the rework failed, so the findings go into the pull request, flagged at the top. `MAX_REWORKS` (3) caps the send-backs in one review round (the first pull request, or each round of requested changes) in case every review finds something new. In a repository with **Merge without review** on, the ticket also gets `workshop/needs-info` so it can't merge unattended; remove the label to let it merge, or request changes.
+The rubric is in the default prompt, in the result schema and in the Code reviewer's fixed protocol text, so a customised prompt can't loosen it.
 
-Moderate and minor findings are listed in the pull request's Code review section for you to decide on. At most 30 findings are shown, with long text cut.
+Workshop routes on these fields, not on the reviewer's opinion (`stageForRework` in `transitions.ts`). Each repository sets the lowest severity that sends a ticket back (**Send back for rework on**, `repos.rework_on`: `severe` by default, `moderate` or `minor`); below, "severe" means "at or above that threshold" (`qualifies`). A severe finding sends the ticket back to design when the cause is the design and the ticket has one (M, L, XL), otherwise to implementation. The severe findings are stored in `tickets.rework` and given to the Design, Design adversary, Implementation and the next Code reviewer runs. After a rework, the Code reviewer marks each severe finding it was sent back for that still holds with `repeat`. A new severe problem sends the ticket back again; a repeated one means the rework failed, so the findings go into the pull request, flagged at the top. `MAX_REWORKS` (3) caps the send-backs in one review round (the first pull request, or each round of requested changes) in case every review finds something new. In a repository with **Merge without review** on, the ticket also gets `workshop/needs-info` so it can't merge unattended; remove the label to let it merge, or request changes.
+
+Findings below the threshold are listed in the pull request's Code review section for you to decide on. At most 30 findings are shown, with long text cut.
 
 A Code reviewer that keeps failing leaves the ticket at `stage:code-review` with `workshop/failed` and no pull request. Moving the ticket to `stage:pr-review` by hand doesn't open one: fix the Code reviewer's settings on the Agents page, then remove `workshop/failed` to retry.
 
@@ -146,7 +149,7 @@ A repository with **Push to the default branch, no pull request** on has no pull
 | holds everything on the default branch | Create one commit with the branch's files on top of the default branch, move the default branch to it (never forced), comment the commit, close the issue, delete the branch |
 | the move is refused (a branch rule, or the default branch moved meanwhile) | Raise a `merge-failed` alert and try again on the next check |
 
-The commit's message is `pushMessage()`: the first line of the branch's first commit plus `(#n)`, then the later commits as a list. Severe findings that remain after a rework add `workshop/needs-info` instead of pushing; removing it pushes. A ticket that already has a pull request (the setting was turned on later) finishes through the pull request.
+The commit's message is `pushMessage()`: the first line of the branch's first commit plus `(#n)`, then the later commits as a list. Only severe findings that remain after a rework add `workshop/needs-info` instead of pushing; removing it pushes. Other findings at or above the threshold that remain (after `MAX_REWORKS` or an unfixed repeat) don't hold the push: with **Agents open tickets for what they notice** on, and on a ticket that wasn't itself raised, each becomes a follow-up ticket (`workshop/raised`) naming the ticket, the finding and the pushed commit. The review stores them in `tickets.follow_ups`; `pushToDefault` records the commit there straight after the push, then opens them (skipping any whose title an open ticket or this ticket's raised list has, or that `bestMatch` finds among open raised tickets) and lists them in the pushed comment. A retry after a failure there doesn't push again. Findings below the threshold stay in the comment only. A ticket that already has a pull request (the setting was turned on later) finishes through the pull request.
 
 ## Nominated tickets only
 
@@ -205,7 +208,7 @@ Every run is `claude -p` in `/work/repo` on the ticket's branch, with:
 - **Result:** a JSON schema per agent.
   - Classifier: `{decision: accept|reject|needs_info|blocked, size?, reason, questions?, blocked_by?, raise_blockers?: [{title, body}]}`.
   - Others: `{outcome: done|needs_info|failed, summary, questions?, tests?}`. Design and Implementation may also return `outcome: blocked` with `blocked_by` or `raise_blockers` when the repository lets agents open tickets.
-  - Code reviewer: the same, plus `findings: [{severity: severe|moderate|minor, cause: design|implementation, title, detail, evidence, fix, file?, line?}]` (required when done).
+  - Code reviewer: the same, plus `findings: [{severity: severe|moderate|minor, cause: design|implementation, title, detail, evidence, fix, consequence, file?, line?, repeat?}]` (required when done).
 - **Limits:** max turns and a time limit per agent; for API billing, `--max-budget-usd`.
 
 Flags: `--output-format stream-json --verbose --dangerously-skip-permissions --permission-prompts none --session-id <run id>`. Anything that would still prompt is denied rather than waited on.

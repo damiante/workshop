@@ -289,6 +289,10 @@ export const MIGRATIONS = [
   `,
   `ALTER TABLE tickets ADD COLUMN parts TEXT; -- JSON: the smaller tickets this one was broken into`,
   `ALTER TABLE runs ADD COLUMN slot TEXT; -- small, standard or large: the host pool the run holds (it may borrow a larger one); null on older rows means its size's own pool`,
+  `
+  ALTER TABLE repos ADD COLUMN rework_on TEXT NOT NULL DEFAULT 'severe'; -- severe, moderate or minor: the lowest code review severity that sends a ticket back
+  ALTER TABLE tickets ADD COLUMN follow_ups TEXT; -- JSON: code review findings to open as tickets once the work is pushed to the default branch
+  `,
 ];
 
 export let db: DatabaseSync;

@@ -488,6 +488,26 @@ describe('repository settings', () => {
   });
 });
 
+describe('send back for rework on', () => {
+  it('defaults to severe, saves a lower threshold and rejects anything else with a readable error', async () => {
+    const id = Number(run("INSERT INTO repos (vcs_connection_id, full_name, default_branch, url, enabled) VALUES (1, 'me/rework', 'main', 'u', 1)").lastInsertRowid);
+    const put = (body: object) => request(app).put(`/api/repos/${id}`).set('cookie', cookie).send(body);
+    const repos = await request(app).get('/api/repos').set('cookie', cookie);
+    expect(repos.body.find((r: { id: number }) => r.id === id)).toMatchObject({ reworkOn: 'severe' });
+
+    const ok = await put({ reworkOn: 'moderate' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.reworkOn).toBe('moderate');
+
+    for (const bad of ['sometimes', 3, null]) {
+      const res = await put({ reworkOn: bad, priority: 4 });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Choose severe, moderate or minor for "Send back for rework on".');
+    }
+    expect(one('SELECT rework_on, priority FROM repos WHERE id = ?', id)).toEqual({ rework_on: 'moderate', priority: 0 });
+  });
+});
+
 describe('Set up agent image', () => {
   it('opens a ticket for an agent, nominated when the repository needs that, and only one at a time', async () => {
     const conn = Number(run("INSERT INTO connections (kind, provider, name, config, secret, status, created_at, updated_at) VALUES ('tickets', 'github', 'Issues img', '{}', '', 'ok', 0, 0)").lastInsertRowid);
