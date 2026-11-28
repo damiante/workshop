@@ -19,15 +19,13 @@ import { AGENT_INFO } from '../workflow/prompts.ts';
 import { allowanceBlock, apiCapBlock, formatTime, pickSubscription, clockTopics, dependencyBlock, freeSlot, inScope, localTime, modeBlock, place, poolFor, priorityAhead, pushEnded, startOfDay, stepPriority, withinHours, type ClockState, type HostLoad } from './gates.ts';
 import { advanceMerge } from './merge.ts';
 import { abortRun, cancelPause, drive, isDriving, launch, onRunSettled, resume, switchConnection } from './runner.ts';
-import { syncRepo } from './sync.ts';
+import { checkingBlockers, syncRepo } from './sync.ts';
 
 const TICK_MS = 60_000;
 /** How long Refresh waits for its allowance checks: a check gives up after 120 s of output, plus time to start it. */
 const REFRESH_PROBE_WAIT_MS = 150_000;
 const HOST_FAILURES_BEFORE_ALERT = 3;
 
-let ticking = false;
-let again = false;
 let lastCleanup = 0;
 let clock: ClockState | null = null;
 const lastSync = new Map<number, number>();
@@ -43,27 +41,60 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * Runs `pass` one call at a time. A call made while it runs queues exactly one more run (however many
+ * calls arrive), and every caller's promise resolves once the queue is drained.
+ */
+function serial(pass: () => Promise<void> | void): () => Promise<void> {
+  let running: Promise<void> | null = null;
+  let again = false;
+  return () => {
+    if (running) {
+      again = true;
+      return running;
+    }
+    running = (async () => {
+      try {
+        do {
+          again = false;
+          try {
+            await pass();
+          } catch (err) {
+            console.error('[scheduler]', err);
+          }
+        } while (again);
+      } finally {
+        running = null;
+      }
+    })();
+    return running;
+  };
+}
+
 export function startScheduler() {
   onRunSettled(kick);
   setInterval(() => void tick(), TICK_MS);
-  kick();
+  void tick();
 }
 
-/** Runs a tick soon, e.g. after a run ends or a setting changes. */
+/** Runs an allocation pass soon, e.g. after a run ends or a setting changes. It never waits for a GitHub sync. */
 export function kick() {
-  setTimeout(() => void tick(), 500);
+  setTimeout(() => void allocatePass(), 500);
 }
 
+/** Fills free slots now, then syncs every repository (or right after the sync that's running) and allocates again. */
 export function syncSoon() {
   lastSync.clear();
-  kick();
+  void allocatePass();
+  return syncPass();
 }
 
 /**
  * Runs the checks the timer runs, now: syncs every repository, re-reads the usage of subscriptions
- * that are over their limits or unchecked (even one whose last check just failed), then ticks. A usage limit Claude
- * reported keeps its reset time. Waits (up to REFRESH_PROBE_WAIT_MS) for those allowance checks, then runs
- * another allocation pass with the new readings, and resolves after it.
+ * that are over their limits or unchecked (even one whose last check just failed), and allocates. A usage limit
+ * Claude reported keeps its reset time. The sync runs in the background and allocates again when it ends. Waits
+ * (up to REFRESH_PROBE_WAIT_MS) for the allowance checks, then runs another allocation pass with the new readings,
+ * and resolves after it.
  */
 export async function refreshNow() {
   lastSync.clear();
@@ -73,10 +104,12 @@ export async function refreshNow() {
   const checks = allowanceViews()
     .filter((a) => !a.blockedUntil && allowanceBlock(a, s, now))
     .map((a) => probeAllowance(a.connectionId, true).catch(() => {}));
-  kick(); // sync and fill slots with what's already startable while the checks run
+  // Sync, and fill slots with what's already startable while the checks run.
+  void syncPass();
+  void allocatePass();
   if (!checks.length) return;
   await withTimeout(Promise.all(checks), REFRESH_PROBE_WAIT_MS).catch(() => {});
-  await tick(); // allocate again with the new readings (a running tick re-runs instead)
+  await allocatePass(); // allocate again with the new readings (a running pass re-runs instead)
 }
 
 /** Starts the best ready candidate again and again, until no ready one fits a free slot. Returns the last queue built. */
@@ -92,45 +125,48 @@ export function allocate(s: Settings, now: number): Candidate[] {
   }
 }
 
+/** Local work only, no GitHub calls: re-attach, hand pushes, paused runs, filling free slots, clock topics. */
+async function allocateOnce() {
+  reattachRuns();
+  settleManual();
+  const s = getSettings();
+  const now = Date.now();
+  resumePaused(s, now);
+  const queue = allocate(s, now);
+  probeStale(queue);
+  const nextClock: ClockState = {
+    withinHours: withinHours(s, new Date(now)),
+    blocks: JSON.stringify(allowanceViews().map((a) => [a.connectionId, a.blockedUntil])),
+    queue: JSON.stringify(queue.map((c) => [c.ticket.id, c.blockedBy])),
+  };
+  for (const topic of clockTopics(clock, nextClock)) publish(topic);
+  clock = nextClock;
+}
+
+/** Fills free slots from the local queue. Passes never overlap; calls during one share its single re-run. */
+export const allocatePass = serial(allocateOnce);
+
+/** Syncs the repositories that are due, merges approved pull requests, then allocates with what changed. */
+async function syncOnce() {
+  await syncRepos();
+  await mergeApproved(getSettings().mode === 'paused');
+  await allocatePass();
+}
+
+const syncPass = serial(syncOnce);
+
 export async function tick() {
-  if (ticking) {
-    again = true;
-    return;
-  }
-  ticking = true;
   try {
     await checkHosts();
-    reattachRuns();
-    // What's already known to be ready starts first, so a slow or rate-limited GitHub sync can't leave hosts idle.
-    const early = allocate(getSettings(), Date.now());
-    probeStale(early); // before the sync too, so a long one doesn't leave readings stale and launches waiting
-    await syncRepos();
-    settleManual();
-    const s = getSettings();
+    await allocatePass();
+    void syncPass(); // GitHub runs on its own: a long sync never holds allocation back
     const now = Date.now();
-    await mergeApproved(s.mode === 'paused');
-    resumePaused(s, now);
-    const queue = allocate(s, now);
-    probeStale(queue);
     if (now - lastCleanup > 24 * 3600_000) {
       lastCleanup = now;
-      await cleanup(s);
+      await cleanup(getSettings());
     }
-    const nextClock: ClockState = {
-      withinHours: withinHours(s, new Date(now)),
-      blocks: JSON.stringify(allowanceViews().map((a) => [a.connectionId, a.blockedUntil])),
-      queue: JSON.stringify(queue.map((c) => [c.ticket.id, c.blockedBy])),
-    };
-    for (const topic of clockTopics(clock, nextClock)) publish(topic);
-    clock = nextClock;
   } catch (err) {
     console.error('[scheduler]', err);
-  } finally {
-    ticking = false;
-    if (again) {
-      again = false;
-      kick();
-    }
   }
 }
 
@@ -448,7 +484,7 @@ export function buildQueue(s: Settings = getSettings(), now = Date.now(), opts: 
     const cls = getAgent(agent);
     const conn = getConnection(cls.model_connection_id);
     const name = AGENT_INFO[agent].label;
-    let blockedBy = dependencyBlock(blockersOf(t)) ?? githubBlock.get(repo.id) ?? (t.push ? null : modeReason);
+    let blockedBy = dependencyBlock(blockersOf(t)) ?? (checkingBlockers.has(t.id) ? 'Checking what it depends on' : null) ?? githubBlock.get(repo.id) ?? (t.push ? null : modeReason);
     if (!blockedBy && (!cls.model || !conn)) blockedBy = `Choose a model for ${name} on the Agents page`;
     if (!blockedBy && !modelsOf(conn!).billing().includes(cls.billing)) {
       blockedBy = `${conn!.name} has no ${cls.billing === 'api' ? 'API key' : 'subscription token'} for ${name}`;

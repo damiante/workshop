@@ -1,8 +1,31 @@
 import type { AgentName, Size } from '../api-types.ts';
 import { CAPABILITIES, SIZES, type Capability } from './labels.ts';
 
+/** One of the smaller tickets a large ticket is broken into. */
+export interface Part {
+  title: string;
+  body: string;
+  /** Positions (from 1) of the parts in the same list that must be finished before this one starts. */
+  after?: number[];
+}
+
+export const MIN_PARTS = 2;
+export const MAX_PARTS = 8;
+/** A part of a part isn't broken down again. */
+export const MAX_SPLIT_DEPTH = 2;
+const LARGE: Size[] = ['l', 'xl'];
+export const isLarge = (size: Size | null | undefined) => LARGE.includes(size as Size);
+
+/** What the Classifier may decide about breaking this ticket down. */
+export interface SplitRule {
+  /** False when the ticket can't be broken down: it is itself a part of a part, or only requested changes are being sized. */
+  allowed: boolean;
+  /** An agent ran out of turns or time on the whole ticket, so accepting it as one ticket isn't an option. */
+  required: boolean;
+}
+
 export interface ClassifierResult {
-  decision: 'accept' | 'reject' | 'needs_info' | 'blocked';
+  decision: 'accept' | 'reject' | 'needs_info' | 'blocked' | 'split';
   size?: Size;
   reason: string;
   questions?: string[];
@@ -12,6 +35,10 @@ export interface ClassifierResult {
   capabilities?: Capability[];
   /** The ticket changes what a user sees, or is a bug best examined by running the app. */
   ui?: boolean;
+  /** The smaller tickets to open instead (split only). */
+  parts?: Part[];
+  /** Why an L or XL ticket has to land as a single change (accept only). */
+  one_change?: string;
 }
 
 /** Work an agent came across that is outside its ticket. Workshop opens a ticket for it. */
@@ -95,13 +122,28 @@ const questions = { type: 'array', items: { type: 'string' }, description: 'Spec
 const CLASSIFIER_SCHEMA = {
   type: 'object',
   properties: {
-    decision: { type: 'string', enum: ['accept', 'reject', 'needs_info', 'blocked'] },
+    decision: { type: 'string', enum: ['accept', 'reject', 'needs_info', 'blocked', 'split'] },
     size: { type: 'string', enum: SIZES, description: 'Required when decision is accept.' },
     reason: { type: 'string', description: 'One or two sentences explaining the decision and size.' },
     questions,
     capabilities: { type: 'array', items: { type: 'string', enum: CAPABILITIES }, description: "What the Implementation agent's container needs to test the change (accept only): browser for a web UI change that needs a screenshot or a browser test. Empty when nothing extra is needed." },
     ui: { type: 'boolean', description: 'Accept only: true when the ticket changes what a user sees, or is a bug best looked into by running the app (layout, rendering).' },
     blocked_by: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'Numbers of the open tickets listed in the task that must be finished first (blocked only).' },
+    parts: {
+      type: 'array',
+      description: `Split only: the ${MIN_PARTS} to ${MAX_PARTS} smaller tickets to open instead of this one, in the order they should be worked on. Together they cover the whole ticket; each can be implemented, tested and merged on its own, leaving the code working.`,
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'A ticket title that says what this part delivers.' },
+          body: { type: 'string', description: 'A complete ticket description in Markdown: what to build, where, and how to tell it is done. Whoever works on it reads only this, so include what they need from the original ticket.' },
+          after: { type: 'array', items: { type: 'integer', minimum: 1 }, description: 'Positions (from 1) of earlier parts in this list that must be finished before this one starts. Leave out when it can start straight away.' },
+        },
+        required: ['title', 'body'],
+        additionalProperties: false,
+      },
+    },
+    one_change: { type: 'string', description: 'Accept with size l or xl only: why this ticket has to land as a single change and cannot be split into parts that each leave the code working.' },
   },
   required: ['decision', 'reason'],
   additionalProperties: false,
@@ -230,15 +272,32 @@ function isFinding(v: unknown): v is Finding {
 }
 
 /** Validates the agent's structured output. Returns the result, or an error message. */
-export function parseResult(agent: AgentName, value: unknown): AgentResult | string {
+export function parseResult(agent: AgentName, value: unknown, split: SplitRule = { allowed: false, required: false }): AgentResult | string {
   if (!value || typeof value !== 'object') return 'The agent returned no structured result.';
   const v = value as Record<string, unknown>;
   if (v.questions !== undefined && !isStringList(v.questions)) return 'questions must be a list of strings.';
   const needsQuestions = v.decision === 'needs_info' || v.outcome === 'needs_info';
   if (needsQuestions && !(v.questions as string[] | undefined)?.length) return 'needs_info requires at least one question.';
   if (agent === 'classifier') {
-    if (!['accept', 'reject', 'needs_info', 'blocked'].includes(v.decision as string)) return 'decision must be accept, reject, needs_info or blocked.';
     if (v.raise_blockers !== undefined && !isTextList(v.raise_blockers)) return 'raise_blockers must be a list of { title, body }.';
+    if (!['accept', 'reject', 'needs_info', 'blocked', 'split'].includes(v.decision as string)) return 'decision must be accept, reject, needs_info, blocked or split.';
+    if (v.decision === 'split') {
+      if (!split.allowed) return "This ticket can't be split. Accept it with a size, or use another decision.";
+      const parts = v.parts;
+      if (!Array.isArray(parts) || parts.length < MIN_PARTS || parts.length > MAX_PARTS) return `split requires parts: ${MIN_PARTS} to ${MAX_PARTS} smaller tickets.`;
+      for (const [i, p] of parts.entries()) {
+        if (!p || typeof p !== 'object' || typeof p.title !== 'string' || !p.title.trim() || typeof p.body !== 'string' || !p.body.trim()) return 'Each part needs a title and a body.';
+        if (p.after !== undefined && !(Array.isArray(p.after) && p.after.every((n: unknown) => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= i))) {
+          return 'after must list the positions (from 1) of earlier parts.';
+        }
+      }
+    }
+    if (v.decision === 'accept' && split.allowed) {
+      if (split.required) return 'An agent ran out of turns or time on this ticket as a whole, so it must be broken down: return split with its parts (or needs_info if you cannot tell how).';
+      if (isLarge(v.size as Size) && !(typeof v.one_change === 'string' && v.one_change.trim())) {
+        return 'An L or XL ticket must be broken down: return split with its parts. Accept it as one ticket only if it has to land as a single change, and say why in one_change.';
+      }
+    }
     if (v.decision === 'blocked') {
       const b = v.blocked_by;
       if (b !== undefined && !(Array.isArray(b) && b.every((n) => Number.isInteger(n) && n > 0))) return 'blocked_by must be a list of ticket numbers.';

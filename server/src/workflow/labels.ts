@@ -18,6 +18,10 @@ export const label = {
   running: 'workshop/running',
   nominated: 'workshop/nominated',
   raised: 'workshop/raised',
+  /** The ticket was broken into smaller tickets, which Workshop works on instead. */
+  split: 'workshop/split',
+  /** An agent ran out of turns or time on the whole ticket: the Classifier breaks it down next. */
+  tooBig: 'workshop/too-big',
 };
 
 const STAGE_TEXT: Record<Stage, string> = {
@@ -41,6 +45,8 @@ export const LABEL_DEFS: LabelDef[] = [
   { name: label.running, color: '7f8c5c', description: 'Workshop: an agent is working on this' },
   { name: label.nominated, color: '7a6a53', description: 'Workshop: work on this ticket when its repository only takes nominated tickets' },
   { name: label.raised, color: '6b7a8f', description: 'Workshop: an agent opened this for something it noticed while working on another ticket' },
+  { name: label.split, color: '9e9e9e', description: 'Workshop: broken into smaller tickets, worked on instead of this one' },
+  { name: label.tooBig, color: 'b38b42', description: 'Workshop: too big to finish in one go. The Classifier breaks it down next' },
 ];
 
 export interface TicketState {

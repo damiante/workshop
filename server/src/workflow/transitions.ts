@@ -1,7 +1,7 @@
 import type { AgentName, Size } from '../api-types.ts';
 import { joinRefs } from '../scheduler/gates.ts';
 import { addNeeds, applyEdits, label, labelDiff, moveTo, parseLabels, setSize, stageAfterClassify, stageAfterDesign, STAGE_OF_AGENT, type TicketState } from './labels.ts';
-import type { AgentResult, ClassifierResult, Finding, Noticed, Rescue, ReviewResult, Rework, WorkResult } from './schemas.ts';
+import type { AgentResult, ClassifierResult, Finding, Noticed, Part, Rescue, ReviewResult, Rework, WorkResult } from './schemas.ts';
 
 /** Everything Workshop should do after a successful agent run. Pure, so every transition is unit-tested. */
 export interface Plan {
@@ -14,6 +14,8 @@ export interface Plan {
   raiseBlockers?: Noticed[];
   /** The agent that asked for `raiseBlockers`: in a reconcile, the one whose rescued work this is, not the Merge agent. */
   raisedBy?: AgentName;
+  /** Open these smaller tickets in this one's place. Workshop lists them under `comment`. */
+  split?: Part[];
   createBranch?: boolean;
   /** Push the agent's commits. */
   publish?: boolean;
@@ -252,6 +254,14 @@ function planWait(agent: AgentName, numbers: number[], raise: Noticed[], reason:
 function planClassifier(ctx: PlanContext, r: ClassifierResult): Plan {
   if (r.decision === 'needs_info') return { add: [label.needsInfo], remove: [], comment: questionsComment(ctx, r.questions) };
   if (r.decision === 'blocked') return planWait(ctx.agent, r.blocked_by ?? [], r.raise_blockers ?? [], r.reason);
+  if (r.decision === 'split') {
+    return {
+      add: [label.skip, label.split],
+      remove: [...moveTo(ctx.labels, null).remove, ...ctx.labels.filter((l) => l === label.tooBig)],
+      split: r.parts,
+      comment: `Workshop broke this ticket into smaller ones: ${r.reason}`,
+    };
+  }
   if (r.decision === 'reject') {
     return {
       add: [label.skip],
@@ -264,11 +274,11 @@ function planClassifier(ctx: PlanContext, r: ClassifierResult): Plan {
   const next = stageAfterClassify(size);
   const what = ctx.mode === 'delta' ? 'the requested changes' : 'this ticket';
   return {
-    ...combine(setSize(ctx.labels, size), moveTo(ctx.labels, next), addNeeds(ctx.labels, r.capabilities ?? [])),
+    ...combine(setSize(ctx.labels, size), moveTo(ctx.labels, next), addNeeds(ctx.labels, r.capabilities ?? []), { add: [], remove: ctx.labels.filter((l) => l === label.tooBig) }),
     createBranch: ctx.mode === 'normal',
     // A new classification starts a new review round.
     rework: null,
     ...(r.ui !== undefined ? { ui: r.ui === true } : {}),
-    comment: `Workshop sized ${what} **${size.toUpperCase()}**: ${r.reason}\n\n${r.capabilities?.includes('browser') ? '\n\nImplementation will run with a browser (Playwright) to test it.' : ''}\n\nNext: ${NEXT_TEXT[next]}.`,
+    comment: `Workshop sized ${what} **${size.toUpperCase()}**: ${r.reason}${r.one_change?.trim() ? `\n\nKept as one ticket: ${r.one_change.trim()}` : ''}\n\n${r.capabilities?.includes('browser') ? '\n\nImplementation will run with a browser (Playwright) to test it.' : ''}\n\nNext: ${NEXT_TEXT[next]}.`,
   };
 }

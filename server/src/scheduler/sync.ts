@@ -28,12 +28,33 @@ import { cleanUpClosedIssue, finishMerged, stopAfterClosedPr } from './merge.ts'
 import { stopRun } from './runner.ts';
 import { isRateLimited, isTransient } from './gates.ts';
 
+/**
+ * Open tickets the sync has just stored that list open blockers it hasn't read yet. Allocation runs during a sync,
+ * so these wait in the queue until their blockers are read (or the sync ends).
+ */
+export const checkingBlockers = new Set<number>();
+
 /** Pulls changed tickets for one repo, then checks pull requests waiting for your review. */
 export async function syncRepo(repo: RepoRow) {
   const ref = repoRef(repo);
   // Overlap the window a little: `since` compares update times, and duplicates are harmless upserts.
   const started = new Date(Date.now() - 60_000).toISOString();
   const changed = await sourceFor(repo).listChanged(ref, repo.synced_at);
+  const checking: number[] = [];
+  try {
+    await storeChanged(repo, changed, checking);
+    const complete = await syncBlockers(repo, changed);
+    await syncReviews(repo);
+    if (complete) run('UPDATE repos SET synced_at = ? WHERE id = ?', started, repo.id);
+    if (changed.length) publish('tickets');
+  } finally {
+    // A failed or rate-limited sync leaves the stored holds as they were, as before this set existed.
+    for (const id of checking) checkingBlockers.delete(id);
+  }
+}
+
+/** Upserts the listed tickets, stopping runs on tickets that were closed or skipped, and tidies up closed ones. */
+async function storeChanged(repo: RepoRow, changed: RemoteTicket[], checking: number[]) {
   for (const t of changed) {
     if (!isAllowedAuthor(t.author)) continue;
     const existing = one<TicketRow>('SELECT * FROM tickets WHERE repo_id = ? AND number = ?', repo.id, t.number);
@@ -58,6 +79,12 @@ export async function syncRepo(repo: RepoRow) {
       t.updatedAt,
       t.createdAt ?? null,
     );
+    // In the same synchronous step as the upsert, so no allocation pass sees the ticket before it's held.
+    const row = one<TicketRow>('SELECT * FROM tickets WHERE repo_id = ? AND number = ?', repo.id, t.number)!;
+    if (t.state === 'open' && t.openBlockers && row.blocked_by === '[]') {
+      checkingBlockers.add(row.id);
+      checking.push(row.id);
+    }
     const stopReason = t.state === 'closed' ? 'The ticket was closed.' : t.labels.includes(label.skip) ? `The ticket was labelled ${label.skip}.` : null;
     const active = existing && stopReason ? activeRunId(existing.id) : null;
     if (active) await stopRun(active, stopReason!, false);
@@ -71,10 +98,6 @@ export async function syncRepo(repo: RepoRow) {
       }
     }
   }
-  const complete = await syncBlockers(repo, changed);
-  await syncReviews(repo);
-  if (complete) run('UPDATE repos SET synced_at = ? WHERE id = ?', started, repo.id);
-  if (changed.length) publish('tickets');
 }
 
 /** Held tickets re-read per repo per sync, beyond those you prioritised or pushed. */
@@ -87,7 +110,8 @@ export const LINK_BACKFILL_PER_SYNC = 20;
  * those are all read, so nothing blocked gets launched. Held tickets are re-read because closing a blocker may not
  * touch their update time, but there can be thousands, so each sync reads first every ticket you prioritised or
  * pushed, then up to HELD_CHECKS_PER_SYNC more: those with a blocker Workshop has seen close, then the least recently
- * read. The cap matters when many blockers close at once: reads are one at a time, and the scheduler waits for them.
+ * read. The cap matters when many blockers close at once: reads are one at a time. Allocation doesn't wait for them;
+ * newly blocked tickets not yet read wait in the queue as "Checking what it depends on" (see `checkingBlockers`).
  *
  * Every read also stores the ticket's full list of links (open and closed) for the Dependencies page. Two more groups
  * are read for that alone: listed tickets whose total link count differs from what's stored, then up to
@@ -155,6 +179,8 @@ async function syncBlockers(repo: RepoRow, changed: RemoteTicket[]): Promise<boo
           retryLater(targets.slice(i + 1));
           return i >= yours.length + fresh.length;
         }
+      } finally {
+        checkingBlockers.delete(t.id); // read or failed: its stored hold applies again
       }
     }
     return true;

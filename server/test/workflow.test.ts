@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addNeeds, agentSize, applyEdits, branchFor, describeStep, labelDiff, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
-import { parseResult, schemaFor, type Finding, type Rescue } from '../src/workflow/schemas.ts';
+import { parseResult, schemaFor, type ClassifierResult, type Finding, type Rescue } from '../src/workflow/schemas.ts';
 import { MAX_FINDINGS_SHOWN, MAX_REWORKS, planTransition, reviewSection, stageForRework, type PlanContext } from '../src/workflow/transitions.ts';
 import { capabilitiesOf, DEFAULT_PROMPTS, environmentText, protocolText, taskPrompt } from '../src/workflow/prompts.ts';
 import { stepPriority } from '../src/scheduler/gates.ts';
@@ -165,6 +165,71 @@ describe('parseResult', () => {
     expect(parseResult('design', { outcome: 'needs_info', summary: '' })).toMatch(/question/);
     expect(parseResult('design', null)).toMatch(/no structured result/);
     expect(parseResult('classifier', { decision: 'accept', size: 'm', reason: 'x' })).toEqual({ decision: 'accept', size: 'm', reason: 'x' });
+  });
+
+  describe('breaking a ticket down', () => {
+    const may = { allowed: true, required: false };
+    const must = { allowed: true, required: true };
+    const parts = [
+      { title: 'Add the event bus', body: 'Build it.' },
+      { title: 'Move the mixer onto it', body: 'Port it.', after: [1] },
+    ];
+    const split = { decision: 'split', reason: 'Two separable pieces.', parts };
+
+    it('makes an L or XL ticket split, unless it has to land as one change', () => {
+      for (const size of ['l', 'xl']) {
+        expect(parseResult('classifier', { decision: 'accept', size, reason: 'x' }, may)).toMatch(/must be broken down/);
+        expect(parseResult('classifier', { decision: 'accept', size, reason: 'x', one_change: '  ' }, may)).toMatch(/must be broken down/);
+        expect(parseResult('classifier', { decision: 'accept', size, reason: 'x', one_change: 'A schema change every caller breaks on.' }, may)).toMatchObject({ size });
+      }
+      expect(parseResult('classifier', { decision: 'accept', size: 'm', reason: 'x' }, may)).toMatchObject({ size: 'm' });
+      expect(parseResult('classifier', split, may)).toMatchObject({ decision: 'split', parts });
+    });
+
+    it('accepts nothing but a split once an agent ran out of turns or time', () => {
+      expect(parseResult('classifier', { decision: 'accept', size: 'm', reason: 'x' }, must)).toMatch(/must be broken down/);
+      expect(parseResult('classifier', { decision: 'accept', size: 'xl', reason: 'x', one_change: 'One change.' }, must)).toMatch(/must be broken down/);
+      expect(parseResult('classifier', split, must)).toMatchObject({ decision: 'split' });
+      expect(parseResult('classifier', { decision: 'needs_info', reason: 'x', questions: ['Which half first?'] }, must)).toMatchObject({ decision: 'needs_info' });
+    });
+
+    it('checks the parts', () => {
+      expect(parseResult('classifier', { ...split, parts: [parts[0]] }, may)).toMatch(/2 to 8/);
+      expect(parseResult('classifier', { ...split, parts: Array(9).fill(parts[0]) }, may)).toMatch(/2 to 8/);
+      expect(parseResult('classifier', { ...split, parts: [parts[0], { title: 'x', body: ' ' }] }, may)).toMatch(/title and a body/);
+      // A part can only wait for one listed before it.
+      expect(parseResult('classifier', { ...split, parts: [{ ...parts[0], after: [2] }, parts[1]] }, may)).toMatch(/earlier parts/);
+      expect(parseResult('classifier', { ...split, parts: [parts[0], { ...parts[1], after: [2] }] }, may)).toMatch(/earlier parts/);
+    });
+
+    it("refuses a split where the ticket can't be split, and then lets a large ticket through", () => {
+      expect(parseResult('classifier', split)).toMatch(/can't be split/);
+      expect(parseResult('classifier', { decision: 'accept', size: 'xl', reason: 'x' })).toMatchObject({ size: 'xl' });
+    });
+
+    it('skips the ticket and opens its parts', () => {
+      const labels = [label.size('xl'), label.tooBig, label.nominated];
+      const plan = planTransition(ctx({ labels }), split as ClassifierResult);
+      expect(plan).toMatchObject({ add: [label.skip, label.split], split: parts });
+      expect(plan.remove).toContain(label.tooBig);
+      expect(plan.createBranch).toBeUndefined();
+      expect(plan.comment).toBe('Workshop broke this ticket into smaller ones: Two separable pieces.');
+    });
+
+    it('says why a large ticket stayed whole', () => {
+      const plan = planTransition(ctx(), { decision: 'accept', size: 'l', reason: 'Cross-cutting.', one_change: 'Every caller breaks until the rename is complete.' });
+      expect(plan.comment).toContain('Kept as one ticket: Every caller breaks until the rename is complete.');
+    });
+
+    it('tells the Classifier the rule in its task, whatever its instructions say', () => {
+      const task = (split?: { allowed: boolean; required: boolean }) => taskPrompt({ mode: 'normal', repo: 'me/app', base: 'main', branch: 'workshop/3-x', docPath: 'd.md', ticket: { number: 3, title: 'X', body: 'Do X', url: 'u', labels: [], size: null }, comments: [], omittedComments: 0, review: [], ui: false, media: [], agent: 'classifier', split }).split('## Your task')[1];
+      expect(task(may)).toContain('A ticket you would size L or XL must be broken down');
+      expect(task(may)).toContain('one_change');
+      expect(task(must)).toContain('ran out of turns or time');
+      expect(task(must)).toContain('Accepting it as one ticket is not an option');
+      expect(task({ allowed: false, required: false })).toContain('Do not return "split"');
+      expect(task()).toContain('Do not return "split"');
+    });
   });
 });
 

@@ -26,9 +26,9 @@ const { bus } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, resume, stopRun } = await import('../src/scheduler/runner.ts');
-const { allocate, buildQueue, forgetProbe, hostLoads, hostViews, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, tick } = await import('../src/scheduler/loop.ts');
-const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo } = await import('../src/tickets.ts');
-const { syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
+const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, syncSoon, tick } = await import('../src/scheduler/loop.ts');
+const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf } = await import('../src/tickets.ts');
+const { checkingBlockers, syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
 const { getSettings, saveSettings } = await import('../src/settings.ts');
 const { label } = await import('../src/workflow/labels.ts');
@@ -1715,6 +1715,141 @@ describe('dependencies', () => {
   });
 });
 
+describe('breaking large tickets down', () => {
+  const parts = [
+    { title: 'Add the event bus', body: 'Build it.' },
+    { title: 'Move the mixer onto it', body: 'Port it.', after: [1] },
+    { title: 'Remove the old mixer', body: 'Delete it.', after: [1, 2] },
+  ];
+  const split = () => new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'split', reason: 'Three separable pieces.', parts })] });
+  const outOfTurns = () => new FakeEnv({ prepare: ['ok'], run: [line({ type: 'result', subtype: 'error_max_turns', is_error: true, errors: [] })] });
+  const setLabels = (...labels: string[]) => run('UPDATE tickets SET labels = ?, parts = NULL WHERE id = 1', JSON.stringify(labels));
+  const labels = () => JSON.parse(getTicket(1)!.labels) as string[];
+  let next: number;
+
+  beforeEach(() => {
+    next = 40;
+    fake.tickets.createTicket = vi.fn(async () => ({ number: ++next, url: `https://github.com/me/app/issues/${next}` }));
+    fake.tickets.setLabels = vi.fn(async () => {});
+  });
+  afterEach(() => run('UPDATE tickets SET parts = NULL WHERE id = 1'));
+
+  it('opens the parts in place of the ticket, links their order, and leaves the ticket alone', async () => {
+    setLabels(label.nominated);
+    fake.env = split();
+    expect((await settle(go('classifier'))).status).toBe('succeeded');
+    expect(fake.env.spec('run')!.files!['.workshop/prompt.md']).toContain('A ticket you would size L or XL must be broken down');
+
+    expect(fake.tickets.createTicket.mock.calls.map((c: any[]) => c[1])).toEqual([
+      { title: 'Add the event bus', body: expect.stringContaining('Build it.\n\n---\n_Part 1 of 3 of #3'), labels: [label.nominated] },
+      { title: 'Move the mixer onto it', body: expect.stringContaining('_Part 2 of 3 of #3'), labels: [label.nominated] },
+      { title: 'Remove the old mixer', body: expect.stringContaining('_Part 3 of 3 of #3'), labels: [label.nominated] },
+    ]);
+    // The second waits for the first, the third for both.
+    expect(fake.tickets.addBlocker.mock.calls.map((c: any[]) => [c[1], c[2]])).toEqual([[42, 41], [43, 41], [43, 42]]);
+    expect(labels()).toEqual(expect.arrayContaining([label.skip, label.split]));
+    expect(fake.vcs.createBranch).not.toHaveBeenCalled();
+    const comment = fake.tickets.comment.mock.calls.at(-1)![2] as string;
+    expect(comment).toContain('Workshop broke this ticket into smaller ones: Three separable pieces.');
+    expect(comment).toContain('- [ ] #41\n- [ ] #42\n- [ ] #43');
+    expect(buildQueue().find((c) => c.ticket.id === 1)).toBeUndefined();
+  });
+
+  it("doesn't nominate the parts of a ticket that wasn't, or open one twice when publishing is retried", async () => {
+    setLabels();
+    fake.env = split();
+    let calls = 0;
+    fake.tickets.createTicket = vi.fn(async () => {
+      if (++calls === 2) throw Object.assign(new Error('boom'), { status: 422 });
+      return { number: ++next, url: 'u' };
+    });
+    expect((await settle(go('classifier'))).status).toBe('failed');
+    expect(partsOf(getTicket(1)!).map((p) => p.number)).toEqual([41]);
+
+    fake.env = split();
+    run('DELETE FROM runs');
+    expect((await settle(go('classifier'))).status).toBe('succeeded');
+    expect(partsOf(getTicket(1)!).map((p) => [p.index, p.number])).toEqual([[0, 41], [1, 42], [2, 43]]);
+    expect(fake.tickets.createTicket).toHaveBeenCalledTimes(4);
+    expect(fake.tickets.createTicket.mock.calls.every((c: any[]) => c[1].labels.length === 0)).toBe(true);
+  });
+
+  it('sends a large ticket back to be broken down when its agent runs out of turns', async () => {
+    setLabels(label.size('xl'), label.stage('implement'));
+    fake.env = outOfTurns();
+    expect(await settle(go())).toMatchObject({ status: 'failed', error: 'Reached the 300-turn limit.' });
+    expect(labels()).toEqual([label.size('xl'), label.tooBig]);
+    expect(getTicket(1)!.failures).toBe(0);
+    expect(fake.tickets.comment).toHaveBeenCalledWith(expect.anything(), 3, expect.stringContaining('the Classifier will break it into smaller ones next'));
+    expect(fake.tickets.setLabels).not.toHaveBeenCalledWith(expect.anything(), 3, [label.failed], []);
+    updateAgent('classifier', { model: 'claude-sonnet-5-5', modelConnectionId: ids.model });
+    expect(buildQueue().find((c) => c.ticket.id === 1)).toMatchObject({ agent: 'classifier', mode: 'normal' });
+
+    // The Classifier is then told it has to split, and an accept is refused.
+    run('DELETE FROM runs');
+    fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'accept', size: 'l', reason: 'x', one_change: 'One change.' })] });
+    const refused = await settle(go('classifier'));
+    expect(fake.env.spec('run')!.files!['.workshop/prompt.md']).toContain('ran out of turns or time');
+    expect(refused).toMatchObject({ status: 'failed', error: expect.stringContaining('must be broken down') });
+
+    run('DELETE FROM runs');
+    fake.env = split();
+    expect((await settle(go('classifier'))).status).toBe('succeeded');
+    expect(labels()).toEqual(expect.arrayContaining([label.skip, label.split]));
+    expect(labels()).not.toContain(label.tooBig);
+  });
+
+  it('does the same on the time limit', async () => {
+    setLabels(label.size('l'), label.stage('design'));
+    const env = new FakeEnv({});
+    let release = () => {};
+    env.inspect = async () => ({ running: true, exitCode: 0, oomKilled: false });
+    env.follow = () => new Promise<void>((done) => (release = done));
+    env.kill = async () => release();
+    env.wait = async () => ({ running: false, exitCode: 137, oomKilled: false });
+    fake.env = env;
+    run(
+      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, step, container_id, volume, image, max_turns, timeout_min, step_started_at, started_at)
+       VALUES ('slow', 1, 'design', 'normal', 1, ?, ?, 'claude-sonnet-5-5', 'subscription', 'running', 'run', 'run-container-old', 'v', 'img', 300, 1, ?, ?)`,
+      ids.env,
+      ids.model,
+      Date.now() - 5 * 60_000,
+      Date.now() - 6 * 60_000,
+    );
+    await drive('slow');
+    expect(getRun('slow')).toMatchObject({ status: 'failed', error: 'Stopped after the 1-minute time limit.' });
+    expect(labels()).toEqual([label.size('l'), label.tooBig]);
+  });
+
+  it('leaves a part of a part, and a ticket with a pull request, to fail as usual', async () => {
+    // #3 is a part of #8, which is a part of #9.
+    run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at, parts) VALUES (1, 8, 'Mid', '', 'u', 'me', 'open', '[]', '2026-10-13T00:00:00Z', ?), (1, 9, 'Top', '', 'u', 'me', 'open', '[]', '2026-10-13T00:00:00Z', ?)", JSON.stringify([{ index: 0, number: 3, url: 'u', title: 'x' }]), JSON.stringify([{ index: 0, number: 8, url: 'u', title: 'x' }]));
+    try {
+      setLabels(label.size('xl'), label.stage('implement'));
+      fake.env = outOfTurns();
+      await settle(go());
+      expect(labels()).toEqual([label.size('xl'), label.stage('implement')]);
+      expect(getTicket(1)!.failures).toBe(1);
+      // The Classifier can't split it either, so a large size goes through.
+      run('DELETE FROM runs');
+      setLabels();
+      fake.env = new FakeEnv({ prepare: ['ok'], run: [result({ decision: 'accept', size: 'l', reason: 'Big.' })] });
+      expect((await settle(go('classifier'))).status).toBe('succeeded');
+      expect(fake.env.spec('run')!.files!['.workshop/prompt.md']).toContain('Do not return "split"');
+    } finally {
+      run('DELETE FROM tickets WHERE number IN (8, 9)');
+    }
+
+    run('DELETE FROM runs');
+    setLabels(label.size('xl'), label.stage('implement'));
+    run('UPDATE tickets SET pr_number = 7, failures = 0 WHERE id = 1');
+    fake.env = outOfTurns();
+    await settle(go());
+    expect(labels()).not.toContain(label.tooBig);
+    expect(getTicket(1)!.failures).toBe(1);
+  });
+});
+
 describe('launchNow', () => {
   const script = () => ({ prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'Done.', tests: 'ok' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
 
@@ -1953,6 +2088,102 @@ describe('allocation', () => {
     await refreshNow();
     expect(fake.env.started.filter((spec: StepSpec) => spec.labels?.['workshop.probe'] === String(ids.model))).toHaveLength(1);
     expect(started()).toHaveLength(2);
+  });
+
+  describe('while a GitHub sync is running', () => {
+    let release = () => {};
+    let gate = Promise.resolve();
+    let sync: Promise<unknown> = Promise.resolve();
+    const ticket20 = () => one<{ id: number }>('SELECT id FROM tickets WHERE number = 20')!.id;
+    beforeEach(() => {
+      gate = new Promise<void>((r) => (release = r));
+      sync = Promise.resolve();
+    });
+    afterEach(async () => {
+      release();
+      await sync; // the sync left running ends before the fakes change
+      onRunSettled(() => {});
+    });
+
+    it('reuses a freed slot before the sync completes', async () => {
+      configure(1);
+      let listed = 0;
+      let synced = false;
+      fake.tickets.listChanged = async () => {
+        listed++;
+        await gate;
+        return [];
+      };
+      onRunSettled(kick);
+      sync = syncSoon().then(() => (synced = true));
+      await vi.waitFor(() => expect(listed).toBe(1));
+      await tick(); // the timer's tick allocates without waiting for the sync
+      expect(started()).toHaveLength(1);
+      await settle(started()[0].id);
+      await vi.waitFor(() => expect(started()).toHaveLength(2), { timeout: 2000 });
+      expect(synced).toBe(false);
+      release();
+      await sync;
+    });
+
+    it('fills a free slot on syncSoon before the sync completes', async () => {
+      configure(1);
+      let listed = 0;
+      let synced = false;
+      fake.tickets.listChanged = async () => {
+        listed++;
+        await gate;
+        return [];
+      };
+      sync = syncSoon().then(() => (synced = true));
+      expect(started()).toHaveLength(1); // the allocation pass starts before its first await
+      await vi.waitFor(() => expect(listed).toBe(1));
+      expect(synced).toBe(false);
+      release();
+      await sync;
+      expect(started()).toHaveLength(1);
+    });
+
+    it("doesn't launch a ticket whose blockers it hasn't read yet", async () => {
+      configure(3);
+      const labels = [label.size('s'), label.stage('implement')];
+      fake.tickets.listChanged = async () => [{ number: 20, title: 'Ready', body: '', state: 'open', author: 'me', url: 'u', updatedAt: '2026-10-14T00:00:00Z', labels, openBlockers: 1 }];
+      fake.tickets.blockers = vi.fn(async (_r: unknown, n: number) => {
+        await gate;
+        return n === 20 ? [{ repo: 'me/app', number: 2, state: 'open', url: '' }] : [];
+      });
+      // Not syncSoon(): its up-front allocation would start ticket 20 before the sync sees it.
+      sync = syncRepo(getRepo(1)!);
+      await vi.waitFor(() => expect(checkingBlockers.has(ticket20())).toBe(true));
+      expect(buildQueue().find((c) => c.ticket.id === ticket20())?.blockedBy).toBe('Checking what it depends on');
+      allocate(getSettings(), Date.now());
+      expect(started().map((r) => r.ticket_id)).not.toContain(ticket20());
+      release();
+      await sync;
+      expect(checkingBlockers.size).toBe(0);
+      expect(buildQueue().find((c) => c.ticket.id === ticket20())?.blockedBy).toBe('Depends on #2');
+    });
+  });
+
+  it('never overlaps allocation passes, and runs one more for calls made during one', async () => {
+    configure(3);
+    run('DELETE FROM tickets WHERE number IN (21, 22)');
+    const a = allocatePass();
+    expect(started()).toHaveLength(2); // tickets 1 and 20, started before the first await
+    run(
+      `INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 21, 'Ready', '', 'u', 'me', 'open', ?, '2026-10-14T00:00:00Z')`,
+      JSON.stringify([label.size('s'), label.stage('implement')]),
+    );
+    const b = allocatePass();
+    const c = allocatePass();
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+    expect(started()).toHaveLength(2);
+    await a;
+    expect(started()).toHaveLength(3); // ticket 21, picked up by the single re-run
+    const d = allocatePass();
+    expect(d).not.toBe(a);
+    await d;
   });
 
   it('shares an allowance check that is already running', async () => {

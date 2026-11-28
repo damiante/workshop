@@ -23,7 +23,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
 | `src/allowance.ts` | Usage readings and limit blocks per Claude connection |
 | `src/workflow/` | Pure logic: `labels.ts` (state machine `nextStep`), `transitions.ts` (`planTransition`, and the code review's routing `stageForRework` and formatters), `prompts.ts` (defaults, protocol, task prompt), `schemas.ts` (result schemas and validation) |
 | `src/scheduler/gates.ts` | Pure launch gates: hours and time zone, allowance, API cap, host choice, priority |
-| `src/scheduler/loop.ts` | The 60-second tick: host checks, re-attach, sync, API merges, resume paused runs, the queue, fill every free slot, usage probe, cleanup |
+| `src/scheduler/loop.ts` | Two serialised passes: allocation (re-attach, settle hand pushes, resume paused runs, the queue, fill every free slot, usage probe, clock topics) runs on every `kick()`; sync (GitHub sync, API merges, then allocation) runs on the 60-second tick, which also checks hosts and cleans up |
 | `src/media.ts` | The per-ticket media store (`DATA_DIR/media/<ticket id>/` plus the `media` table): downloads issue images, copies agent screenshots back, delivers the folder to runs, deletes it on finish and in the 30-day sweep |
 | `src/workflow/media.ts` | Pure media rules: allowed hosts, image sniffing, name and size checks, link rewriting, the PR's Screenshots line |
 | `src/scheduler/runner.ts` | Run lifecycle (`launch`, `drive`, `resume`, `fail`, `stopRun`) |
@@ -42,7 +42,7 @@ The Workshop server: TypeScript run directly by Node 24 (`node src/index.ts`), E
   - `prepare` and `publish` may simply run again;
   - a vanished `run` container is a failure;
   - re-attaching skips log lines already stored for that container (`linesFrom`).
-- A run that frees its slot (it ends, fails, publishes, pauses, waits to publish again or is cancelled) calls `onRunSettled`, which `kick()`s the scheduler so the next job starts within a second instead of at the next 60 s tick. A run that only lost contact with its host doesn't, so re-attaching can't loop. A host that comes back, or a connection that tests fine, kicks too.
+- A run that frees its slot (it ends, fails, publishes, pauses, waits to publish again or is cancelled) calls `onRunSettled`, which `kick()`s the scheduler so the next job starts within a second instead of at the next 60 s tick. `kick()` runs only the allocation pass, so it never waits for a GitHub sync. A run that only lost contact with its host doesn't, so re-attaching can't loop. A host that comes back, or a connection that tests fine, kicks too.
 - The unique index `runs_one_active_per_ticket` enforces one agent per ticket (paused runs included). `launch()` returns null on conflict.
 - `publish` merges in commits that appeared on the remote branch and retries the push; on a conflict it saves the work on `<branch>-unmerged-<sha>` (exit 3). The run then succeeds and the ticket moves to `stage:reconcile`, with what was interrupted kept in `tickets.rescue`; the Merge agent merges the rescue branch and `planTransition` finishes the interrupted stage. A conflict during that reconcile run fails it.
 - Side effects happen only in `publishRun`, from `planTransition`'s plan. Agents never apply labels.
