@@ -209,7 +209,7 @@ const schemas: Record<string, Schema> = {
     },
     [],
   ),
-  HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), available: bool, slots: int, busy: int, pools: nullable(array(object({ size: enumOf('small', 'standard', 'large'), slots: int, busy: int }))), specs: nullable(str) }),
+  HostView: object({ id: int, name: str, status: enumOf('ok', 'error', 'unknown'), available: bool, slots: int, busy: int, pools: nullable(array(object({ size: enumOf('small', 'standard', 'large'), slots: int, busy: int, borrowed: { ...int, description: 'Slots here held by smaller agents that borrowed them' } }))), specs: nullable(str) }),
   QueueItem: object({ ticketId: int, ticket: str, title: str, next: str, blockedBy: nullable(str), push: nullable(enumOf('stage', 'lifecycle')), prioritised: bool, bypassLimits: bool, prioritisedFor: array(str), unblocks: int, after: { ...array(str), description: "Higher-priority repositories whose queued tickets go ahead of this one. It orders the queue; a ticket that fits a free slot they can't use still starts." } }),
   AlertView: object({
     id: int,

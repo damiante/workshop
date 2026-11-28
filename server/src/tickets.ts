@@ -55,6 +55,8 @@ export interface TicketRow {
   handoff: string | null;
   raised: string | null;
   rework: string | null;
+  /** JSON: the smaller tickets this one was broken into. */
+  parts: string | null;
   dismissed: string | null;
   prioritised: number;
   bypass_limits: number;
@@ -78,6 +80,29 @@ export interface Raised {
   at?: number;
 }
 export const raisedOf = (t: TicketRow): Raised[] => (t.raised ? JSON.parse(t.raised) : []);
+/** A smaller ticket opened in place of a large one. `index` is its position in the Classifier's list. */
+export interface PartRef {
+  index: number;
+  number: number;
+  url: string;
+  title: string;
+}
+export const partsOf = (t: Pick<TicketRow, 'parts'>): PartRef[] => (t.parts ? JSON.parse(t.parts) : []);
+
+/** How many times this ticket's work has already been broken down: 0 for a ticket you opened, 1 for a part of it. */
+export function splitDepth(t: Pick<TicketRow, 'repo_id' | 'number'>): number {
+  let depth = 0;
+  let number = t.number;
+  // Bounded, in case two tickets ever list each other.
+  while (depth < 10) {
+    const parent = one<{ number: number }>("SELECT t.number FROM tickets t, json_each(t.parts) p WHERE t.repo_id = ? AND json_extract(p.value, '$.number') = ?", t.repo_id, number);
+    if (!parent) break;
+    depth++;
+    number = parent.number;
+  }
+  return depth;
+}
+
 export const reworkOf = (t: TicketRow): Rework | null => (t.rework ? JSON.parse(t.rework) : null);
 
 export const repoRef = (r: RepoRow): RepoRef => ({ fullName: r.full_name, defaultBranch: r.default_branch, private: Boolean(r.private), url: r.url });

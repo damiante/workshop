@@ -31,11 +31,13 @@ import {
   MAX_ATTEMPTS,
   raisedOf,
   refKey,
+  partsOf,
   repoRef,
   rescueOf,
   reworkOf,
   setBlockers,
   sourceFor,
+  splitDepth,
   vcsFor,
   type Raised,
   type RepoRow,
@@ -44,7 +46,7 @@ import {
 import { imageFor, label, moveTo, parseLabels, REPO_IMAGE_DIR, repoImageTag } from '../workflow/labels.ts';
 import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
 import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, INDEX_BODY, INDEX_PATH, protocolText, publishes, taskPrompt } from '../workflow/prompts.ts';
-import { BLOCKING_AGENTS, MAX_NOTICED, parseResult, schemaFor, type AgentResult, type Handoff, type Noticed, type Rescue, type WorkResult } from '../workflow/schemas.ts';
+import { BLOCKING_AGENTS, isLarge, MAX_NOTICED, MAX_SPLIT_DEPTH, parseResult, schemaFor, type AgentResult, type Handoff, type Noticed, type Part, type Rescue, type SplitRule, type WorkResult } from '../workflow/schemas.ts';
 import { bestMatch, type Similarity } from '../workflow/similar.ts';
 import { planTransition, type Plan } from '../workflow/transitions.ts';
 import { check } from '../http/util.ts';
@@ -58,6 +60,14 @@ import { advanceMerge } from './merge.ts';
 type StepName = 'prepare' | 'run' | 'publish';
 
 class HostUnreachable extends Error {}
+/** The agent used up its turns or its time without finishing. */
+class LimitReached extends Error {}
+
+/** Whether the Classifier may break this ticket into smaller ones, and whether it has to. */
+function splitRule(t: TicketRow, mode: 'normal' | 'delta'): SplitRule {
+  const allowed = mode === 'normal' && !t.pr_number && splitDepth(t) < MAX_SPLIT_DEPTH;
+  return { allowed, required: allowed && labelsOf(t).includes(label.tooBig) };
+}
 
 const USAGE_RECORD_MS = 30_000;
 /** How long a run over its subscription's limits may wait for its open tool calls (a long subagent) before it's stopped anyway. */
@@ -303,6 +313,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
       media: stored.map((m) => ({ name: m.name, source: m.source, runId: m.run_id, caption: m.caption })),
       rescue: r.agent === 'merge' && parseLabels(labels).stage === 'reconcile' && rescue ? { branch: rescue.branch, agent: rescue.agent, summary: rescue.result.summary } : undefined,
       rework: reworkOf(t) ?? undefined,
+      split: r.agent === 'classifier' ? splitRule(t, r.mode) : undefined,
     });
     Object.assign(files, mediaFiles(t.id));
   }
@@ -529,14 +540,14 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     raiseAlert('error', 'claude-auth', 'Claude rejected the credentials Workshop used. For a subscription, run "claude setup-token" again and update the Claude connection.', `model:${r.model_connection_id}`);
   }
   if (!res) {
-    if (state.timedOut) throw new Error(`Stopped after the ${timeoutMin}-minute time limit.`);
+    if (state.timedOut) throw new LimitReached(`Stopped after the ${timeoutMin}-minute time limit.`);
     if (state.exitCode === 137 || state.exitCode === 143) {
       raiseAlert('warning', 'container-killed', `${ctx.labels['workshop.ticket']}: the ${name} container was killed on ${ctx.host.name} (exit ${state.exitCode}).`, `run:${r.id}`);
     }
     throw new Error(`Claude Code exited (code ${state.exitCode}) without a result. See the run log.`);
   }
-  if (res.isError) throw new Error(describeError(res, maxTurns));
-  const parsed = parseResult(r.agent, res.structured);
+  if (res.isError) throw new (res.subtype === 'error_max_turns' ? LimitReached : Error)(describeError(res, maxTurns));
+  const parsed = parseResult(r.agent, res.structured, r.agent === 'classifier' ? splitRule(getTicket(r.ticket_id)!, r.mode) : undefined);
   if (typeof parsed === 'string') throw new Error(`The agent's result was invalid: ${parsed}`);
   await copyBackMedia(ctx, parsed);
   setRun(r.id, { status: 'publishing', step: null, container_id: null, result: JSON.stringify(parsed), summary: summarize(parsed), pause_requested_at: null });
@@ -766,6 +777,35 @@ export function checkRaiseRate(repo: RepoRow) {
 const raisedLine = (raised: Raised[]) =>
   raised.length ? `Noticed outside this ticket, and opened as ${raised.length === 1 ? 'its own ticket' : 'their own tickets'}:\n${raised.map((x) => `- #${x.number} ${x.title}`).join('\n')}` : '';
 
+const MAX_PART_TITLE = 200;
+const MAX_PART_BODY = 20_000;
+
+/**
+ * Opens the smaller tickets a large one is broken into, and links the ones that wait for another. Each ticket is
+ * recorded as soon as it exists, so a retry after a failure opens only the ones still missing.
+ */
+async function openParts(ctx: Ctx, t: TicketRow, parts: Part[]) {
+  const source = sourceFor(ctx.repo);
+  const repo = repoRef(ctx.repo);
+  const labels = labelsOf(t).includes(label.nominated) ? [label.nominated] : [];
+  for (const [index, p] of parts.entries()) {
+    const done = partsOf(getTicket(t.id)!);
+    if (done.some((d) => d.index === index)) continue;
+    const title = p.title.trim().replace(/\s+/g, ' ').slice(0, MAX_PART_TITLE);
+    const body = `${p.body.trim().slice(0, MAX_PART_BODY)}\n\n---\n_Part ${index + 1} of ${parts.length} of #${t.number}, which Workshop broke into smaller tickets._`;
+    const made = await source.createTicket(repo, { title, body, labels });
+    run('UPDATE tickets SET parts = ? WHERE id = ?', JSON.stringify([...done, { index, number: made.number, url: made.url, title }]), t.id);
+  }
+  const opened = partsOf(getTicket(t.id)!);
+  for (const [index, p] of parts.entries()) {
+    const part = opened.find((d) => d.index === index)!;
+    for (const n of p.after ?? []) {
+      const first = opened.find((d) => d.index === n - 1);
+      if (first) await source.addBlocker(repo, part.number, first.number);
+    }
+  }
+}
+
 async function publishRun(ctx: Ctx) {
   const r = ctx.run;
   const t = getTicket(r.ticket_id)!;
@@ -922,6 +962,13 @@ async function publishRun(ctx: Ctx) {
       state.prerequisites = made;
     });
   }
+  let partsLine = '';
+  if (plan.split) {
+    const parts = plan.split;
+    await step('split', () => openParts(ctx, t, parts));
+    const opened = partsOf(getTicket(t.id)!);
+    partsLine = `${opened.map((p) => `- [ ] #${p.number}`).join('\n')}\n\nWorkshop works on those and leaves this ticket alone. Close it when they're done.`;
+  }
   if (plan.createBranch) {
     await step('branch', async () => {
       await vcs.createBranch(repo, branch, { number: t.number, nodeId: t.node_id ?? undefined });
@@ -943,7 +990,7 @@ async function publishRun(ctx: Ctx) {
   if (plan.clearRescue) run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
   const raised = await raiseNoticed(ctx, t, result);
   await step('labels', () => editLabels(t, plan.add, [...plan.remove, label.running]));
-  const comment = [plan.comment, blockersLine(made), raisedLine(raised)].filter(Boolean).join('\n\n');
+  const comment = [plan.comment, partsLine, blockersLine(made), raisedLine(raised)].filter(Boolean).join('\n\n');
   if (comment) await step('comment', () => sourceFor(ctx.repo).comment(repo, t.number, comment));
   // The handoff goes last too, so a retry after a partial failure still has the Implementation summary.
   run(`UPDATE tickets SET failures = 0${plan.rework === null ? ', rework = NULL' : ''}${plan.openPr || plan.noPr ? ', handoff = NULL' : ''} WHERE id = ?`, t.id);
@@ -1000,7 +1047,7 @@ export async function drive(runId: string) {
       return;
     }
     console.error(`[run ${runId}]`, err);
-    await fail(runId, errorText(err));
+    await fail(runId, errorText(err), err instanceof LimitReached);
   } finally {
     driving.delete(runId);
     if (!lost) settled();
@@ -1051,6 +1098,8 @@ export function launch(p: {
   environmentId: number;
   /** The container size, which picks the host's limits and the slot the run holds. Standard when left out. */
   size?: AgentSize;
+  /** The host pool it holds: its size's own when left out, or a larger one it borrows. */
+  slot?: AgentSize;
   modelConnectionId: number;
   model: string;
   billing: Billing;
@@ -1058,8 +1107,8 @@ export function launch(p: {
   const id = crypto.randomUUID();
   try {
     run(
-      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, size, model_connection_id, model, billing, status, volume, started_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?)`,
+      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, size, slot, model_connection_id, model, billing, status, volume, started_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', ?, ?)`,
       id,
       p.ticketId,
       p.agent,
@@ -1067,6 +1116,7 @@ export function launch(p: {
       p.attempt,
       p.environmentId,
       p.size ?? 'standard',
+      p.slot ?? null,
       p.modelConnectionId,
       p.model,
       p.billing,
@@ -1087,10 +1137,10 @@ export function launch(p: {
  * Continues a paused run (usage limit, its subscription's limits, by hand or a paused subscription) in the same Claude session
  * on the same host, with the credentials of the connection it's on now (another subscription, after a move).
  */
-export function resume(runId: string) {
+export function resume(runId: string, slot?: AgentSize) {
   const r = getRun(runId);
   if (r?.status !== 'paused') return;
-  setRun(runId, { status: 'running', step: 'run', container_id: null, resets_at: null, pause_reason: null, pause_requested_at: null, resumes: r.resumes + 1 });
+  setRun(runId, { status: 'running', step: 'run', container_id: null, resets_at: null, pause_reason: null, pause_requested_at: null, resumes: r.resumes + 1, ...(slot && { slot }) });
   void drive(runId);
 }
 
@@ -1154,13 +1204,38 @@ export function cancelPause(runId: string): boolean {
   return true;
 }
 
-export async function fail(runId: string, message: string) {
+/**
+ * An agent ran out of turns or time on an L or XL ticket: trying the whole thing again would run out again, so the
+ * ticket goes back to the Classifier, which must break it into smaller ones. Returns false when that doesn't apply.
+ */
+async function sendBackToSplit(r: RunRow, t: TicketRow, message: string): Promise<boolean> {
+  const labels = labelsOf(t);
+  if (r.agent === 'classifier' || !isLarge(parseLabels(labels).size) || !splitRule(t, r.mode).allowed) return false;
+  const repo = getRepo(t.repo_id)!;
+  const name = AGENT_INFO[r.agent].label;
+  try {
+    await editLabels(t, [label.tooBig], [...moveTo(labels, null).remove, label.running]);
+    run('UPDATE tickets SET failures = 0 WHERE id = ?', t.id);
+    await sourceFor(repo).comment(
+      repoRef(repo),
+      t.number,
+      `**${name}** couldn't finish this ticket in one go:\n\n> ${message}\n\nIt's too big to work on as one ticket, so the Classifier will break it into smaller ones next.`,
+    );
+    return true;
+  } catch (err) {
+    console.warn(`Couldn't send #${t.number} back to be broken down: ${(err as Error).message}`);
+    return labelsOf(getTicket(t.id)!).includes(label.tooBig);
+  }
+}
+
+export async function fail(runId: string, message: string, limitReached = false) {
   const r = getRun(runId);
   if (!r || !ACTIVE_STATUSES.includes(r.status)) return;
   setRun(runId, { status: 'failed', error: message, step: null, container_id: null, ended_at: Date.now() });
   activity.delete(runId);
   const t = getTicket(r.ticket_id);
   if (!t) return;
+  if (limitReached && (await sendBackToSplit(r, t, message))) return;
   const failures = t.failures + 1;
   run('UPDATE tickets SET failures = ? WHERE id = ?', failures, t.id);
   await markRunning(t, false);

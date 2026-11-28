@@ -1,4 +1,4 @@
-import type { AgentSize, AllowanceView, Limits, Topic, Push, RepoSelection, Settings, UsageWindow } from '../api-types.ts';
+import { AGENT_SIZES, type AgentSize, type AllowanceView, type Limits, type Topic, type Push, type RepoSelection, type Settings, type UsageWindow } from '../api-types.ts';
 import { label, nextStep, parseLabels, type Step } from '../workflow/labels.ts';
 
 /** Whether Workshop may work on a ticket: always for a whole-backlog repository, otherwise only when nominated. */
@@ -109,22 +109,51 @@ export interface HostLoad {
 export interface Pool {
   slots: number;
   busy: number;
+  /** Runs of a smaller size holding slots here because they borrowed them. */
+  borrowed: number;
 }
 
 /** The pool an agent of this size runs in on a host: its own when the host keeps one, otherwise the standard one. */
 export const poolFor = (h: Pick<HostLoad, 'pools'>, size: AgentSize): Pool => h.pools[size] ?? h.pools.standard;
 
-/** Free slots for an agent of this size. */
-export function freeSlots(h: Pick<HostLoad, 'pools'>, size: AgentSize): number {
-  const p = poolFor(h, size);
-  return p.slots - p.busy;
+/**
+ * The pools an agent of this size may use on a host, its own first: its size's when the host keeps
+ * one (standard otherwise), then the larger pools the host keeps. Never a smaller one.
+ */
+export function slotsFor(h: Pick<HostLoad, 'pools'>, size: AgentSize): AgentSize[] {
+  const own = h.pools[size] ? size : 'standard';
+  return [own, ...AGENT_SIZES.filter((k) => AGENT_SIZES.indexOf(k) > AGENT_SIZES.indexOf(own) && h.pools[k])];
 }
 
-/** The healthy, available host with the most free slots for an agent of this size. */
-export function pickHost(hosts: HostLoad[], size: AgentSize = 'standard'): number | null {
-  const free = hosts.filter((h) => h.healthy && h.available && freeSlots(h, size) > 0);
-  free.sort((a, b) => freeSlots(b, size) - freeSlots(a, size) || a.id - b.id);
-  return free[0]?.id ?? null;
+const rank = (size: AgentSize) => AGENT_SIZES.indexOf(size);
+
+const free = (h: Pick<HostLoad, 'pools'>, slot: AgentSize) => h.pools[slot]!.slots - h.pools[slot]!.busy;
+
+/** The first pool with a free slot for an agent of this size on a host, its own first, or null. */
+export function freeSlot(h: Pick<HostLoad, 'pools'>, size: AgentSize): AgentSize | null {
+  return slotsFor(h, size).find((slot) => free(h, slot) > 0) ?? null;
+}
+
+/**
+ * Where an agent of this size starts: a healthy, available host and the pool it holds there. Its own
+ * pool on any host comes first (the host with the most free, then the lowest id). Only when every one
+ * is full does it borrow the next larger pool, then the one after. A borrower skips a pool that a
+ * larger ready candidate (a size in `waiting`) could use on that host, as its own or by borrowing,
+ * so the larger job gets a contested slot first. Same-size and smaller candidates don't hold it back.
+ */
+export function place(hosts: HostLoad[], size: AgentSize = 'standard', waiting: AgentSize[] = []): { hostId: number; slot: AgentSize } | null {
+  const usable = hosts.filter((h) => h.healthy && h.available);
+  for (let round = 0; round < AGENT_SIZES.length; round++) {
+    const options = usable.flatMap((h) => {
+      const slot = slotsFor(h, size)[round];
+      if (!slot || free(h, slot) <= 0) return [];
+      if (round > 0 && waiting.some((w) => rank(w) > rank(size) && slotsFor(h, w).includes(slot))) return [];
+      return [{ hostId: h.id, slot, free: free(h, slot) }];
+    });
+    options.sort((a, b) => b.free - a.free || a.hostId - b.hostId);
+    if (options[0]) return { hostId: options[0].hostId, slot: options[0].slot };
+  }
+  return null;
 }
 
 /** "#2", "#2 and #5", "#2, #5 and #7". */

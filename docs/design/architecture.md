@@ -86,7 +86,7 @@ An approved, cleanly mergeable pull request is squash-merged through the API, an
 
 ### Host capacity is slots, not LLM-chosen sizes
 
-Resource use comes from a project's build and tests, not from the ticket's size, and Docker can't reliably report free capacity while other workloads share a host. Each host has a slot count (default 1) and per-agent CPU and memory limits. Enrollment reads the host's CPUs and memory and suggests how many agents fit. The scheduler picks the healthy host with the most free slots.
+Resource use comes from a project's build and tests, not from the ticket's size, and Docker can't reliably report free capacity while other workloads share a host. Each host has a slot count (default 1) and per-agent CPU and memory limits. Enrollment reads the host's CPUs and memory and suggests how many agents fit. The scheduler picks the healthy host with the most free slots. An agent whose own pool is full on every host borrows a free slot in a larger pool (never a smaller one), unless a larger ready agent could use it, so a backlog of small work doesn't leave standard slots idle.
 
 ### Failures are bounded
 

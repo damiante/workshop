@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AllowanceView, Limits, Settings } from '../src/api-types.ts';
 import { DEFAULT_SETTINGS } from '../src/settings.ts';
-import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, modeBlock, priorityAhead, pickHost, poolFor, freeSlots, implicitPriority, waitingCounts, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours, type HostLoad } from '../src/scheduler/gates.ts';
+import { allowanceBlock, clockTopics, thresholdBlock, dependencyBlock, inScope, isTransient, modeBlock, priorityAhead, place, poolFor, slotsFor, freeSlot, implicitPriority, waitingCounts, pickSubscription, publishRetryMinutes, pushEnded, pushRefusal, stepPriority, withinHours, type HostLoad } from '../src/scheduler/gates.ts';
 
 const s = (over: Partial<Settings> = {}): Settings => ({ ...DEFAULT_SETTINGS, timezone: 'Australia/Melbourne', ...over });
 // 2026-10-13 is a Tuesday. Melbourne is UTC+11 (daylight time) on that date.
@@ -110,29 +110,91 @@ describe('allowance gate', () => {
 
 describe('scheduling helpers', () => {
   it('picks the healthy host with the most free slots', () => {
-    const host = (id: number, slots: number, busy: number, more: Partial<HostLoad> = {}): HostLoad => ({ id, healthy: true, available: true, pools: { standard: { slots, busy } }, ...more });
-    expect(pickHost([])).toBeNull();
-    expect(pickHost([host(1, 1, 1)])).toBeNull();
-    expect(pickHost([host(1, 4, 0, { healthy: false }), host(2, 2, 1)])).toBe(2);
-    expect(pickHost([host(1, 2, 1), host(2, 3, 0)])).toBe(2);
-    expect(pickHost([host(1, 4, 0, { available: false })])).toBeNull();
-    expect(pickHost([host(1, 4, 0, { available: false }), host(2, 1, 0)])).toBe(2);
+    const host = (id: number, slots: number, busy: number, more: Partial<HostLoad> = {}): HostLoad => ({ id, healthy: true, available: true, pools: { standard: { slots, busy, borrowed: 0 } }, ...more });
+    expect(place([])).toBeNull();
+    expect(place([host(1, 1, 1)])).toBeNull();
+    expect(place([host(1, 4, 0, { healthy: false }), host(2, 2, 1)])?.hostId).toBe(2);
+    expect(place([host(1, 2, 1), host(2, 3, 0)])?.hostId).toBe(2);
+    expect(place([host(1, 4, 0, { available: false })])).toBeNull();
+    expect(place([host(1, 4, 0, { available: false }), host(2, 1, 0)])?.hostId).toBe(2);
   });
 
-  it('counts slots by agent size on a host that keeps separate ones', () => {
-    const sized: HostLoad = { id: 1, healthy: true, available: true, pools: { standard: { slots: 2, busy: 2 }, small: { slots: 3, busy: 1 }, large: { slots: 1, busy: 1 } } };
-    const plain: HostLoad = { id: 2, healthy: true, available: true, pools: { standard: { slots: 1, busy: 0 } } };
-    expect(freeSlots(sized, 'small')).toBe(2);
-    expect(freeSlots(sized, 'standard')).toBe(0);
-    expect(freeSlots(sized, 'large')).toBe(0);
-    // A size never borrows a standard slot on a host that keeps slots for it.
-    expect(pickHost([sized], 'small')).toBe(1);
-    expect(pickHost([sized], 'standard')).toBeNull();
-    expect(pickHost([sized], 'large')).toBeNull();
+  const pool = (slots: number, busy: number) => ({ slots, busy, borrowed: 0 });
+  const sizedHost = (id: number, small: [number, number], standard: [number, number], large?: [number, number]): HostLoad => ({
+    id,
+    healthy: true,
+    available: true,
+    pools: { small: pool(...small), standard: pool(...standard), ...(large && { large: pool(...large) }) },
+  });
+
+  it('lists the pools a size may use on a host, its own first and never a smaller one', () => {
+    const full = sizedHost(1, [1, 0], [1, 0], [1, 0]);
+    const noLarge = sizedHost(2, [1, 0], [1, 0]);
+    const plain: HostLoad = { id: 3, healthy: true, available: true, pools: { standard: pool(1, 0) } };
+    expect(slotsFor(full, 'small')).toEqual(['small', 'standard', 'large']);
+    expect(slotsFor(full, 'standard')).toEqual(['standard', 'large']);
+    expect(slotsFor(full, 'large')).toEqual(['large']);
+    expect(slotsFor(noLarge, 'small')).toEqual(['small', 'standard']);
+    expect(slotsFor(noLarge, 'large')).toEqual(['standard']);
+    expect(slotsFor({ pools: { standard: pool(1, 0), large: pool(1, 0) } }, 'small')).toEqual(['standard', 'large']);
+    for (const size of ['small', 'standard', 'large'] as const) expect(slotsFor(plain, size)).toEqual(['standard']);
+
+    expect(freeSlot(sizedHost(1, [1, 1], [1, 0], [1, 0]), 'small')).toBe('standard');
+    expect(freeSlot(sizedHost(1, [1, 1], [1, 1], [1, 0]), 'small')).toBe('large');
+    expect(freeSlot(sizedHost(1, [1, 0], [1, 0], [1, 1]), 'large')).toBeNull();
+    expect(freeSlot(sizedHost(1, [1, 0], [1, 0], [1, 0]), 'small')).toBe('small');
+  });
+
+  it('lets a size borrow a free larger slot when its own pool is full', () => {
+    const sized = sizedHost(1, [3, 1], [2, 2], [1, 1]);
+    const plain: HostLoad = { id: 2, healthy: true, available: true, pools: { standard: pool(1, 0) } };
+    expect(place([sized], 'small')).toEqual({ hostId: 1, slot: 'small' });
+    expect(place([sized], 'standard')).toBeNull();
+    expect(place([sized], 'large')).toBeNull();
+    // Small borrows standard, then large once standard is full.
+    expect(place([sizedHost(1, [1, 1], [1, 0], [1, 0])], 'small')).toEqual({ hostId: 1, slot: 'standard' });
+    expect(place([sizedHost(1, [1, 1], [1, 1], [1, 0])], 'small')).toEqual({ hostId: 1, slot: 'large' });
+    // Standard borrows large; large never squeezes into a smaller slot.
+    expect(place([sizedHost(1, [1, 0], [1, 1], [1, 0])], 'standard')).toEqual({ hostId: 1, slot: 'large' });
+    expect(place([sizedHost(1, [1, 0], [1, 0], [1, 1])], 'large')).toBeNull();
     // A host with one pool runs every size in it.
     expect(poolFor(plain, 'large')).toBe(plain.pools.standard);
-    expect(pickHost([sized, plain], 'large')).toBe(2);
-    expect(pickHost([sized, plain], 'small')).toBe(1);
+    for (const size of ['small', 'standard', 'large'] as const) expect(place([plain], size)).toEqual({ hostId: 2, slot: 'standard' });
+    expect(place([sized, plain], 'large')).toEqual({ hostId: 2, slot: 'standard' });
+    // Its own pool on any host comes before borrowing on any host.
+    const borrowable = sizedHost(1, [1, 1], [4, 0], [4, 0]);
+    const own = sizedHost(2, [1, 0], [1, 1]);
+    expect(place([borrowable, own], 'small')).toEqual({ hostId: 2, slot: 'small' });
+    expect(place([borrowable], 'small')).toEqual({ hostId: 1, slot: 'standard' });
+  });
+
+  it('leaves a larger slot to a larger ready candidate', () => {
+    const h = sizedHost(1, [1, 1], [1, 0], [1, 0]);
+    // Standard could borrow large too, so small leaves both to it.
+    expect(place([h], 'small', ['standard'])).toBeNull();
+    expect(place([h], 'small', ['standard', 'large'])).toBeNull();
+    expect(place([sizedHost(1, [1, 1], [1, 0])], 'small', ['standard'])).toBeNull();
+    // The waiting candidate itself still gets its own pool.
+    expect(place([h], 'standard', ['standard', 'small'])).toEqual({ hostId: 1, slot: 'standard' });
+    // A large candidate on a host without a large pool claims standard there.
+    expect(place([sizedHost(1, [1, 1], [1, 0])], 'small', ['large'])).toBeNull();
+    // A waiting small candidate claims nothing larger.
+    expect(place([h], 'small', ['small'])).toEqual({ hostId: 1, slot: 'standard' });
+  });
+
+  it('gives a slot two borrowers want to the larger one', () => {
+    // Small and standard full, one large slot free; small and standard ready, no large.
+    const h = sizedHost(1, [1, 1], [1, 1], [1, 0]);
+    const ready = ['small', 'small', 'small', 'standard', 'standard'] as const;
+    expect(place([h], 'standard', [...ready])).toEqual({ hostId: 1, slot: 'large' });
+    expect(place([h], 'small', [...ready])).toBeNull();
+    // Only small ready: it still borrows the large slot.
+    expect(place([h], 'small', ['small', 'small'])).toEqual({ hostId: 1, slot: 'large' });
+    // Standard and large ready, one large slot free: large gets it.
+    const full = sizedHost(1, [1, 0], [1, 1], [1, 0]);
+    const mixed = [...Array<'standard'>(5).fill('standard'), 'large', 'large'] as const;
+    expect(place([full], 'large', [...mixed])).toEqual({ hostId: 1, slot: 'large' });
+    expect(place([full], 'standard', [...mixed])).toBeNull();
   });
 
   it('finishes work in flight first', () => {

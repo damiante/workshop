@@ -1,6 +1,6 @@
 import type { AgentName, Size } from '../api-types.ts';
 import { captionLine } from './media.ts';
-import { MAX_NOTICED, type Rework } from './schemas.ts';
+import { MAX_NOTICED, MAX_PARTS, MIN_PARTS, type Rework, type SplitRule } from './schemas.ts';
 import { formatFindings } from './transitions.ts';
 
 export const AGENT_INFO: Record<AgentName, { label: string; description: string; maxTurns: number; timeoutMin: number }> = {
@@ -33,7 +33,8 @@ export const DEFAULT_PROMPTS: Record<AgentName, string> = {
 4. Decline (decision "reject") when the ticket isn't actionable code work: a question or discussion, too little information to act on, technically infeasible, or a duplicate.
 5. If one specific answer from the owner would make it actionable, use "needs_info" with that question instead of declining.
 6. Use "blocked" when any part of the ticket asks for something another open ticket will build, so doing this one first would mean building that part twice or leaving it out. One sentence is enough: "expose this on the API" while another ticket is "Develop an API" means blocked by that ticket. This holds even if the repository already has something similar (such as the internal routes the web UI calls): the owner opened that other ticket because what exists isn't what they mean. List those ticket numbers in blocked_by, and name what each one provides in your reason. Don't use it when the tickets only touch the same area and either order works, or when the owner has said in a comment not to wait.
-7. When accepting, list in capabilities what the Implementation agent needs to test the change: "browser" when it changes a web UI that should be checked in a browser or shown in a screenshot. Leave it empty otherwise, since the browser image is large. In delta mode, list what the whole ticket needs, not only the requested changes. Also set ui to true when the ticket changes what a user sees, or is a bug best looked into by running the app (a layout or rendering bug, say): Design and Design adversary then get a browser.
+7. Break large work down. If you would size the ticket l or xl, return "split" instead, with the smaller tickets to open in its place: each one implementable, testable and mergeable on its own, leaving the code working, and ideally m or smaller. Write each part's body as a complete ticket (what to build, where, how to tell it is done), list the parts in working order, and use "after" for a part that needs an earlier one finished first. Accept an l or xl as one ticket only when it has to land as a single change, because every way of dividing it would leave the code broken in between; then say why in one_change.
+8. When accepting, list in capabilities what the Implementation agent needs to test the change: "browser" when it changes a web UI that should be checked in a browser or shown in a screenshot. Leave it empty otherwise, since the browser image is large. In delta mode, list what the whole ticket needs, not only the requested changes. Also set ui to true when the ticket changes what a user sees, or is a bug best looked into by running the app (a layout or rendering bug, say): Design and Design adversary then get a browser.
 
 In delta mode, changes were requested on an existing pull request: size only the requested changes, relative to what is already on the branch.`,
 
@@ -130,6 +131,8 @@ export interface TaskContext {
   rescue?: { branch: string; agent: AgentName; summary: string };
   /** The code review sent the ticket back: the severe findings being fixed. */
   rework?: Rework;
+  /** Classifier only: whether the ticket may be broken into smaller ones, and whether it has to be. */
+  split?: SplitRule;
 }
 
 /** The agents that see the findings of a code review that sent the ticket back. */
@@ -147,6 +150,15 @@ const BROWSER_FOR_DESIGN =
 const SOURCE_TEXT = (m: TaskContext['media'][number]) =>
   m.source === 'issue' ? 'from the issue' : m.source === 'comment' ? 'from a comment' : `added by ${AGENT_INFO[m.source as AgentName]?.label ?? m.source}${m.runId ? ` (run ${m.runId.slice(0, 8)})` : ''}`;
 
+/** What the Classifier is told about breaking the ticket down. Fixed, so it holds with customised instructions too. */
+function splitLine(split?: SplitRule): string {
+  if (!split?.allowed) return ' Do not return "split" for this ticket.';
+  if (split.required) {
+    return ` An agent ran out of turns or time working on this ticket as a whole, so it must be broken down: return "split" with ${MIN_PARTS} to ${MAX_PARTS} smaller tickets that together cover what is left to do. Check the branch for work that is already there. Accepting it as one ticket is not an option.`;
+  }
+  return ` A ticket you would size L or XL must be broken down: return "split" with ${MIN_PARTS} to ${MAX_PARTS} smaller tickets instead of accepting it. The only exception is a ticket that has to land as a single change; accept that one and say why in one_change.`;
+}
+
 function taskLine(c: TaskContext): string {
   const reviewed = c.review.length > 0;
   const rework = Boolean(c.rework && REWORK_AGENTS.includes(c.agent));
@@ -157,14 +169,14 @@ function taskLine(c: TaskContext): string {
           ? `Changes were requested on the pull request for this ticket (see the review feedback above). Size only the requested changes, relative to what is already on branch \`${c.branch}\` (compare with \`git diff origin/${c.base}...HEAD\`).`
           : 'Classify this ticket.';
       const rules = "only work outside this ticket's scope; give each a body someone who hasn't seen this ticket can act on";
-      if (c.raiseBlockers) {
-        return c.openTickets?.length
-          ? `${base} If this ticket can't be done until other work is finished, return "blocked": put the numbers of the open tickets that cover it in blocked_by, and describe prerequisite work that no open ticket covers under raise_blockers (${rules}). ${SEARCH_INDEX}`
-          : `${base} If this ticket can't be done until prerequisite work outside its scope exists, return "blocked" and describe that work under raise_blockers (${rules}).`;
-      }
-      return c.openTickets?.length
-        ? `${base} If this ticket can't be done until one of the other open tickets above is finished, return "blocked" with their numbers in blocked_by and the reason.`
-        : base;
+      const blocked = c.raiseBlockers
+        ? c.openTickets?.length
+          ? ` If this ticket can't be done until other work is finished, return "blocked": put the numbers of the open tickets that cover it in blocked_by, and describe prerequisite work that no open ticket covers under raise_blockers (${rules}). ${SEARCH_INDEX}`
+          : ` If this ticket can't be done until prerequisite work outside its scope exists, return "blocked" and describe that work under raise_blockers (${rules}).`
+        : c.openTickets?.length
+          ? ` If this ticket can't be done until one of the other open tickets above is finished, return "blocked" with their numbers in blocked_by and the reason.`
+          : '';
+      return base + blocked + splitLine(c.split);
     }
     case 'design':
       return [

@@ -287,6 +287,8 @@ export const MIGRATIONS = [
   );
   ALTER TABLE tickets ADD COLUMN links_checked_at INTEGER; -- epoch ms of the last full read of its blockers; null = never
   `,
+  `ALTER TABLE tickets ADD COLUMN parts TEXT; -- JSON: the smaller tickets this one was broken into`,
+  `ALTER TABLE runs ADD COLUMN slot TEXT; -- small, standard or large: the host pool the run holds (it may borrow a larger one); null on older rows means its size's own pool`,
 ];
 
 export let db: DatabaseSync;
