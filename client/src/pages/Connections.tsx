@@ -172,7 +172,7 @@ function Installations({ connection }: { connection: ConnectionView }) {
   );
 }
 
-function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEdit: () => void; extra?: ReactNode; rank?: number; onMove?: (by: -1 | 1) => Promise<unknown>; last?: boolean }) {
+export function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEdit: () => void; extra?: ReactNode; rank?: number; onMove?: (by: -1 | 1) => Promise<unknown>; last?: boolean }) {
   const { c, provider, onEdit, extra, rank, onMove, last } = props;
   const [test, setTest] = useState<TestResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -217,6 +217,7 @@ function ConnectionItem(props: { c: ConnectionView; provider: ProviderInfo; onEd
         </strong>
         <Status tone={c.status === 'ok' ? 'ok' : c.status === 'error' ? 'error' : 'idle'}>{c.status === 'ok' ? 'Working' : c.status === 'error' ? 'Not working' : 'Not checked yet'}</Status>
       </div>
+      {isHost && <span className="small muted">Host ID <code>{c.id}</code></span>}
       {isHost && !available && <span className="small muted">Switched off: no new agents start here. Running agents carry on.</span>}
       {c.kind === 'model' && c.paused && (
         <span className="small muted">Paused: subscription agents use your other subscriptions, and running ones move over after their current step. API-billed agents still use its API key. Its settings are kept.</span>
