@@ -12,16 +12,17 @@ The Workshop UI: React 19, React Router 8, Vite. Plain CSS with custom propertie
 | `src/format.ts` | Labels for agents and run statuses, durations, times, money |
 | `src/transcript.ts` | Pure reducer: run log lines → steps, prose, tool calls with results attached, to-do list, outcome. Tested in `test/` |
 | `src/access.ts` | Pure: API token lifetimes and the brief the run view's Give Claude access button shows. Tested in `test/` |
-| `src/chart.ts`, `src/projections.ts` | Pure: chart ticks, series folding, the Usage page's URL filters, and its projection sentences. Tested in `test/` |
+| `src/chart.ts`, `src/projections.ts`, `src/ticket-usage.ts` | Pure: chart ticks, series folding, the Usage page's URL filters, its projection sentences, and its cost per ticket search and sort. Tested in `test/` |
+| `src/sync.ts` | Pure: `syncStatus()`, the text and bar the Sync now and Refresh buttons show for the server's sync progress. Tested in `test/` |
 | `src/markdown.ts` | Pure parser: the Markdown subset agents write → block and inline tree. Tested in `test/` |
-| `src/components/` | `Markdown` (renders that tree as React elements, never raw HTML), `Layout` (sidebar, mode switch, allowance meters), `ui.tsx` (`Status`, `Meter`, `Modal`, `Panel`, `ErrorNote`), `ThemeToggle`, `Chart` (hand-drawn SVG stacked columns and line chart, with legend and tooltips) |
+| `src/components/` | `Markdown` (renders that tree as React elements, never raw HTML), `Layout` (sidebar, mode switch, allowance meters), `ui.tsx` (`Status`, `Meter`, `Modal`, `Panel`, `ErrorNote`), `ThemeToggle`, `Chart`, `SyncButton` (Sync now and Refresh, following `/api/sync` on the `sync` topic) with its presentational `SyncControl` (hand-drawn SVG stacked columns and line chart, with legend and tooltips) |
 | `src/pages/` | Login, Dashboard, Tickets, Runs, RunView, Usage (charts, projections and lifetime tables), Connections, Agents, Settings, Alerts, Ticket (a ticket's lifecycle, `tickets/:id`), Media (a ticket's screenshots, `tickets/:id/media`) |
 | `src/theme.css` | Every colour, size and component style |
 
 ## Data flow
 
 - Types come from `../../server/src/api-types.ts`, **type-only**. Never import other server modules: they pull in Node built-ins.
-- `useApi('/overview', ['runs', 'tickets'])` fetches on mount and refetches when the server publishes one of those topics on `/api/events`. Bursts are coalesced (at most 250 ms from the first event), failed refetches retry with backoff until they succeed; after a reconnect everything refetches once. The stream reconnects itself, closes while the tab is hidden and refetches when it's shown, and `useApi` drops out-of-order responses. To make a new view live, publish the topic on the server where the data changes.
+- `useApi('/overview', ['runs', 'tickets'])` fetches on mount and refetches when the server publishes one of those topics on `/api/events`. Bursts are coalesced (at most 250 ms from the first event), failed refetches retry with backoff until they succeed; after a reconnect everything refetches once. The stream reconnects itself, closes while the tab is hidden and refetches when it's shown, and `useApi` drops out-of-order responses. To make a new view live, publish the topic on the server where the data changes. A run's activity text changing publishes only `activity`, so add it only to views that show that text; `runs` covers real state changes.
 - The run view streams `/api/runs/:id/log` with its own `LiveStream`. A reconnect resumes with `?after=<last index>`, and the server's `end` event (the run finished) stops it.
 - Two models share `LiveStream`: the run log pushes data and resumes by index; views get topic notices and refetch, because the server derives their data from several tables.
 - A 401 from any call fires `workshop:signed-out`, which shows the sign-in screen.

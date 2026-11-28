@@ -1,11 +1,13 @@
+import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 import type { AllowanceHistory, LifetimeSpend, SpendTotals, UsageHistory } from '../../../server/src/api-types.ts';
 import { bucketLabel, foldSeries, GROUPINGS, METRICS, RANGES, readFilters, shares, value, type Grouping, type Metric } from '../chart.ts';
 import { useApi, useNow } from '../api.ts';
 import { Bars, Legend, LineChart, StackedColumns } from '../components/Chart.tsx';
 import { ErrorNote, Panel } from '../components/ui.tsx';
-import { money, tokens } from '../format.ts';
-import { projectionSections, type Cell } from '../projections.ts';
+import { money, tokens, when } from '../format.ts';
+import { burndownSummary, projectionSections, type Cell } from '../projections.ts';
+import { DEFAULT_TICKET_SORT, filterTickets, nextSort, sortTickets, TICKETS_SHOWN, type TicketSortKey } from '../ticket-usage.ts';
 
 const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
 const OTHER_COLOR = 'var(--series-other)';
@@ -272,9 +274,19 @@ function SpendOverTime({ data, group, metric }: { data: UsageHistory; group: Gro
   );
 }
 
-/** What each ticket's runs used in the range, the most expensive first. */
+const TICKET_COLUMNS: { key: TicketSortKey; label: string }[] = [
+  { key: 'inputTokens', label: 'Input' },
+  { key: 'outputTokens', label: 'Output' },
+  { key: 'costUsd', label: 'Cost' },
+];
+
+/** What each ticket's runs used in the range: the top few by the chosen column, filtered by the search. */
 function TicketUsage({ data }: { data: UsageHistory }) {
+  const [query, setQuery] = useState('');
+  const [sort, setSort] = useState(DEFAULT_TICKET_SORT);
   const total = data.byTicket.reduce((n, t) => n + t.costUsd, 0);
+  const matching = filterTickets(data.byTicket, query);
+  const shown = sortTickets(matching, sort).slice(0, TICKETS_SHOWN);
   return (
     <Panel title="Cost per ticket">
       <div className="panel-body stack">
@@ -283,42 +295,57 @@ function TicketUsage({ data }: { data: UsageHistory }) {
         ) : (
           <>
             <p className="small muted">
-              What each ticket's agent runs used in this range, the most expensive first{data.byTicket.length > 1 ? `: ${money(total / data.byTicket.length)} a ticket on average` : ''}. A ticket still
-              being worked on counts what it has used so far.
+              What each ticket's agent runs used in this range{data.byTicket.length > 1 ? `: ${money(total / data.byTicket.length)} a ticket on average` : ''}. A ticket still being worked on counts
+              what it has used so far. Shows the top {TICKETS_SHOWN}; click Input, Output or Cost to sort by it.
             </p>
-            <div className="table-wrap">
-              <table className="spend-table">
-                <thead>
-                  <tr>
-                    <th>Ticket</th>
-                    <th className="num">Runs</th>
-                    <th className="num">Input</th>
-                    <th className="num">Output</th>
-                    <th className="num">Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.byTicket.map((t) => (
-                    <tr key={`${t.repo}#${t.number}`}>
-                      <td>
-                        {t.url ? (
-                          <a href={t.url} target="_blank" rel="noreferrer">
-                            {t.repo}#{t.number}
-                          </a>
-                        ) : (
-                          `${t.repo}#${t.number}`
-                        )}
-                        {t.title && <span className="muted"> {t.title}</span>}
-                      </td>
-                      <td className="num">{t.runs}</td>
-                      <td className="num">{tokens(t.inputTokens)}</td>
-                      <td className="num">{tokens(t.outputTokens)}</td>
-                      <td className="num">{money(t.costUsd)}</td>
+            <input type="search" placeholder="Search tickets" aria-label="Search tickets" value={query} onChange={(e) => setQuery(e.target.value)} />
+            {shown.length === 0 ? (
+              <p className="small muted">No tickets match that search.</p>
+            ) : (
+              <div className="table-wrap">
+                <table className="spend-table">
+                  <thead>
+                    <tr>
+                      <th>Ticket</th>
+                      <th className="num">Runs</th>
+                      {TICKET_COLUMNS.map((c) => (
+                        <th key={c.key} className="num" aria-sort={sort.key === c.key ? (sort.desc ? 'descending' : 'ascending') : undefined}>
+                          <button type="button" className="sort" onClick={() => setSort(nextSort(sort, c.key))}>
+                            {c.label}
+                            {sort.key === c.key && <span aria-hidden="true">{sort.desc ? ' ↓' : ' ↑'}</span>}
+                          </button>
+                        </th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {shown.map((t) => (
+                      <tr key={`${t.repo}#${t.number}`}>
+                        <td>
+                          {t.url ? (
+                            <a href={t.url} target="_blank" rel="noreferrer">
+                              {t.repo}#{t.number}
+                            </a>
+                          ) : (
+                            `${t.repo}#${t.number}`
+                          )}
+                          {t.title && <span className="muted"> {t.title}</span>}
+                        </td>
+                        <td className="num">{t.runs}</td>
+                        <td className="num">{tokens(t.inputTokens)}</td>
+                        <td className="num">{tokens(t.outputTokens)}</td>
+                        <td className="num">{money(t.costUsd)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {matching.length > shown.length && (
+              <p className="small muted">
+                {shown.length} of {matching.length} {query.trim() ? 'matching tickets' : 'tickets'}.
+              </p>
+            )}
           </>
         )}
       </div>
@@ -377,13 +404,21 @@ function SubscriptionUsage({ allowance, now }: { allowance: AllowanceHistory[]; 
   return (
     <Panel title="Subscription usage">
       <div className="panel-body stack">
-        <p className="small muted">5-hour and weekly usage over the last 7 days, as Workshop read it. Gaps are times nothing was read. Dashed lines are your limits.</p>
+        <p className="small muted">5-hour and weekly usage over the last 7 days, as Workshop read it. Gaps are times nothing was read. Dashed lines are your limits and, with the weekly burndown on, where it stands now.</p>
         {allowance.map((a) => {
           const five = a.samples.flatMap((s): [number, number][] => (s.fiveHour === null ? [] : [[s.ts, s.fiveHour]]));
           const week = a.samples.flatMap((s): [number, number][] => (s.sevenDay === null ? [] : [[s.ts, s.sevenDay]]));
+          const b = a.burndown;
+          const line = b.enabled ? a.samples.flatMap((s): [number, number][] => (s.ceiling === null || s.burndown === false ? [] : [[s.ts, s.ceiling]])) : [];
           const series = [
             { name: '5-hour', color: SERIES_COLORS[0], points: five },
             { name: 'Weekly', color: SERIES_COLORS[1], points: week },
+            ...(b.enabled ? [{ name: 'Burndown (dotted)', color: SERIES_COLORS[3], points: line, dotted: true }] : []),
+          ];
+          const marks = [
+            { label: `5-hour limit ${a.limits.fiveHour}%`, value: a.limits.fiveHour },
+            { label: `Weekly limit ${a.limits.weekly}%`, value: a.limits.weekly },
+            ...(b.enabled && b.ceiling !== null ? [{ label: `Burndown ceiling ${Math.round(b.ceiling)}%`, value: b.ceiling }] : []),
           ];
           return (
             <div key={a.connectionId} className="stack" style={{ gap: 8 }}>
@@ -397,13 +432,43 @@ function SubscriptionUsage({ allowance, now }: { allowance: AllowanceHistory[]; 
                     start={now - SEVEN_DAYS}
                     end={now}
                     series={series}
-                    marks={[
-                      { label: `5-hour limit ${a.limits.fiveHour}%`, value: a.limits.fiveHour },
-                      { label: `Weekly limit ${a.limits.weekly}%`, value: a.limits.weekly },
-                    ]}
-                    label={`${a.connectionName}: 5-hour and weekly usage over the last 7 days, with limits at ${a.limits.fiveHour}% and ${a.limits.weekly}%.`}
+                    marks={marks}
+                    label={`${a.connectionName}: 5-hour and weekly usage over the last 7 days, with limits at ${a.limits.fiveHour}% and ${a.limits.weekly}%${b.enabled ? ', and the weekly burndown' : ''}.`}
                   />
                 </>
+              )}
+              <p className="small muted">
+                {b.enabled ? '' : 'The weekly burndown is off (Settings). '}
+                {burndownSummary(b)}
+              </p>
+              {a.weeks.length > 0 && (
+                <div className="table-wrap">
+                  <table className="spend-table">
+                    <thead>
+                      <tr>
+                        <th>Week reset</th>
+                        <th>Burndown</th>
+                        <th className="num">Ended at</th>
+                        <th className="num">Held back</th>
+                        <th className="num">Margin</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {a.weeks.map((w) => (
+                        <tr key={w.resetsAt}>
+                          <td>{when(w.resetsAt, now)}</td>
+                          <td>{w.enabled ? 'On' : 'Off'}</td>
+                          <td className="num">
+                            {w.finalPct === null ? '–' : `${Math.round(w.finalPct)}%`}
+                            {w.blocked ? ', limit reported' : ''}
+                          </td>
+                          <td className="num">{`${Math.round(w.heldHours)} h`}</td>
+                          <td className="num">{w.marginAfter === w.marginBefore ? `${w.marginAfter}` : `${w.marginBefore} → ${w.marginAfter}`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           );

@@ -1,4 +1,4 @@
-import type { AgentName, Size } from '../api-types.ts';
+import type { AgentName, ReworkOn, Size } from '../api-types.ts';
 import { joinRefs } from '../scheduler/gates.ts';
 import { addNeeds, applyEdits, label, labelDiff, moveTo, parseLabels, setSize, stageAfterClassify, stageAfterDesign, STAGE_OF_AGENT, type TicketState } from './labels.ts';
 import type { AgentResult, ClassifierResult, Finding, Noticed, Part, Rescue, ReviewResult, Rework, WorkResult } from './schemas.ts';
@@ -41,8 +41,10 @@ export interface Plan {
   rework?: Rework | null;
   /** Markdown for the pull request body or update comment: the code review's findings. */
   reviewNotes?: string;
-  /** Put `reviewNotes` first: severe problems remain. */
+  /** Put `reviewNotes` first: problems the rework should have fixed remain. */
   flagged?: boolean;
+  /** Write the code review findings to open as tickets once the work is pushed to the default branch; null clears them. */
+  followUps?: Finding[] | null;
 }
 
 export interface PlanContext {
@@ -66,11 +68,15 @@ export interface PlanContext {
   pushToDefault?: boolean;
   /** The ticket already has a pull request (opened before the setting was turned on): it keeps using it. */
   hasPr?: boolean;
+  /** The lowest code review severity that sends the ticket back. Undefined is severe. */
+  reworkOn?: ReworkOn;
+  /** The repository lets Workshop open tickets for what agents find. Undefined is off. */
+  raiseTickets?: boolean;
 }
 
 const NEXT_TEXT = { implement: 'implementation', design: 'design', 'design-review': 'design review' } as const;
 
-/** Backstop on automatic send-backs per review round, in case every review finds a new severe problem. */
+/** Backstop on automatic send-backs per review round, in case every review finds a new problem. */
 export const MAX_REWORKS = 3;
 /** At most this many findings go into a comment or pull request: GitHub rejects bodies over 65,536 characters. */
 export const MAX_FINDINGS_SHOWN = 30;
@@ -80,15 +86,22 @@ const MAX_FINDING_TEXT = 1000;
 const MAX_TITLE = 200;
 const MAX_SUMMARY = 4000;
 
-/** Where severe findings send a ticket: design when the design is at fault and the ticket has one, else implementation. */
-export function stageForRework(size: Size | null, findings: Finding[]): 'design' | 'implement' | null {
-  const severe = findings.filter((f) => f.severity === 'severe');
-  if (!severe.length) return null;
-  const designed = size === 'm' || size === 'l' || size === 'xl';
-  return designed && severe.some((f) => f.cause === 'design') ? 'design' : 'implement';
-}
-
 const SEVERITY_ORDER: Finding['severity'][] = ['severe', 'moderate', 'minor'];
+
+/** Whether a finding is at or above the repository's rework threshold. */
+export const qualifies = (f: Finding, on: ReworkOn) => SEVERITY_ORDER.indexOf(f.severity) <= SEVERITY_ORDER.indexOf(on);
+
+/** A severe or moderate finding that doesn't say what goes wrong counts as minor, so it can't send a ticket back or raise one. */
+export const effectiveFindings = (findings: Finding[]): Finding[] =>
+  findings.map((f) => (f.severity !== 'minor' && !f.consequence?.trim() ? { ...f, severity: 'minor' } : f));
+
+/** Where qualifying findings send a ticket: design when the design is at fault and the ticket has one, else implementation. */
+export function stageForRework(size: Size | null, findings: Finding[], on: ReworkOn = 'severe'): 'design' | 'implement' | null {
+  const qualifying = findings.filter((f) => qualifies(f, on));
+  if (!qualifying.length) return null;
+  const designed = size === 'm' || size === 'l' || size === 'xl';
+  return designed && qualifying.some((f) => f.cause === 'design') ? 'design' : 'implement';
+}
 const SEVERITY_TEXT = { severe: 'Severe', moderate: 'Moderate', minor: 'Minor' } as const;
 
 const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
@@ -115,21 +128,32 @@ export function formatFindings(findings: Finding[]): string {
   return lines.join('\n');
 }
 
-export const EXHAUSTED_TEXT = "**The code review still found severe problems after Workshop's rework. Read them before approving.**";
+export const exhaustedText = (on: ReworkOn = 'severe') =>
+  `**The code review still found ${on === 'severe' ? 'severe ' : ''}problems after Workshop's rework. Read them before approving.**`;
 
 /** The Code review section of a pull request. */
-export function reviewSection(r: ReviewResult, exhausted: boolean): string {
+export function reviewSection(r: ReviewResult, exhausted: boolean, on: ReworkOn = 'severe'): string {
   const findings = r.findings ?? [];
   return [
     '### Code review',
-    exhausted ? EXHAUSTED_TEXT : '',
+    exhausted ? exhaustedText(on) : '',
     cut(r.summary.trim(), MAX_SUMMARY),
     findings.length ? formatFindings(findings) : 'No problems found.',
     r.tests ? `**Reviewer ran:** ${r.tests}` : '',
   ].filter(Boolean).join('\n\n');
 }
 
-const problems = (n: number) => `${n} severe problem${n === 1 ? '' : 's'}`;
+const problems = (n: number, on: ReworkOn) => `${n} ${on === 'severe' ? 'severe ' : ''}problem${n === 1 ? '' : 's'}`;
+
+/** The body of a follow-up ticket for a finding left on the default branch. */
+export function followUpBody(f: Finding, ticket: { number: number }, commit: { sha: string; url: string }, base: string): string {
+  const where = f.file ? `**Where:** \`${f.file.replace(/`/g, '')}${f.line ? `:${f.line}` : ''}\`` : '';
+  return [
+    f.detail.trim(),
+    [f.consequence?.trim() ? `**What goes wrong:** ${f.consequence.trim()}` : '', where, `**Checked:** ${f.evidence.trim()}`, `**Fix:** ${f.fix.trim()}`].filter(Boolean).join('\n'),
+    `---\n_Workshop's Code reviewer found this in the work for #${ticket.number}, which was pushed to \`${base}\` as [\`${commit.sha.slice(0, 7)}\`](${commit.url}) without fixing it._`,
+  ].join('\n\n');
+}
 
 function questionsComment(ctx: PlanContext, questions: string[] = []) {
   const list = questions.map((q, i) => `${i + 1}. ${q}`).join('\n');
@@ -167,24 +191,31 @@ export function planTransition(ctx: PlanContext, result: AgentResult): Plan {
   }
 }
 
-/** Severe findings go back to design or implementation until a rework fails to fix one (or MAX_REWORKS); everything else goes into the pull request. */
+/**
+ * Findings at or above the repository's threshold go back to design or implementation until a rework fails to fix
+ * one (or MAX_REWORKS); everything else goes into the pull request, or, when pushing to the default branch, into
+ * the comment, with the qualifying ones kept to open as follow-up tickets.
+ */
 function planReview(ctx: PlanContext, r: ReviewResult): Plan {
-  const findings = r.findings ?? [];
-  const target = stageForRework(ctx.state.size, findings);
+  const on = ctx.reworkOn ?? 'severe';
+  const findings = effectiveFindings(r.findings ?? []);
+  const review = { ...r, findings };
+  const target = stageForRework(ctx.state.size, findings, on);
   // A send-back whose publish failed (say, GitHub errored after the rework was stored) left no new handoff: don't count it.
   const pending = ctx.rework?.handoffRunId !== undefined && ctx.rework.handoffRunId === ctx.handoffRunId;
   const count = (ctx.rework?.count ?? 0) - (pending ? 1 : 0);
-  const severe = findings.filter((f) => f.severity === 'severe');
-  // A new severe problem gets another rework; one the last rework didn't fix needs you.
-  const unfixed = count > 0 && severe.some((f) => f.repeat);
+  const qualifying = findings.filter((f) => qualifies(f, on));
+  // A new problem gets another rework; one the last rework didn't fix needs you.
+  const unfixed = count > 0 && qualifying.some((f) => f.repeat);
   if (target && !unfixed && count < MAX_REWORKS) {
     const where = NEXT_TEXT[target];
     return {
       ...moveTo(ctx.labels, target),
-      rework: { count: count + 1, findings: severe, handoffRunId: ctx.handoffRunId },
+      rework: { count: count + 1, findings: qualifying, handoffRunId: ctx.handoffRunId },
+      followUps: null,
       comment: [
-        `Code review found ${problems(severe.length)}, so Workshop sends this ticket back to ${where} (rework ${count + 1} of ${MAX_REWORKS}):`,
-        formatFindings(severe),
+        `Code review found ${problems(qualifying.length, on)}, so Workshop sends this ticket back to ${where} (rework ${count + 1} of ${MAX_REWORKS}):`,
+        formatFindings(qualifying),
         cut(r.summary.trim(), MAX_SUMMARY),
         `Next: ${where}.`,
       ].filter(Boolean).join('\n\n'),
@@ -193,15 +224,20 @@ function planReview(ctx: PlanContext, r: ReviewResult): Plan {
   const exhausted = target !== null;
   if (ctx.pushToDefault && !ctx.hasPr) {
     const move = moveTo(ctx.labels, 'merge');
-    const notes = reviewSection(r, exhausted);
-    if (!exhausted) return { ...move, rework: null, noPr: true, merge: true, comment: `${notes}\n\nNext: Workshop pushes this to the default branch.` };
-    // Nothing else stops a push, so severe problems that remain wait for you.
+    // Nothing else stops a push, so severe problems that remain wait for you. Anything less is pushed and followed up.
+    const hold = exhausted && findings.some((f) => f.severity === 'severe');
+    const notes = reviewSection(review, hold, on);
+    const followUps = qualifying.length ? qualifying : null;
+    const raising = followUps !== null && ctx.raiseTickets === true && !ctx.labels.includes(label.raised);
+    const promise = raising ? '\n\nWorkshop opens a follow-up ticket for each problem at or above the rework threshold once this is pushed.' : '';
+    if (!hold) return { ...move, rework: null, noPr: true, merge: true, followUps, comment: `${notes}${promise}\n\nNext: Workshop pushes this to the default branch.` };
     return {
       ...move,
       add: [...move.add, label.needsInfo],
       rework: null,
       noPr: true,
-      comment: `@${ctx.author} The code review still found severe problems after Workshop's rework, so it won't push this to the default branch without you.\n\n${notes}\n\nRemove the \`${label.needsInfo}\` label to push it as it is, or say what to change in a comment and move the ticket back to implementation.`,
+      followUps,
+      comment: `@${ctx.author} The code review still found severe problems after Workshop's rework, so it won't push this to the default branch without you.\n\n${notes}${promise}\n\nRemove the \`${label.needsInfo}\` label to push it as it is, or say what to change in a comment and move the ticket back to implementation.`,
     };
   }
   const hold = exhausted && ctx.mergeWithoutReview;
@@ -211,11 +247,12 @@ function planReview(ctx: PlanContext, r: ReviewResult): Plan {
     add: hold ? [...move.add, label.needsInfo] : move.add,
     openPr: true,
     rework: null,
-    reviewNotes: reviewSection(r, exhausted),
+    followUps: null,
+    reviewNotes: reviewSection(review, exhausted, on),
     ...(exhausted ? { flagged: true } : {}),
     ...(hold
       ? {
-          comment: `@${ctx.author} The code review still found severe problems after Workshop's rework, so it won't merge this pull request without you. Read the Code review section on the pull request, then request changes, or remove the \`${label.needsInfo}\` label to let it merge.`,
+          comment: `@${ctx.author} The code review still found ${on === 'severe' ? 'severe ' : ''}problems after Workshop's rework, so it won't merge this pull request without you. Read the Code review section on the pull request, then request changes, or remove the \`${label.needsInfo}\` label to let it merge.`,
         }
       : {}),
   };

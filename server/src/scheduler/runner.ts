@@ -3,6 +3,7 @@ import type { AgentName, AgentSize, Billing } from '../api-types.ts';
 import { getAgent, promptFor, type AgentRow } from '../agents.ts';
 import { clearAlert, raiseAlert } from '../alerts.ts';
 import { allowanceOf, DEFAULT_LIMITS, recordLimit, recordProbe } from '../allowance.ts';
+import { burndownLine } from '../burndown.ts';
 import { config } from '../config.ts';
 import { all, run } from '../db.ts';
 import { publish } from '../events.ts';
@@ -14,7 +15,7 @@ import type { ContainerState, CreatedTicket, Environment, StepSpec } from '../pr
 import { collectAgentMedia, deleteMedia, fetchTicketImages, listMedia, mediaFiles, warn, type IssueImage } from '../media.ts';
 import { ACTIVE_STATUSES, activity, appendLog, getRun, linesFrom, readLog, type RunRow } from '../runs.ts';
 import { getSettings } from '../settings.ts';
-import { recordSpend } from '../spend.ts';
+import { estimateCost, recordSpend } from '../spend.ts';
 import {
   addLinks,
   branchOf,
@@ -46,12 +47,15 @@ import {
 import { imageFor, label, moveTo, parseLabels, REPO_IMAGE_DIR, repoImageTag } from '../workflow/labels.ts';
 import { MAX_TICKET, replaceImageLinks, screenshotsLine } from '../workflow/media.ts';
 import { AGENT_INFO, capabilitiesOf, ENVIRONMENT_LABEL, environmentText, INDEX_BODY, INDEX_PATH, protocolText, publishes, taskPrompt } from '../workflow/prompts.ts';
-import { BLOCKING_AGENTS, isLarge, MAX_NOTICED, MAX_SPLIT_DEPTH, parseResult, schemaFor, type AgentResult, type Handoff, type Noticed, type Part, type Rescue, type SplitRule, type WorkResult } from '../workflow/schemas.ts';
-import { bestMatch, type Similarity } from '../workflow/similar.ts';
+import { BLOCKING_AGENTS, isLarge, MAX_NOTICED, MAX_SPLIT_DEPTH, parseResult, schemaFor, type AgentResult, type FollowUps, type Handoff, type Noticed, type Part, type Rescue, type SplitRule, type WorkResult } from '../workflow/schemas.ts';
+import { bestMatch } from '../workflow/similar.ts';
 import { planTransition, type Plan } from '../workflow/transitions.ts';
 import { check } from '../http/util.ts';
 import { ALLOWANCE_MAX_AGE_MS, formatTime, isRateLimited, isTransient, joinRefs, PUBLISH_GIVE_UP_MS, publishRetryMinutes, thresholdBlock } from './gates.ts';
 import { advanceMerge } from './merge.ts';
+import { checkRaiseRate, MAX_RAISED_BODY, MAX_RAISED_TITLE, sameTitle, score, storeCreated } from './raise.ts';
+
+export { checkRaiseRate };
 
 // A run moves starting (prepare) → running (claude) → publishing (push + ticket updates) → succeeded.
 // Each step is a container on the run's volume. Status, step and container id are persisted, so after
@@ -299,7 +303,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
     const openTickets = r.agent === 'classifier' ? open : undefined;
     const imageLabels: Record<string, string> = await ctx.env.imageLabels(ctx.image).catch(() => ({}));
     const environment = environmentText(capabilitiesOf(imageLabels), imageLabels[ENVIRONMENT_LABEL]);
-    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch, publishes: publishes(r.agent), noticed: mayRaise(ctx.repo, t, r.agent), blockers: blockers && BLOCKING_AGENTS.includes(r.agent) })}\n\n${environment}`;
+    files['.workshop/system.md'] = `${promptFor(agent)}\n\n${protocolText({ branch, base: ctx.repo.default_branch, publishes: publishes(r.agent), noticed: mayRaise(ctx.repo, t, r.agent), blockers: blockers && BLOCKING_AGENTS.includes(r.agent), review: r.agent === 'code-review' ? ctx.repo.rework_on : undefined })}\n\n${environment}`;
     files['.workshop/prompt.md'] = taskPrompt({
       agent: r.agent,
       mode: r.mode,
@@ -318,6 +322,7 @@ async function runSpec(ctx: Ctx, agent: AgentRow) {
       media: stored.map((m) => ({ name: m.name, source: m.source, runId: m.run_id, caption: m.caption })),
       rescue: r.agent === 'merge' && parseLabels(labels).stage === 'reconcile' && rescue ? { branch: rescue.branch, agent: rescue.agent, summary: rescue.result.summary } : undefined,
       rework: reworkOf(t) ?? undefined,
+      reworkOn: ctx.repo.rework_on,
       split: r.agent === 'classifier' ? splitRule(t, r.mode) : undefined,
     });
     Object.assign(files, mediaFiles(t.id));
@@ -403,9 +408,11 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
     const now = Date.now();
     const stored = r.model_connection_id ? allowanceOf(r.model_connection_id) : null;
     const limits = stored?.limits ?? DEFAULT_LIMITS;
-    const own = claude.usage ? thresholdBlock(claude.usage, limits, s, now) : null;
+    // Running agents get a few points over the burndown, so they don't pause and resume each time the line moves.
+    const line = burndownLine(stored?.burndown, true);
+    const own = claude.usage ? thresholdBlock(claude.usage, limits, s, now, line) : null;
     if (own || !stored) return own;
-    return stored.sampledAt && now - stored.sampledAt <= ALLOWANCE_MAX_AGE_MS ? thresholdBlock(stored, limits, s, now) : null;
+    return stored.sampledAt && now - stored.sampledAt <= ALLOWANCE_MAX_AGE_MS ? thresholdBlock(stored, limits, s, now, line) : null;
   };
   // Why the agent should stop at the next turn boundary, if it should. A pause you asked for wins, then a
   // paused subscription (the tick moves the run to another one).
@@ -490,15 +497,16 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
       } else if (claude.activity && claude.activity !== before) {
         activity.set(r.id, claude.activity);
         // Throttled, but never drop the latest change: a trailing publish catches up once the window ends.
+        // Only the activity text changed, so only the views that show it refetch.
         const wait = lastPublished + 3000 - Date.now();
         if (wait <= 0) {
           lastPublished = Date.now();
-          publish('runs');
+          publish('activity');
         } else if (!trailing) {
           trailing = setTimeout(() => {
             trailing = undefined;
             lastPublished = Date.now();
-            publish('runs');
+            publish('activity');
           }, wait);
         }
       }
@@ -529,16 +537,17 @@ async function runAgent(ctx: Ctx): Promise<boolean> {
   clearTimeout(trailing);
   activity.delete(r.id);
   publish('runs');
-  if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
   const res = claude.result;
-  setRun(r.id, { exit_code: state.exitCode });
+  // A session that was killed or paused prints no result, so its usage comes from the responses counted on the way.
   if (res) recordSpend(r, res);
+  else if (claude.spent?.responses) recordSpend(r, { ...claude.spent, costUsd: estimateCost(r.model, claude.spent.inputTokens + claude.spent.outputTokens) });
+  if (getRun(r.id)!.status !== 'running') return false; // stopped while it ran
+  setRun(r.id, { exit_code: state.exitCode });
 
   if (claude.limit && r.model_connection_id) recordLimit(r.model_connection_id, claude.limit.resetsAt ?? Date.now() + 3600_000);
   if (pausedFor && res?.structured === undefined) {
-    // Killed between turns, so the session resumes cleanly. A killed segment prints no result, so its
-    // tokens and cost don't reach the spend ledger: acceptable for subscription runs, an undercount for
-    // API runs you pause by hand (see docs/workshop/80-feature-manual-pause.md).
+    // Killed between turns, so the session resumes cleanly. A killed segment prints no result; its usage was
+    // recorded above from the responses counted on the way (output and cost as estimates).
     setRun(r.id, { status: 'paused', step: 'run', container_id: null, resets_at: pausedFor.resetsAt, pause_reason: pausedFor.kind, pause_requested_at: null });
     await markRunning(ctx.ticket, false);
     return false;
@@ -650,36 +659,6 @@ const mayRaiseBlockers = (repo: RepoRow, t: TicketRow, agent: AgentName) =>
   Boolean(repo.raise_tickets) && (agent === 'classifier' || BLOCKING_AGENTS.includes(agent)) && !labelsOf(t).includes(label.raised);
 
 /**
- * Stores a ticket Workshop just opened from what the reply already holds, so other runs see it, in the open-ticket
- * index and as a similarity candidate, before the next sync. No extra request; the sync later updates it as usual.
- * Left to the sync if it already has it, and skipped, as the sync would, if Workshop isn't an allowed author.
- */
-function storeCreated(repo: RepoRow, made: CreatedTicket, t: { title: string; body: string; labels: string[] }) {
-  const author = made.author ?? sourceFor(repo).selfLogin();
-  if (!isAllowedAuthor(author)) return;
-  const now = new Date().toISOString();
-  run(
-    `INSERT INTO tickets (repo_id, number, node_id, title, body, url, author, state, labels, updated_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?) ON CONFLICT (repo_id, number) DO NOTHING`,
-    repo.id,
-    made.number,
-    made.nodeId ?? null,
-    t.title,
-    t.body,
-    made.url,
-    author,
-    JSON.stringify(t.labels),
-    made.updatedAt ?? now,
-    made.createdAt ?? now,
-  );
-  publish('tickets');
-}
-
-const sameTitle = (a: string, b: string) => a.trim().replace(/\s+/g, ' ').toLowerCase() === b.trim().replace(/\s+/g, ' ').toLowerCase();
-const MAX_RAISED_TITLE = 200;
-const MAX_RAISED_BODY = 20_000;
-
-/**
  * Opens a ticket for each thing the agent noticed outside its ticket, and returns the ones this run opened.
  * Each is recorded as soon as it exists, so a publish retried after a GitHub failure doesn't open it twice; one
  * whose title an open ticket (or an earlier run on this ticket) already has is left out.
@@ -712,8 +691,6 @@ interface Prerequisite {
   /** Linked because it is similar to this proposed title, rather than the same. */
   instead?: string;
 }
-
-const score = (s: Similarity) => `title ${s.title.toFixed(2)} with ${s.shared} shared keyword${s.shared === 1 ? '' : 's'}, text ${s.text.toFixed(2)}`;
 
 /**
  * Opens (or finds) a ticket for each prerequisite the agent says its ticket waits for. A prerequisite this ticket
@@ -776,27 +753,6 @@ const blockersLine = (made: Prerequisite[]) =>
         .join('\n')}`
     : '';
 
-/**
- * Raises a `raise-rate` alert while agents have opened more tickets in the repository in the last hour than the
- * `raiseAlertPerHour` setting allows, and clears it otherwise. It only reports: agents may still open tickets.
- */
-export function checkRaiseRate(repo: RepoRow) {
-  const since = Date.now() - 3600_000;
-  const count = all<{ raised: string }>('SELECT raised FROM tickets WHERE repo_id = ? AND raised IS NOT NULL', repo.id)
-    .flatMap((row) => JSON.parse(row.raised) as Raised[])
-    .filter((x) => (x.at ?? 0) >= since).length;
-  const limit = getSettings().raiseAlertPerHour;
-  const ref = `repo:${repo.id}`;
-  if (count > limit) {
-    raiseAlert(
-      'warning',
-      'raise-rate',
-      `Agents opened ${count} tickets in ${repo.full_name} in the last hour, more than the limit of ${limit}. Check that they aren't duplicates, or turn off "Agents open tickets for what they notice" for this repository.`,
-      ref,
-    );
-  } else clearAlert('raise-rate', ref);
-}
-
 const raisedLine = (raised: Raised[]) =>
   raised.length ? `Noticed outside this ticket, and opened as ${raised.length === 1 ? 'its own ticket' : 'their own tickets'}:\n${raised.map((x) => `- #${x.number} ${x.title}`).join('\n')}` : '';
 
@@ -857,6 +813,8 @@ async function publishRun(ctx: Ctx) {
         mergeWithoutReview: Boolean(ctx.repo.merge_without_review),
         pushToDefault: Boolean(ctx.repo.push_to_default),
         hasPr: t.pr_number !== null,
+        reworkOn: ctx.repo.rework_on,
+        raiseTickets: Boolean(ctx.repo.raise_tickets),
       },
       result,
     );
@@ -1009,6 +967,11 @@ async function publishRun(ctx: Ctx) {
   // partial failure sends the ticket back again (planReview doesn't count a rework with no new handoff), and
   // an exhausted one opens the pull request rather than sending it back.
   if (plan.rework) run('UPDATE tickets SET rework = ? WHERE id = ?', JSON.stringify(plan.rework), t.id);
+  // Raised once the work is pushed to the default branch, when the commit they name exists. A newer review replaces them.
+  if (plan.followUps !== undefined) {
+    const followUps: FollowUps | null = plan.followUps?.length ? { runId: r.id, findings: plan.followUps } : null;
+    run('UPDATE tickets SET follow_ups = ? WHERE id = ?', followUps && JSON.stringify(followUps), t.id);
+  }
   if (plan.deleteBranch) await vcs.deleteBranch(repo, plan.deleteBranch).catch((err) => warn(r.id, `Workshop couldn't delete ${plan.deleteBranch}: ${(err as Error).message}`));
   if (plan.clearRescue) run('UPDATE tickets SET rescue = NULL WHERE id = ?', t.id);
   const raised = await raiseNoticed(ctx, t, result);

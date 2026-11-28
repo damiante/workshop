@@ -147,3 +147,8 @@ export function retryable(e: unknown): boolean {
 export function retryDelay(attempt: number): number {
   return Math.min(2000 * 2 ** attempt, MAX_BACKOFF_MS);
 }
+
+/** Calls the listeners that subscribed to `topic`, and only those. */
+export function dispatch(listeners: Iterable<{ topics: Set<string>; fn: () => void }>, topic: string) {
+  for (const l of listeners) if (l.topics.has(topic)) l.fn();
+}

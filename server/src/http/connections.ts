@@ -339,7 +339,7 @@ async function checkMergeRules(repo: RepoRow): Promise<{ error: string } | { war
 connectionsRouter.put('/repos/:id', async (req, res) => {
   const repo = one<RepoRow>('SELECT * FROM repos WHERE id = ?', Number(req.params.id));
   check(repo, 'Repository not found.', 404);
-  const { enabled, image, priority, selection, mergeWithoutReview, raiseTickets, pushToDefault } = req.body ?? {};
+  const { enabled, image, priority, selection, mergeWithoutReview, raiseTickets, pushToDefault, reworkOn } = req.body ?? {};
   // Check every field before writing any, so a rejected one doesn't leave the others half saved.
   if (selection !== undefined) check(selection === 'all' || selection === 'nominated', 'Choose "all" or "nominated".');
   if (image !== undefined) check(image === null || image === '' || (typeof image === 'string' && /^[\w.\-/:@]+$/.test(image)), 'The image must be a Docker image reference.');
@@ -347,6 +347,7 @@ connectionsRouter.put('/repos/:id', async (req, res) => {
   if (mergeWithoutReview !== undefined) check(typeof mergeWithoutReview === 'boolean', 'Say whether to merge without review.');
   if (raiseTickets !== undefined) check(typeof raiseTickets === 'boolean', 'Say whether agents may open tickets.');
   if (pushToDefault !== undefined) check(typeof pushToDefault === 'boolean', 'Say whether to push to the default branch.');
+  if (reworkOn !== undefined) check(['severe', 'moderate', 'minor'].includes(reworkOn), 'Choose severe, moderate or minor for "Send back for rework on".');
   let mergeWarning: string | null = null;
   if (mergeWithoutReview === true) {
     const verdict = await checkMergeRules(repo);
@@ -378,6 +379,7 @@ connectionsRouter.put('/repos/:id', async (req, res) => {
     run('UPDATE repos SET push_to_default = ? WHERE id = ?', Number(pushToDefault), repo.id);
     if (pushToDefault) syncSoon();
   }
+  if (reworkOn !== undefined) run('UPDATE repos SET rework_on = ? WHERE id = ?', reworkOn, repo.id);
   if (enabled === true) {
     const ticketConnection = repo.ticket_connection_id ?? listConnections('tickets').find((c) => Number(c.config.appConnectionId) === repo.vcs_connection_id)?.id;
     check(ticketConnection, 'Add a ticket source (GitHub Issues) under Connections first.');

@@ -80,9 +80,11 @@ export interface Finding {
   /** How the reviewer checked it. */
   evidence: string;
   fix: string;
+  /** The specific input or situation and what goes wrong. Severe and moderate findings without one count as minor. Older stored findings have none. */
+  consequence?: string;
   file?: string;
   line?: number;
-  /** A severe finding an earlier review this round sent the ticket back for, and it still holds. */
+  /** A finding an earlier review this round sent the ticket back for, and it still holds. */
   repeat?: boolean;
 }
 
@@ -92,12 +94,21 @@ export interface ReviewResult extends WorkResult {
 
 export type AgentResult = ClassifierResult | WorkResult | ReviewResult;
 
-/** `tickets.rework`: automatic reworks this review round, and the severe findings to fix. */
+/** `tickets.rework`: automatic reworks this review round, and the findings to fix. */
 export interface Rework {
   count: number;
   findings: Finding[];
   /** The handoff the review that sent it back saw. While it's still the current one, the rework hasn't happened. */
   handoffRunId?: string;
+}
+
+/** `tickets.follow_ups`: findings left after the code review, to open as tickets once the work is pushed to the default branch. */
+export interface FollowUps {
+  /** The Code reviewer's run that reported them. */
+  runId: string;
+  findings: Finding[];
+  /** The commit on the default branch, once pushed. */
+  commit?: { sha: string; url: string };
 }
 
 /** `tickets.handoff`: the Implementation result the pull request describes, kept until it opens. */
@@ -182,18 +193,19 @@ const REVIEW_SCHEMA = {
             type: 'string',
             enum: SEVERITIES,
             description:
-              "severe: verified, glaring: doesn't do what the ticket asks, breaks existing behaviour, loses data, opens a security hole, crashes on an ordinary path, fails the repository's tests or type-check, or follows a design that can't work. moderate: a real bug on an edge path, a missing test, or a clear deviation from the conventions or design. minor: style, naming, small simplifications, comments and docs. When in doubt, it isn't severe.",
+              "severe: verified, glaring: doesn't do what the ticket asks, breaks existing behaviour, loses data, opens a security hole, crashes on an ordinary path, fails the repository's tests or type-check, or follows a design that can't work. moderate: only a problem you verified (by reading the code path or running something) with a concrete consequence: a specific input or situation and what goes wrong (wrong output, a crash on an unusual path, data shown to the wrong person, changed behaviour with no test covering it). minor: everything else, including style, naming, refactors, \"could be cleaner\", speculative risks (\"might be a problem if…\"), missing tests for code that didn't change, and convention deviations with no behavioural effect. When in doubt, choose the lower severity.",
           },
           cause: { type: 'string', enum: CAUSES, description: "design when fixing it means changing the design document's approach; implementation when the code doesn't do what the design (or ticket) says." },
           title: { type: 'string', description: 'The problem in a few words.' },
           detail: { type: 'string', description: 'What is wrong and what goes wrong because of it.' },
           evidence: { type: 'string', description: 'How you checked it: the command you ran and what it printed, or the code you read. A few words are enough for minor findings.' },
           fix: { type: 'string', description: 'A concrete fix.' },
+          consequence: { type: 'string', description: 'The specific input or situation and what goes wrong. Required for severe and moderate; empty for minor. A severe or moderate finding without one counts as minor.' },
           file: { type: 'string', description: 'The file, relative to the repository root, when it applies.' },
           line: { type: 'integer', minimum: 1, description: 'The line in file, when it applies.' },
           repeat: { type: 'boolean', description: 'true only when an earlier code review sent the ticket back for this same problem (the findings listed above, or in Workshop\'s earlier send-back comments), and it still holds.' },
         },
-        required: ['severity', 'cause', 'title', 'detail', 'evidence', 'fix'],
+        required: ['severity', 'cause', 'title', 'detail', 'evidence', 'fix', 'consequence'],
         additionalProperties: false,
       },
     },
@@ -273,6 +285,7 @@ function isFinding(v: unknown): v is Finding {
     SEVERITIES.includes(f.severity as Finding['severity']) &&
     CAUSES.includes(f.cause as Finding['cause']) &&
     [f.title, f.detail, f.evidence, f.fix].every(isText) &&
+    (f.consequence === undefined || typeof f.consequence === 'string') &&
     (f.file === undefined || typeof f.file === 'string') &&
     (f.line === undefined || (Number.isInteger(f.line) && (f.line as number) > 0)) &&
     (f.repeat === undefined || typeof f.repeat === 'boolean')
@@ -332,7 +345,7 @@ export function parseResult(agent: AgentName, value: unknown, split: SplitRule =
     return 'blocked requires blocked_by (open ticket numbers) or raise_blockers (new prerequisite tickets).';
   }
   if (agent === 'code-review' && (v.outcome === 'done' || v.findings !== undefined) && !(Array.isArray(v.findings) && v.findings.every(isFinding))) {
-    return 'findings must be a list of { severity, cause, title, detail, evidence, fix }, with severity severe, moderate or minor and cause design or implementation.';
+    return 'findings must be a list of { severity, cause, title, detail, evidence, fix, consequence }, with severity severe, moderate or minor and cause design or implementation.';
   }
   return v as unknown as WorkResult;
 }

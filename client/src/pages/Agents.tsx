@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import type { AgentClassView, Billing, ModelOption } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
+import { DefaultChange } from '../components/DefaultChange.tsx';
 import { ErrorNote, Panel } from '../components/ui.tsx';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -30,6 +31,15 @@ function AgentForm({ agent, models }: { agent: AgentClassView; models: ModelOpti
       const { model, modelConnectionId, effort, billing, prompt, maxTurns, timeoutMin } = draft;
       await api(`/agents/${agent.name}`, { method: 'PUT', body: { model, modelConnectionId, effort, billing, prompt, maxTurns, timeoutMin } });
       setSaved(true);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const dismiss = async () => {
+    setError(null);
+    try {
+      await api(`/agents/${agent.name}/accept-default`, { method: 'POST' });
     } catch (err) {
       setError((err as Error).message);
     }
@@ -97,6 +107,7 @@ function AgentForm({ agent, models }: { agent: AgentClassView; models: ModelOpti
             <input type="number" min={5} max={1440} value={draft.timeoutMin} onChange={(e) => set({ timeoutMin: Number(e.target.value) })} />
           </label>
         </div>
+        {draft.prompt !== agent.defaultPrompt && <DefaultChange agent={agent} onDismiss={dismiss} onReset={() => set({ prompt: agent.defaultPrompt })} />}
         <label className="field">
           <span>Instructions</span>
           <textarea rows={12} value={draft.prompt} onChange={(e) => set({ prompt: e.target.value })} />

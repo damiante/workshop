@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { seedAgents } from './agents.ts';
+import { checkPromptDefaults, seedAgents } from './agents.ts';
 import { createApp } from './app.ts';
 import { config } from './config.ts';
 import { initCrypto, seal, unseal } from './crypto.ts';
@@ -23,6 +23,7 @@ else {
 }
 
 seedAgents();
+checkPromptDefaults();
 if (config.resetTotp) resetTotp();
 
 createApp().listen(config.port, () => {

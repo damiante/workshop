@@ -5,7 +5,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { seedAgents, updateAgent } from '../src/agents.ts';
 import { all, initDb, MIGRATIONS, one, run } from '../src/db.ts';
 import { initCrypto } from '../src/crypto.ts';
-import { createConnection } from '../src/providers/index.ts';
+import { createConnection, setBurndown, setLimits } from '../src/providers/index.ts';
 import { saveSettings } from '../src/settings.ts';
 import { backfillSpend, lifetimeSpend, usageHistory } from '../src/spend.ts';
 
@@ -256,12 +256,20 @@ describe('usageHistory', () => {
     sample(now, 'probe', 20, 50);
     const a = usageHistory('7d', 'UTC', now).allowance.find((x) => x.connectionId === conn)!;
     expect(a.samples).toEqual([
-      { ts: now - H, fiveHour: 10, sevenDay: 40 },
-      { ts: now, fiveHour: 20, sevenDay: 50 },
+      { ts: now - H, fiveHour: 10, sevenDay: 40, ceiling: null, burndown: null },
+      { ts: now, fiveHour: 20, sevenDay: 50, ceiling: null, burndown: null },
     ]);
     expect(a).toMatchObject({ connectionName: 'Claude-9', sampledAt: now, unknown: false, limits: { fiveHour: 70, weekly: 80 } });
     expect(a.fiveHour).toMatchObject({ pct: 20, ratePerHour: 10, limitAt: null, over: false });
     expect(a.sevenDay).toMatchObject({ pct: 50, limitAt: now + Math.round(50.4 * H) });
+    expect(a.weeks).toEqual([]);
+
+    // With the burndown on, the week projects against its target, not the moving line.
+    setLimits(conn, { fiveHour: 70, weekly: 100 });
+    setBurndown(conn, true);
+    const b = usageHistory('7d', 'UTC', now).allowance.find((x) => x.connectionId === conn)!;
+    expect(b.burndown).toMatchObject({ enabled: true, target: 97 });
+    expect(b.sevenDay).toMatchObject({ pct: 50, limitAt: now + Math.round(((97 - 50) / (50 / 84)) * H) });
   });
 });
 

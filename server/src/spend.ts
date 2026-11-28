@@ -1,5 +1,6 @@
 import { getAgent } from './agents.ts';
-import { allowanceSamples, allowanceViews, apiSpendSince } from './allowance.ts';
+import { allowanceSamples, allowanceViews, apiSpendSince, burndownWeeks } from './allowance.ts';
+import { weeklyTarget } from './burndown.ts';
 import type { AgentName, AllowanceHistory, BacklogPool, BacklogProjection, BurnRate, LifetimeSpend, SpendSeries, SpendTotals, Stage, TicketSpend, UsageHistory, UsageRange } from './api-types.ts';
 import { all, one, run } from './db.ts';
 import {
@@ -23,6 +24,19 @@ import { getRepo, isAllowedAuthor, labelsOf, openTicketsSql, ticketInScope, type
 import { parseLabels } from './workflow/labels.ts';
 
 /** Adds one `claude` invocation's result to the ledger and to the run's own totals (a resumed run sums its invocations). */
+/**
+ * What tokens would have cost, for a session that ended without reporting its cost: the model's own average price per
+ * token over what's already in the ledger (cached and fresh input are priced differently, and runs mix them alike).
+ * Zero when the model has no history yet.
+ */
+export function estimateCost(model: string, tokens: number): number {
+  const rate = one<{ rate: number | null }>(
+    'SELECT SUM(cost_usd) / SUM(input_tokens + output_tokens) AS rate FROM (SELECT cost_usd, input_tokens, output_tokens FROM spend WHERE model = ? AND cost_usd > 0 AND input_tokens + output_tokens > 0 ORDER BY ts DESC LIMIT 50)',
+    model,
+  )?.rate;
+  return rate ? tokens * rate : 0;
+}
+
 export function recordSpend(r: RunRow, res: { inputTokens?: number; outputTokens?: number; costUsd?: number }) {
   const input = res.inputTokens ?? 0;
   const output = res.outputTokens ?? 0;
@@ -132,8 +146,8 @@ const DAY = 86400_000;
 const HOUR = 3600_000;
 const RANGE_DAYS: Record<Exclude<UsageRange, '24h' | 'all'>, number> = { '7d': 7, '30d': 30, '90d': 90 };
 export const USAGE_RANGES: UsageRange[] = ['24h', '7d', '30d', '90d', 'all'];
-/** How many tickets the Usage page's cost per ticket lists. */
-const TICKET_ROWS = 50;
+/** How many tickets the Usage page's cost per ticket can search and sort; it shows the top 10. */
+const TICKET_ROWS = 500;
 
 /** 'YYYY-MM-DD' a number of calendar days before `key`; calendar arithmetic, so DST can't skip or repeat a day. */
 const dayBefore = (key: string, days: number) => {
@@ -273,12 +287,15 @@ export function usageHistory(range: UsageRange, timeZone: string, now = Date.now
     connectionId: v.connectionId,
     connectionName: v.connectionName,
     limits: v.limits,
+    burndown: v.burndown,
+    weeks: burndownWeeks(v.connectionId),
     samples: allowanceSamples(v.connectionId, now - SEVEN_DAYS),
     sampledAt: v.sampledAt,
     blockedUntil: v.blockedUntil,
     unknown: v.unknown,
     fiveHour: windowProjection(v.fiveHour, FIVE_HOURS, v.limits.fiveHour, v.sampledAt, now),
-    sevenDay: windowProjection(v.sevenDay, SEVEN_DAYS, v.limits.weekly, v.sampledAt, now),
+    // Against the burndown's target, not its moving line: "reaches your 54% limit" means nothing when the line keeps rising.
+    sevenDay: windowProjection(v.sevenDay, SEVEN_DAYS, weeklyTarget(v.limits.weekly, v.burndown), v.sampledAt, now),
     burn: burn(
       recent.filter((r) => r.connection_id === v.connectionId && r.billing !== 'api'),
       one<{ ts: number | null }>("SELECT MIN(ts) AS ts FROM spend WHERE connection_id = ? AND billing != 'api'", v.connectionId)?.ts ?? now,
@@ -378,7 +395,7 @@ function backlog(
         else unsized.push(`${a.connectionName} ${label}`);
       };
       sized(a.fiveHour, a.limits.fiveHour, 'five-hour', FIVE_HOURS, '5-hour');
-      sized(a.sevenDay, a.limits.weekly, 'weekly', SEVEN_DAYS, 'weekly');
+      sized(a.sevenDay, weeklyTarget(a.limits.weekly, a.burndown), 'weekly', SEVEN_DAYS, 'weekly'); // the burndown reaches its target at each reset
     }
     if (a.blockedUntil) windows.push({ kind: 'limit', left: 0, perWindow: Infinity, resetsAt: a.blockedUntil, length: Infinity });
     accounts.push(windows);

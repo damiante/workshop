@@ -17,16 +17,17 @@ vi.mock('../src/providers/index.ts', async (importOriginal) => ({
 }));
 
 const { seedAgents, updateAgent } = await import('../src/agents.ts');
-const { allowanceOf, recordLimit, recordProbe } = await import('../src/allowance.ts');
+const { allowanceOf, closeWeeks, forgetRates, recordLimit, recordProbe } = await import('../src/allowance.ts');
+const { allowanceBlock } = await import('../src/scheduler/gates.ts');
 const { config } = await import('../src/config.ts');
 const { initCrypto } = await import('../src/crypto.ts');
 const { all, initDb, one, run } = await import('../src/db.ts');
-const { createConnection, reorderConnections, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
+const { createConnection, getConnection, reorderConnections, setBurndown, setConnectionPaused, setConnectionStatus, setLimits } = await import('../src/providers/index.ts');
 const { bus, publish } = await import('../src/events.ts');
 const { activity, getRun, readLog, runView } = await import('../src/runs.ts');
 const { sweepMedia } = await import('../src/media.ts');
 const { checkRaiseRate, connectionPaused, drive, isDriving, launch, onRunSettled, PAUSE_GRACE_MS, requestPause, RESULT_GRACE_MS, resume, stopRun } = await import('../src/scheduler/runner.ts');
-const { allocate, allocatePass, buildQueue, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, queueView, reattachRuns, refreshNow, resumeNow, resumePaused, settleManual, syncSoon, tick } = await import('../src/scheduler/loop.ts');
+const { allocate, allocatePass, buildQueue, cancelKicks, forgetProbe, hostLoads, hostViews, kick, launchNow, mergeApproved, probeAllowance, probeIdle, queueView, reattachRuns, refreshNow, resetSyncProgress, resumeNow, resumePaused, settleManual, syncProgress, syncSoon, tick } = await import('../src/scheduler/loop.ts');
 const { setBypassLimits, setPrioritised, setPush, getTicket, ticketView, getRepo, partsOf, priorityGraph } = await import('../src/tickets.ts');
 const { checkingBlockers, syncRepo, HELD_CHECKS_PER_SYNC, LINK_BACKFILL_PER_SYNC } = await import('../src/scheduler/sync.ts');
 const { pushMessage } = await import('../src/scheduler/merge.ts');
@@ -107,7 +108,9 @@ beforeAll(() => {
 });
 
 beforeEach(() => {
-  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, handoff = NULL, rework = NULL, prioritised = 0, bypass_limits = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
+  publish('tickets'); // tests write rows directly, so drop the cached priority graph
+  cancelKicks(); // a kick left by the last test would allocate (and move paused runs) in this one
+  run("UPDATE tickets SET labels = ?, failures = 0, pr_number = NULL, blocked_by = '[]', push = NULL, push_stage = NULL, branch = NULL, state = 'open', pr_status = NULL, rescue = NULL, handoff = NULL, rework = NULL, follow_ups = NULL, prioritised = 0, bypass_limits = 0 WHERE id = 1", JSON.stringify([label.size('s'), label.stage('implement')]));
   run('DELETE FROM runs');
   fake.models = { launchEnv: () => ({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-test' }), billing: () => ['subscription'], models: () => [] };
   fake.modelsFor = null;
@@ -158,6 +161,7 @@ const finding = (over: object = {}) => ({
   detail: 'The theme toggle has no test.',
   evidence: 'Read test/theme.test.ts.',
   fix: 'Add one.',
+  consequence: 'Breaking the toggle goes unnoticed.',
   ...over,
 });
 const severe = (over: object = {}) => finding({ severity: 'severe', title: 'Toggle crashes', detail: 'Clicking it throws.', evidence: 'Ran npm test: 1 failed.', fix: 'Guard the null.', ...over });
@@ -173,7 +177,7 @@ async function review(findings: object[] = [], over: object = {}) {
 const ticketLabels = () => JSON.parse(getTicket(1)!.labels) as string[];
 
 describe('runner', () => {
-  it('publishes runs when the agent finishes, even if its last activity was throttled', async () => {
+  it('publishes activity, not runs, for activity-only changes, and runs when the agent finishes', async () => {
     const tool = (command: string) => line({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command } }] } });
     fake.env = new FakeEnv({
       prepare: ['ok'],
@@ -188,8 +192,12 @@ describe('runner', () => {
     } finally {
       bus.off('topic', listener);
     }
-    // The second tool call fell inside the 3s throttle window; the runner must still announce it.
-    expect(topics.filter((t) => t === 'runs').length).toBeGreaterThanOrEqual(3);
+    // The first tool call only changes the activity text. The second falls inside the 3s throttle window,
+    // and the result line, a state change, announces it with 'runs' straight after.
+    expect(topics.filter((t) => t === 'activity')).toHaveLength(1);
+    const at = topics.indexOf('activity');
+    expect(topics.slice(0, at)).toContain('runs'); // starting
+    expect(topics[at + 1]).toBe('runs');
   });
 
   it.each([
@@ -783,6 +791,88 @@ describe('runner', () => {
         low();
         resumePaused(getSettings(), Date.now());
         expect(getRun(limited)!.status).toBe('paused');
+      });
+    });
+
+    describe('with the weekly burndown on', () => {
+      const W = (RESET + 86400) * 1000;
+      const week = (pct: number) => recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct, resetsAt: W });
+      const rateWeek = (pct: number) =>
+        line({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', unifiedWindows: { five_hour: { utilization: 0.1, resetsAt: resetsAt() }, seven_day: { utilization: pct / 100, resetsAt: W / 1000 } } } });
+      const ceiling = () => allowanceOf(ids.model).burndown.ceiling!;
+      const gate = (ignoreLimits = false) => allowanceBlock(allowanceOf(ids.model), getSettings(), Date.now(), ignoreLimits);
+      const round = (n: number) => Math.round(n * 10) / 10;
+
+      beforeEach(() => {
+        forgetRates();
+        setLimits(ids.model, { fiveHour: 70, weekly: 100 });
+        setBurndown(ids.model, true);
+        week(10);
+      });
+      afterEach(() => {
+        setBurndown(ids.model, false);
+        forgetRates();
+      });
+
+      it('holds new launches at the line, except a ticket you let past your limits, but lets a running agent carry on within 2 points over it', async () => {
+        const c = ceiling();
+        expect(c).toBeGreaterThan(70); // about a day before the reset
+        expect(c).toBeLessThan(97);
+        week(round(c + 1));
+        expect(gate()).toMatch(/over the burndown ceiling/);
+        expect(gate(true)).toBeNull();
+        setBurndown(ids.model, false);
+        expect(gate()).toBeNull();
+        setBurndown(ids.model, true);
+        const { env, state } = killable([rateWeek(round(c + 1)), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        expect((await settle(go())).status).toBe('succeeded');
+        expect(state.killedAt).toBe(-1);
+      });
+
+      it('pauses a running agent more than 2 points over the line, and resumes it once usage is back under the line', async () => {
+        const c = ceiling();
+        const { env, state } = killable([rateWeek(round(c + 3)), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        const id = go();
+        expect(await settle(id)).toMatchObject({ status: 'paused', pause_reason: 'threshold' });
+        expect(state.killedAt).toBe(3);
+        fake.env = new FakeEnv({ prepare: ['ok'], run: [DONE], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
+        week(round(c + 1)); // within the grace, but a paused run resumes only under the line
+        resumePaused(getSettings(), Date.now());
+        expect(getRun(id)!.status).toBe('paused');
+        week(round(c - 1));
+        resumePaused(getSettings(), Date.now());
+        await vi.waitFor(() => expect(getRun(id)?.status).toBe('succeeded'), { timeout: 2000 });
+      });
+
+      it('stores who was running and the line with each reading, without re-reading the rates', async () => {
+        const { env } = killable([rateWeek(20), toolUse('a'), toolResult('a'), DONE]);
+        fake.env = env;
+        await settle(go());
+        const rows = all<{ active: number; ceiling: number; burndown: number; bound: string; seven_day: number }>(
+          "SELECT active, ceiling, burndown, bound, seven_day FROM allowance_samples WHERE connection_id = ? AND source = 'probe' ORDER BY ts, rowid",
+          ids.model,
+        );
+        expect(rows[rows.length - 2]).toMatchObject({ active: 0, burndown: 1, bound: 'linear', seven_day: 10 });
+        expect(rows[rows.length - 1]).toMatchObject({ active: 1, burndown: 1, bound: 'linear', seven_day: 20, ceiling: ceiling() });
+
+        // Readings that would change your own use don't count until the rates are re-read.
+        const before = allowanceOf(ids.model).burndown.otherPerHour;
+        const t = Date.now() - 4 * 3600_000;
+        for (let h = 0; h < 4; h++) {
+          run("INSERT INTO allowance_samples (connection_id, ts, source, seven_day, seven_day_resets, active) VALUES (?, ?, 'probe', ?, ?, 0)", ids.model, t + h * 3600_000 - 60_000, 2 * h, W);
+        }
+        week(20);
+        expect(allowanceOf(ids.model).burndown.otherPerHour).toBe(before);
+        forgetRates();
+        expect(allowanceOf(ids.model).burndown.otherPerHour).toBeGreaterThan(before);
+      });
+
+      it('waits for a new reading when the latest is from before the weekly reset', () => {
+        recordProbe(ids.model, { pct: 10, resetsAt: Date.now() + 3600_000 }, { pct: 90, resetsAt: Date.now() - 60_000 });
+        expect(allowanceOf(ids.model).burndown.ceiling).toBeLessThan(0.1);
+        expect(gate()).toBe('Checking allowance');
       });
     });
 
@@ -1928,6 +2018,54 @@ describe('breaking large tickets down', () => {
   });
 });
 
+describe('usage of a session that ends without a result', () => {
+  const reply = (id: string, read: number, text: string) => line({ type: 'assistant', parent_tool_use_id: null, message: { id, usage: { input_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: read, output_tokens: 1 }, content: [{ type: 'text', text }] } });
+  const spend = (id: string) => all<{ input_tokens: number; output_tokens: number; cost_usd: number }>('SELECT input_tokens, output_tokens, cost_usd FROM spend WHERE run_id = ?', id);
+
+  it('records what the agent used before it ran out of time', async () => {
+    // An earlier run of this model sets the price: $1 for 1,000,000 tokens.
+    run("INSERT INTO spend (run_id, ts, model, billing, input_tokens, output_tokens, cost_usd) VALUES ('earlier', 1, 'claude-priced', 'subscription', 990000, 10000, 1)");
+    const env = new FakeEnv({});
+    let release = () => {};
+    env.inspect = async () => ({ running: true, exitCode: 0, oomKilled: false });
+    env.follow = (_id: string, _skip: number, onLine: (l: { stream: 'stdout'; text: string }) => void) => {
+      for (const text of [reply('m1', 990, 'x'.repeat(220)), reply('m1', 990, 'y'.repeat(110)), reply('m2', 1990, '')]) onLine({ stream: 'stdout', text });
+      return new Promise<void>((done) => (release = done));
+    };
+    env.kill = async () => release();
+    env.wait = async () => ({ running: false, exitCode: 137, oomKilled: false });
+    fake.env = env;
+    run(
+      `INSERT INTO runs (id, ticket_id, agent, mode, attempt, environment_id, model_connection_id, model, billing, status, step, container_id, volume, image, max_turns, timeout_min, step_started_at, started_at)
+       VALUES ('cut-short', 1, 'implement', 'normal', 1, ?, ?, 'claude-priced', 'subscription', 'running', 'run', 'run-container-old', 'v', 'img', 300, 1, ?, ?)`,
+      ids.env,
+      ids.model,
+      Date.now() - 5 * 60_000,
+      Date.now() - 6 * 60_000,
+    );
+    try {
+      await drive('cut-short');
+      expect(getRun('cut-short')).toMatchObject({ status: 'failed', error: 'Stopped after the 1-minute time limit.', input_tokens: 3000, output_tokens: 300 });
+      const [row] = spend('cut-short');
+      expect(row).toMatchObject({ input_tokens: 3000, output_tokens: 300 });
+      expect(row.cost_usd).toBeCloseTo(0.0033, 6);
+    } finally {
+      run("DELETE FROM spend WHERE run_id IN ('earlier', 'cut-short')");
+    }
+  });
+
+  it("leaves a run that printed a result to the result's own figures", async () => {
+    fake.env = new FakeEnv({
+      prepare: ['ok'],
+      run: [reply('m1', 990, 'hello'), line({ type: 'result', subtype: 'success', is_error: false, total_cost_usd: 0.5, structured_output: { outcome: 'done', summary: 'ok', tests: 'ok' }, usage: { input_tokens: 10, output_tokens: 5 } })],
+      publish: [line({ before: '', after: 'def5678', ahead: 1 })],
+    });
+    const id = go();
+    await settle(id);
+    expect(spend(id)).toEqual([{ input_tokens: 10, output_tokens: 5, cost_usd: 0.5 }]);
+  });
+});
+
 describe('launchNow', () => {
   const script = () => ({ prepare: ['ok'], run: [RATE, result({ outcome: 'done', summary: 'Done.', tests: 'ok' })], publish: [line({ before: '', after: 'def5678', ahead: 1 })] });
 
@@ -2271,6 +2409,121 @@ describe('allocation', () => {
     expect(second).toBe(first);
     expect(await second).toEqual(await first);
     expect(fake.env.started.filter((spec: StepSpec) => spec.cmd[0] === 'usage-probe')).toHaveLength(1);
+  });
+});
+
+describe('sync progress', () => {
+  type Progress = ReturnType<typeof syncProgress>;
+  let seen: Progress[] = [];
+  const record = (t: string) => t === 'sync' && seen.push(syncProgress());
+  let release = () => {};
+  let gate = Promise.resolve();
+  let mode: ReturnType<typeof getSettings>['mode'] = 'paused';
+
+  beforeEach(() => {
+    mode = getSettings().mode;
+    saveSettings({ mode: 'paused' }); // nothing launches: only the sync is under test
+    const r = getRepo(1)!;
+    run("INSERT INTO repos (vcs_connection_id, ticket_connection_id, full_name, default_branch, url, enabled) VALUES (?, ?, 'me/other', 'main', 'u', 1)", r.vcs_connection_id, r.ticket_connection_id);
+    gate = new Promise<void>((done) => (release = done));
+    fake.tickets.listChanged = async () => [];
+    resetSyncProgress();
+    seen = [];
+    bus.on('topic', record);
+  });
+  afterEach(async () => {
+    release();
+    bus.off('topic', record);
+    await syncSoon(); // nothing left running when the fakes change
+    run("DELETE FROM repos WHERE full_name = 'me/other'");
+    saveSettings({ mode });
+  });
+
+  it('steps from requested through each repository to idle', async () => {
+    const before = Date.now();
+    await syncSoon();
+    expect(seen[0]).toMatchObject({ state: 'requested', kind: 'sync' });
+    const syncing = seen.filter((p) => p.state === 'running' && p.phase === 'sync');
+    expect(syncing.every((p) => p.total === 2 && p.kind === 'sync')).toBe(true);
+    expect([...new Set(syncing.map((p) => p.done))]).toEqual([0, 1, 2]);
+    expect(syncing.map((p) => p.repo)).toEqual(expect.arrayContaining(['me/app', 'me/other']));
+    expect(seen.at(-1)).toMatchObject({ state: 'idle', kind: 'sync', phase: null, lastError: null });
+    expect(seen.at(-1)!.lastFinishedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it('shows a request made during a running pass as waiting, then runs it', async () => {
+    let listed = 0;
+    fake.tickets.listChanged = async () => {
+      listed++;
+      await gate;
+      return [];
+    };
+    const first = syncSoon();
+    await vi.waitFor(() => expect(listed).toBe(1));
+    expect(syncProgress()).toMatchObject({ state: 'running', repo: 'me/app' });
+    void syncSoon();
+    expect(syncProgress()).toMatchObject({ state: 'waiting', kind: 'sync' });
+    seen = [];
+    release();
+    await first;
+    expect(listed).toBe(3); // me/other was read after the click, so only me/app runs again
+    const states = seen.map((p) => p.state).filter((s, i, a) => s !== a[i - 1]);
+    expect(states).toEqual(['waiting', 'running', 'idle']);
+  });
+
+  it('goes through the sync, the usage checks and starting work on Refresh, and resolves after its sync', async () => {
+    run('DELETE FROM allowance_samples');
+    forgetProbe(ids.model);
+    fake.env = new FakeEnv({ usage: [RATE, result({})] });
+    let listed = 0;
+    fake.tickets.listChanged = async () => {
+      listed++;
+      await gate;
+      return [];
+    };
+    let done = false;
+    const refresh = refreshNow().then(() => (done = true));
+    expect(refreshNow()).toBe(refreshNow()); // a second Refresh joins the first
+    await vi.waitFor(() => expect(listed).toBe(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(done).toBe(false);
+    expect(syncProgress()).toMatchObject({ state: 'running', kind: 'refresh', phase: 'sync' });
+    release();
+    await refresh;
+    expect(fake.env.started.filter((spec: StepSpec) => spec.cmd[0] === 'usage-probe')).toHaveLength(1);
+    const phases = seen.map((p) => p.phase).filter((p, i, a) => p !== a[i - 1]);
+    expect(phases).toEqual([null, 'sync', 'usage', 'allocate', null]);
+    const usage = seen.filter((p) => p.phase === 'usage');
+    expect(usage.every((p) => p.total === 1)).toBe(true);
+    expect(usage.at(-1)!.done).toBe(1);
+    expect(seen.every((p) => p.kind === 'refresh')).toBe(true);
+    expect(seen.at(-1)).toMatchObject({ state: 'idle', kind: 'refresh' });
+  });
+
+  it('records a failing repository and still finishes', async () => {
+    const other = one<{ id: number }>("SELECT id FROM repos WHERE full_name = 'me/other'")!.id;
+    const synced: string[] = [];
+    fake.tickets.listChanged = async (r: { fullName: string }) => {
+      if (r.fullName === 'me/app') throw new Error('Bad credentials');
+      synced.push(r.fullName);
+      return [];
+    };
+    await syncSoon();
+    expect(synced).toEqual(['me/other']);
+    expect(seen.filter((p) => p.state === 'running').at(-1)).toMatchObject({ done: 2, total: 2 });
+    expect(syncProgress()).toMatchObject({ state: 'idle', lastError: "Couldn't sync me/app: Bad credentials" });
+    expect(one('SELECT id FROM alerts WHERE kind = ? AND ref = ?', 'sync-failed', `repo:${other}`)).toBeUndefined();
+    run("DELETE FROM alerts WHERE kind = 'sync-failed'");
+  });
+
+  it('leaves the record alone on a tick with nothing due', async () => {
+    await syncSoon();
+    const last = syncProgress().lastFinishedAt;
+    seen = [];
+    await tick();
+    await new Promise((r) => setTimeout(r, 20)); // the tick's sync runs in the background
+    expect(seen).toEqual([]);
+    expect(syncProgress().lastFinishedAt).toBe(last);
   });
 });
 
@@ -2771,6 +3024,7 @@ describe('sync', () => {
       fake.vcs.closePullRequest = vi.fn(async () => {
         throw new Error('boom');
       });
+      run("UPDATE repos SET synced_at = '2026-01-01T00:00:00.000Z' WHERE id = 1"); // the last sync may share this millisecond
       const before = repo().synced_at;
       await syncRepo(repo());
       expect(one<{ message: string }>("SELECT message FROM alerts WHERE kind = 'close-cleanup' AND ack_at IS NULL")?.message).toContain('boom');
@@ -3744,6 +3998,81 @@ describe('pushing to the default branch', () => {
     expect(fake.vcs.merge).toHaveBeenCalledWith(expect.anything(), 7);
     expect(fake.vcs.pushToDefault).not.toHaveBeenCalled();
   });
+
+  describe('follow-up tickets for what the code review leaves', () => {
+    const minor = finding({ severity: 'minor', title: 'Rename the toggle', consequence: '' });
+    const second = finding({ title: 'No test for the dark palette', detail: 'Nothing checks the palette.' });
+    const comments = () => fake.tickets.comment.mock.calls.map((c: any[]) => c[2] as string);
+
+    beforeEach(() => {
+      // The round's reworks are used up, so the moderate findings that remain don't send the ticket back.
+      run('UPDATE tickets SET labels = ?, rework = ?, raised = NULL WHERE id = 1', JSON.stringify([label.size('s'), label.stage('code-review')]), JSON.stringify({ count: 3, findings: [finding()] }));
+      run("UPDATE repos SET raise_tickets = 1, rework_on = 'moderate' WHERE id = 1");
+      let next = 40;
+      fake.tickets.createTicket = vi.fn(async () => ({ number: ++next, url: `https://github.com/me/app/issues/${next}` }));
+    });
+    afterEach(() => {
+      run("UPDATE repos SET raise_tickets = 0, rework_on = 'severe' WHERE id = 1");
+      run('DELETE FROM tickets WHERE id != 1');
+    });
+
+    it('pushes, then opens one for the moderate finding naming the ticket and the commit, and none for the minor one', async () => {
+      const { r, env } = await review([finding(), minor]);
+      expect(r.status).toBe('succeeded');
+      expect(String(env.spec('run')!.files!['.workshop/system.md'])).toContain('Severe and moderate findings send the ticket back automatically; minor ones go to the owner.');
+      await vi.waitFor(() => expect(getTicket(1)!.state).toBe('closed'));
+      expect(labels()).not.toContain(label.needsInfo);
+      expect(fake.vcs.pushToDefault).toHaveBeenCalledTimes(1);
+      expect(fake.tickets.createTicket).toHaveBeenCalledTimes(1);
+      const [, made] = fake.tickets.createTicket.mock.calls[0];
+      expect(made).toMatchObject({ title: 'No test for the toggle', labels: [label.raised] });
+      expect(made.body).toContain('**What goes wrong:** Breaking the toggle goes unnoticed.');
+      expect(made.body).toContain('the work for #3, which was pushed to `main` as [`abcdef1`](https://github.com/me/app/commit/abcdef1234)');
+      expect(comments().some((c: string) => c.includes('Rename the toggle') && c.includes('Workshop opens a follow-up ticket'))).toBe(true);
+      expect(comments().at(-1)).toMatch(/pushed this to `main` as \[`abcdef1`\][\s\S]*- #41 No test for the toggle$/);
+      expect(JSON.parse(getTicket(1)!.raised!)).toMatchObject([{ number: 41, runId: r.id }]);
+      expect(getTicket(1)!.follow_ups).toBeNull();
+    });
+
+    it("doesn't open one whose title an open ticket already has", async () => {
+      run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, updated_at) VALUES (1, 50, 'No test for the toggle', '', 'u', 'me', 'open', '[]', '2026-10-12T00:00:00Z')");
+      await review([finding()]);
+      await vi.waitFor(() => expect(getTicket(1)!.state).toBe('closed'));
+      expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+      expect(comments().at(-1)).toContain('- No test for the toggle: already open as #50');
+    });
+
+    it("opens none with the setting off", async () => {
+      run('UPDATE repos SET raise_tickets = 0 WHERE id = 1');
+      await review([finding()]);
+      await vi.waitFor(() => expect(getTicket(1)!.state).toBe('closed'));
+      expect(fake.tickets.createTicket).not.toHaveBeenCalled();
+      expect(comments().at(-1)).not.toContain('Follow-up');
+    });
+
+    it('after a failure part-way, finishes on the next check without pushing again or opening a ticket twice', async () => {
+      let next = 40;
+      fake.tickets.createTicket = vi.fn(async () => {
+        if (next === 41) {
+          next++;
+          throw Object.assign(new Error('Server error'), { status: 502 });
+        }
+        return { number: ++next, url: `https://github.com/me/app/issues/${next}` };
+      });
+      await review([finding(), second]);
+      await vi.waitFor(() => expect(fake.tickets.createTicket).toHaveBeenCalledTimes(2));
+      expect(getTicket(1)!.state).toBe('open');
+      expect(JSON.parse(getTicket(1)!.follow_ups!)).toMatchObject({ commit: { sha: 'abcdef1234' } });
+
+      await mergeApproved(false);
+      expect(fake.vcs.pushToDefault).toHaveBeenCalledTimes(1);
+      expect(fake.vcs.branchState).toHaveBeenCalledTimes(1);
+      expect(fake.tickets.createTicket).toHaveBeenCalledTimes(3);
+      expect(fake.tickets.createTicket.mock.calls.map((c: any[]) => c[1].title)).toEqual(['No test for the toggle', 'No test for the dark palette', 'No test for the dark palette']);
+      expect(getTicket(1)).toMatchObject({ state: 'closed', follow_ups: null });
+      expect(comments().at(-1)).toContain('- #41 No test for the toggle\n- #43 No test for the dark palette');
+    });
+  });
 });
 
 describe('the pushed commit message', () => {
@@ -3877,9 +4206,51 @@ describe('repository priority', () => {
   });
   afterEach(() => {
     run('DELETE FROM runs');
-    run('DELETE FROM tickets WHERE repo_id = ? OR number = 4', api);
+    run('DELETE FROM tickets WHERE repo_id = ? OR number = 4 OR number BETWEEN 40 AND 49', api);
     run('DELETE FROM repos WHERE id = ?', api);
     configure({});
+  });
+
+  describe('against tickets other work waits on', () => {
+    const implement = [label.size('s'), label.stage('implement')];
+    /** `count` open tickets in me/app, numbered from 40, that wait on `ref`. */
+    const waitOn = (ref: string, count: number) => {
+      for (let i = 0; i < count; i++) {
+        run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (1, ?, 'App', '', 'u', 'me', 'open', ?, ?, '2026-10-13T00:00:00Z')", 40 + i, JSON.stringify(implement), JSON.stringify([ref]));
+      }
+    };
+    beforeEach(() => {
+      run('UPDATE repos SET priority = 99 WHERE id = ?', api);
+      run('UPDATE tickets SET labels = ? WHERE id = 1', JSON.stringify(implement));
+      waitOn('#3', 3);
+    });
+
+    it("puts a higher-priority repo's ticket ahead of a lower repo's ticket that more work waits on", () => {
+      const high = apiTicket(implement);
+      expect(queued(high)).toMatchObject({ unblocks: 0, size: 'standard', blockedBy: null });
+      expect(queued()).toMatchObject({ unblocks: 3, size: 'standard', blockedBy: null, after: ['me/api'] });
+      expect(buildQueue()[0].ticket.id).toBe(high);
+      expect(next()?.ticket.id).toBe(high); // the only free standard slot
+    });
+
+    it('still lets the dependency graph order tickets within a repo', () => {
+      const plain = apiTicket(implement, { number: 8 });
+      const needed = apiTicket(implement, { number: 9 });
+      run("INSERT INTO tickets (repo_id, number, title, body, url, author, state, labels, blocked_by, updated_at) VALUES (?, 10, 'Api', '', 'u', 'me', 'open', ?, ?, '2026-10-13T00:00:00Z')", api, JSON.stringify(implement), JSON.stringify(['#9']));
+      const order = buildQueue().filter((c) => !c.blockedBy?.startsWith('Depends on')).map((c) => c.ticket.id);
+      expect(order.slice(0, 3)).toEqual([needed, plain, 1]);
+    });
+
+    it('still puts a prioritised ticket in the lower repo, and what it waits on, first, and a pushed ticket ahead of both', () => {
+      const high = apiTicket(implement);
+      const wanted = one<{ id: number }>('SELECT id FROM tickets WHERE repo_id = 1 AND number = 40')!.id;
+      setPrioritised(getTicket(wanted)!, true);
+      expect(queued(wanted).blockedBy).toBe('Depends on #3');
+      expect(queued()).toMatchObject({ prioritisedFor: ['#40'], after: [] });
+      expect(next()?.ticket.id).toBe(1);
+      setPush(getTicket(high)!, 'stage');
+      expect(buildQueue()[0].ticket.id).toBe(high);
+    });
   });
 
   it("orders a lower-priority repo after a higher one's unclassified tickets without holding it", () => {
@@ -4590,6 +4961,96 @@ describe('media store', () => {
       fs.mkdirSync(path.join(config.dataDir, 'media', '999'), { recursive: true }); // a folder for a ticket that no longer exists
       sweepMedia(0);
       expect(fs.existsSync(path.join(config.dataDir, 'media', '999'))).toBe(false);
+    });
+  });
+});
+
+describe('the weekly burndown', () => {
+  const H = 3600_000;
+  let conn: number;
+  beforeEach(() => {
+    conn = createConnection('model', 'anthropic', 'Claude B', {}, { oauthToken: 'sk-ant-oat01-b' });
+  });
+  afterEach(() => {
+    run('DELETE FROM connections WHERE id = ?', conn);
+    forgetRates();
+  });
+
+  /** Hourly readings over a week that ended `endedAgo` ms ago, rising evenly to `final`; the first `on` of them with the burndown on. */
+  const pastWeek = (endedAgo: number, final: number, on: number) => {
+    const resetsAt = Date.now() - endedAgo;
+    for (let h = 0; h < 160; h++) {
+      run(
+        "INSERT INTO allowance_samples (connection_id, ts, source, seven_day, seven_day_resets, active, ceiling, burndown) VALUES (?, ?, 'probe', ?, ?, 0, 0, ?)",
+        conn,
+        resetsAt - 165 * H + h * H,
+        (final * h) / 159,
+        resetsAt + (h % 3) * 1000, // a little jitter in the reported reset
+        Number(h < on),
+      );
+    }
+    return resetsAt;
+  };
+  const weeks = () => all<{ resets_at: number; enabled: number; final_pct: number; margin_before: number; margin_after: number; held_hours: number }>('SELECT * FROM burndown_weeks WHERE connection_id = ?', conn);
+
+  it('writes one row per ended week and widens the margin after an overshoot', () => {
+    pastWeek(2 * H, 100, 160);
+    expect(closeWeeks(Date.now())).toBe(true);
+    expect(weeks()).toEqual([expect.objectContaining({ enabled: 1, final_pct: 100, margin_before: 3, margin_after: 5 })]);
+    expect(weeks()[0].held_hours).toBeGreaterThan(100); // every reading was at or over its stored line of 0
+    expect(getConnection(conn)!.burndownMargin).toBe(5);
+    expect(allowanceOf(conn).burndown.target).toBe(95);
+    expect(closeWeeks(Date.now())).toBe(false);
+    expect(weeks()).toHaveLength(1);
+  });
+
+  it('keeps the margin for a week the burndown was on for only a minority of', () => {
+    pastWeek(2 * H, 100, 40);
+    expect(closeWeeks(Date.now())).toBe(false);
+    expect(weeks()).toEqual([expect.objectContaining({ enabled: 0, margin_after: 3 })]);
+  });
+
+  it("counts a usage limit Claude reported at the week's end as an overshoot", () => {
+    const resetsAt = pastWeek(2 * H, 90, 160);
+    run("INSERT INTO allowance_samples (connection_id, ts, source, blocked_until) VALUES (?, ?, 'limit', ?)", conn, resetsAt - 3 * H, resetsAt);
+    closeWeeks(Date.now());
+    expect(weeks()[0]).toMatchObject({ blocked: 1, margin_after: 5 });
+  });
+
+  it('leaves the current week and weeks that ended long ago alone', () => {
+    pastWeek(-2 * H, 50, 160); // still running
+    pastWeek(9 * 24 * H, 50, 160); // partly gone from the readings
+    expect(closeWeeks(Date.now())).toBe(false);
+    expect(weeks()).toHaveLength(0);
+  });
+
+  describe('idle readings', () => {
+    let env: FakeEnv;
+    const probes = () => env.started.filter((spec: StepSpec) => spec.labels?.['workshop.probe'] === String(conn)).length;
+    beforeEach(() => {
+      setConnectionStatus(ids.env, 'ok');
+      env = new FakeEnv({ usage: [RATE, result({})] });
+      fake.env = env;
+    });
+
+    it('reads a subscription idle for over an hour, and one idle for 20 minutes in the half hour before its weekly reset', async () => {
+      const at = (pct: number, weeklyResetsIn: number) => recordProbe(conn, { pct, resetsAt: Date.now() + H }, { pct, resetsAt: Date.now() + weeklyResetsIn });
+      at(10, 48 * H);
+      probeIdle(Date.now() + 50 * 60_000);
+      expect(probes()).toBe(0);
+      probeIdle(Date.now() + 61 * 60_000);
+      await vi.waitFor(() => expect(probes()).toBe(1));
+      at(10, 40 * 60_000);
+      probeIdle(Date.now() + 10 * 60_000);
+      probeIdle(Date.now() + 20 * 60_000);
+      await vi.waitFor(() => expect(probes()).toBe(2));
+    });
+
+    it('skips a paused subscription', () => {
+      recordProbe(conn, { pct: 10, resetsAt: Date.now() + H }, { pct: 10, resetsAt: Date.now() + 48 * H });
+      setConnectionPaused(conn, true);
+      probeIdle(Date.now() + 2 * H);
+      expect(probes()).toBe(0);
     });
   });
 });

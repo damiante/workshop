@@ -1,4 +1,4 @@
-import type { AllowanceHistory, BacklogPool, BacklogProjection, Burn, Stage, UsageHistory, WindowProjection } from '../../server/src/api-types.ts';
+import type { AllowanceHistory, BacklogPool, Burndown, BurndownBound, BacklogProjection, Burn, Stage, UsageHistory, WindowProjection } from '../../server/src/api-types.ts';
 import { money, tokens, when } from './format.ts';
 
 /** Pure: the Usage page's projections as plain sentences. */
@@ -9,21 +9,29 @@ const ALLOWANCE_MAX_AGE_MS = 10 * 60_000;
 type Time = (ms: number) => string;
 
 /** One sentence about where a subscription window is heading. */
-function windowLine(name: string, a: AllowanceHistory, p: WindowProjection | null, limit: number, now: number, time: Time): string {
+function windowLine(name: string, a: AllowanceHistory, p: WindowProjection | null, limit: number, now: number, time: Time, what = `your ${limit}% limit`): string {
   if (!p) return `${name}: ${a.sampledAt === null ? 'No current reading.' : 'No reading from this window since it last reset.'}`;
   const old = a.sampledAt !== null && now - a.sampledAt > ALLOWANCE_MAX_AGE_MS;
   const head = old ? `${name}, as of ${time(a.sampledAt!)}:` : `${name}:`;
   const used = `${Math.round(p.pct)}% used`;
   const resets = time(p.resetsAt);
-  if (p.over) return `${head} ${used}. Over your ${limit}% limit until it resets at ${resets}.`;
-  if (p.limitAt === a.sampledAt) return `${head} ${used}. At your ${limit}% limit; resets at ${resets}.`;
+  if (p.over) return `${head} ${used}. Over ${what} until it resets at ${resets}.`;
+  if (p.limitAt === a.sampledAt) return `${head} ${used}. At ${what}; resets at ${resets}.`;
   if (p.ratePerHour === 0) return `${head} ${used}. Too early in this window to tell its pace; resets at ${resets}.`;
   let line = `${head} ${used}, ${p.ratePerHour.toFixed(1)}% an hour.`;
-  if (p.limitAt === null) line += ` Resets at ${resets} before reaching your ${limit}% limit.`;
-  else if (p.limitAt <= now) line += ` At that pace it may already be at your ${limit}% limit.`;
-  else line += ` Reaches your ${limit}% limit at ${time(p.limitAt)} and resets at ${resets}.`;
+  if (p.limitAt === null) line += ` Resets at ${resets} before reaching ${what}.`;
+  else if (p.limitAt <= now) line += ` At that pace it may already be at ${what}.`;
+  else line += ` Reaches ${what} at ${time(p.limitAt)} and resets at ${resets}.`;
   if (p.fullAt !== null && p.fullAt !== p.limitAt && p.fullAt > now) line += ` Reaches 100% at ${time(p.fullAt)}.`;
   return line;
+}
+
+/** The weekly window, measured against the burndown's target when that is lower than your limit, as the server projects it. */
+function weeklyLine(a: AllowanceHistory, now: number, time: Time): string {
+  const name = `${a.connectionName}, weekly window`;
+  const b = a.burndown;
+  if (b?.enabled && b.target < a.limits.weekly) return windowLine(name, a, a.sevenDay, b.target, now, time, `the ${b.target}% burndown target`);
+  return windowLine(name, a, a.sevenDay, a.limits.weekly, now, time);
 }
 
 function subscriptionLines(a: AllowanceHistory, now: number, time: Time): { key: string; text: string }[] {
@@ -32,7 +40,7 @@ function subscriptionLines(a: AllowanceHistory, now: number, time: Time): { key:
   if (a.unknown) return [{ key: `${id}`, text: `${a.connectionName}: Claude doesn't report this subscription's usage. See its burn rate above.` }];
   return [
     { key: `${id}-5h`, text: windowLine(`${a.connectionName}, 5-hour window`, a, a.fiveHour, a.limits.fiveHour, now, time) },
-    { key: `${id}-7d`, text: windowLine(`${a.connectionName}, weekly window`, a, a.sevenDay, a.limits.weekly, now, time) },
+    { key: `${id}-7d`, text: weeklyLine(a, now, time) },
   ];
 }
 
@@ -160,4 +168,25 @@ export function projectionSections(data: Pick<UsageHistory, 'allowance' | 'proje
     });
   }
   return { backlog: backlogSection(data.projection.backlog, api, time), burn, windows, month };
+}
+
+const BOUND_WORDS: Record<BurndownBound, string> = {
+  linear: 'rising evenly',
+  catchUp: 'raised to catch up',
+  userCap: 'held for your own use',
+  target: 'at its target',
+};
+
+const hours = (h: number) => `${Math.round(h)} ${Math.round(h) === 1 ? 'hour' : 'hours'}`;
+
+/** One sentence on where a subscription's burndown is and what it's shaped from: the numbers to tune it by. */
+export function burndownSummary(b: Burndown): string {
+  const now = b.ceiling === null ? 'Burndown: needs a reading from this week' : `Burndown ${Math.round(b.ceiling)}% now (${BOUND_WORDS[b.bound ?? 'linear']})`;
+  let text = `${now}, aiming for ${b.target}% at the reset. Your own use about ${(b.otherPerHour * 24).toFixed(1)}% a day (${hours(b.basis.otherHours)} of readings)`;
+  if (b.workshopPerHour === null) text += `; not enough readings of agents running yet (${hours(b.basis.workshopHours)}).`;
+  else {
+    text += `; agents add about ${b.workshopPerHour.toFixed(1)}% an hour while running`;
+    text += b.duty === null ? '.' : `, ${Math.round(b.duty * 100)}% of the time under your 5-hour limit.`;
+  }
+  return text;
 }

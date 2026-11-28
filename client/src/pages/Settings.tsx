@@ -138,12 +138,15 @@ function ApiTokens() {
   );
 }
 
+/** A subscription's limits as you edit them, with whether its weekly limit follows the burndown. */
+type Draft = Limits & { burndown: boolean };
+
 export function SettingsPage() {
   const { data, error } = useApi<Settings>('/settings', ['settings']);
   const usage = useApi<Usage>('/usage', ['allowance', 'connections']);
   const [draft, setDraft] = useState<Settings | null>(null);
   // Limits you've edited, by connection; the rest show what's saved.
-  const [limits, setLimits] = useState<Record<number, Limits>>({});
+  const [limits, setLimits] = useState<Record<number, Draft>>({});
   const [authors, setAuthors] = useState('');
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -159,7 +162,7 @@ export function SettingsPage() {
     setDraft({ ...draft, ...patch });
     setSaved(false);
   };
-  const setLimit = (connectionId: number, current: Limits, patch: Partial<Limits>) => {
+  const setLimit = (connectionId: number, current: Draft, patch: Partial<Draft>) => {
     setLimits({ ...limits, [connectionId]: { ...current, ...patch } });
     setSaved(false);
   };
@@ -173,7 +176,7 @@ export function SettingsPage() {
       await api('/settings', { method: 'PUT', body: { ...rest, authors: authors.split(/[\s,]+/).filter(Boolean) } });
       for (const a of usage.data?.allowance ?? []) {
         const edit = limits[a.connectionId];
-        if (edit && (edit.fiveHour !== a.limits.fiveHour || edit.weekly !== a.limits.weekly)) {
+        if (edit && (edit.fiveHour !== a.limits.fiveHour || edit.weekly !== a.limits.weekly || edit.burndown !== a.burndown.enabled)) {
           await api(`/usage/limits/${a.connectionId}`, { method: 'PUT', body: edit });
         }
       }
@@ -231,7 +234,8 @@ export function SettingsPage() {
             <p className="small muted">Each subscription has its own limits. Subscription agents use the first one in your order (Connections) that's under them.</p>
           )}
           {usage.data?.allowance.map((a) => {
-            const current = limits[a.connectionId] ?? a.limits;
+            const current = limits[a.connectionId] ?? { ...a.limits, burndown: a.burndown.enabled };
+            const { ceiling, target } = a.burndown;
             return (
               <div key={a.connectionId} className="stack">
                 <strong>{a.connectionName}</strong>
@@ -252,6 +256,17 @@ export function SettingsPage() {
                     max={100}
                     onChange={(n) => setLimit(a.connectionId, current, { weekly: n })}
                   />
+                </div>
+                <div className="stack" style={{ gap: 4 }}>
+                  <label className="row" style={{ gap: 6 }}>
+                    <input type="checkbox" checked={current.burndown} onChange={(e) => setLimit(a.connectionId, current, { burndown: e.target.checked })} />
+                    Follow the weekly burndown
+                  </label>
+                  <span className="small muted">
+                    Workshop raises this subscription's weekly limit through the week, so usage reaches about {target}% when it resets. Your weekly limit above still caps it: set it to 100% to let
+                    the burndown decide. {ceiling === null ? 'Needs a reading from this week.' : `Now ${Math.round(ceiling)}%.`}
+                    {current.burndown && current.weekly < target && ` Your weekly limit of ${current.weekly}% stops it first.`}
+                  </span>
                 </div>
               </div>
             );

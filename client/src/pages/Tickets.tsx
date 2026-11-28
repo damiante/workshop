@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router';
 import type { Push, Size, Stage, TicketStatePatch, TicketView } from '../../../server/src/api-types.ts';
 import { api, useApi } from '../api.ts';
+import { SyncButton } from '../components/SyncButton.tsx';
 import { ErrorNote, Modal, Status } from '../components/ui.tsx';
 import { STAGE_TEXT, ticketStatus } from '../format.ts';
 
@@ -316,14 +317,8 @@ export function Tickets() {
   const { data, error } = useApi<TicketView[]>('/tickets', ['tickets', 'runs']);
   const [repo, setRepo] = useState('');
   const [filter, setFilter] = useState(FILTERS[0]);
-  const [syncing, setSyncing] = useState(false);
   const repos = [...new Set((data ?? []).map((t) => t.repo))].sort();
   const shown = (data ?? []).filter((t) => (!repo || t.repo === repo) && filter.match(t));
-
-  const sync = () => {
-    setSyncing(true);
-    api('/sync', { body: {} }).finally(() => setTimeout(() => setSyncing(false), 1500));
-  };
 
   return (
     <div className="stack">
@@ -332,9 +327,7 @@ export function Tickets() {
           <h1>Tickets</h1>
           <Link to="/dependencies">Dependencies</Link>
         </div>
-        <button onClick={sync} disabled={syncing}>
-          {syncing ? 'Syncing…' : 'Sync now'}
-        </button>
+        <SyncButton action="/sync" label="Sync now" title="Sync tickets from GitHub now" />
       </div>
       <div className="row">
         <select value={repo} onChange={(e) => setRepo(e.target.value)} style={{ width: 'auto' }} aria-label="Repository">

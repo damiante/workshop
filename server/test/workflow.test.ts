@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { addNeeds, agentSize, applyEdits, branchFor, describeStep, labelDiff, imageFor, label, nextStep, parseLabels, stageAfterClassify, stateEdits } from '../src/workflow/labels.ts';
 import { parseResult, schemaFor, type ClassifierResult, type Finding, type Rescue } from '../src/workflow/schemas.ts';
-import { MAX_FINDINGS_SHOWN, MAX_REWORKS, planTransition, reviewSection, stageForRework, type PlanContext } from '../src/workflow/transitions.ts';
+import { effectiveFindings, followUpBody, MAX_FINDINGS_SHOWN, MAX_REWORKS, planTransition, reviewSection, stageForRework, type PlanContext } from '../src/workflow/transitions.ts';
 import { capabilitiesOf, DEFAULT_PROMPTS, environmentText, INDEX_PATH, protocolText, SEARCH_INDEX, taskPrompt } from '../src/workflow/prompts.ts';
 import { isDuplicate, keywords, similarity } from '../src/workflow/similar.ts';
 import { stepPriority } from '../src/scheduler/gates.ts';
@@ -654,6 +654,7 @@ describe('code review', () => {
     detail: 'parse() throws on an empty string.',
     evidence: 'Ran npm test: 1 failed.',
     fix: 'Return null for empty input.',
+    consequence: 'Empty input crashes the page.',
     file: 'src/a.ts',
     line: 4,
     ...over,
@@ -689,6 +690,15 @@ describe('code review', () => {
       for (const size of ['m', 'l', 'xl'] as const) expect(stageForRework(size, [finding(), finding({ cause: 'design' })])).toBe('design');
       for (const size of ['xs', 's'] as const) expect(stageForRework(size, [finding({ cause: 'design' })])).toBe('implement');
       expect(stageForRework(null, [finding({ cause: 'design' })])).toBe('implement');
+    });
+    it('follows the threshold', () => {
+      const moderate = finding({ severity: 'moderate', cause: 'design' });
+      const minor = finding({ severity: 'minor', cause: 'design' });
+      expect(stageForRework('l', [moderate], 'moderate')).toBe('design');
+      expect(stageForRework('s', [moderate], 'moderate')).toBe('implement');
+      expect(stageForRework('l', [minor], 'moderate')).toBeNull();
+      expect(stageForRework('l', [minor], 'minor')).toBe('design');
+      expect(stageForRework('l', [minor, finding({ severity: 'minor' })], 'minor')).toBe('design');
     });
   });
 
@@ -781,6 +791,110 @@ describe('code review', () => {
     expect(planTransition(reviewCtx('s', { rework, mergeWithoutReview: true }), done([])).add).toEqual([label.stage('pr-review')]);
   });
 
+  describe('rework threshold', () => {
+    const moderate = (over: Partial<Finding> = {}) => finding({ severity: 'moderate', title: 'No test for empty input', ...over });
+    const minor = (over: Partial<Finding> = {}) => finding({ severity: 'minor', title: 'Rename y', consequence: '', ...over });
+
+    it('sends moderate findings back with the threshold at moderate, and says problems, not severe', () => {
+      const plan = planTransition(reviewCtx('s', { reworkOn: 'moderate' }), done([moderate(), minor()]));
+      expect(plan).toMatchObject({ add: [label.stage('implement')], rework: { count: 1, findings: [moderate()] }, followUps: null });
+      expect(plan.comment).toContain('Code review found 1 problem, so Workshop sends this ticket back to implementation (rework 1 of 3):');
+      expect(plan.comment).not.toContain('severe');
+      expect(plan.comment).not.toContain('Rename y');
+    });
+
+    it('opens the PR for minor findings below a moderate threshold', () => {
+      const plan = planTransition(reviewCtx('s', { reworkOn: 'moderate' }), done([minor()]));
+      expect(plan).toMatchObject({ add: [label.stage('pr-review')], openPr: true, rework: null, followUps: null });
+      expect(plan.flagged).toBeUndefined();
+      expect(plan.reviewNotes).toContain('- **Minor**');
+    });
+
+    it('sends minor findings back with the threshold at minor', () => {
+      const plan = planTransition(reviewCtx('s', { reworkOn: 'minor' }), done([minor()]));
+      expect(plan).toMatchObject({ add: [label.stage('implement')], rework: { count: 1, findings: [minor()] } });
+    });
+
+    it('keeps the default behaviour without a threshold', () => {
+      const plan = planTransition(reviewCtx(), done([moderate()]));
+      expect(plan).toMatchObject({ add: [label.stage('pr-review')], openPr: true });
+      expect(planTransition(reviewCtx('s', { reworkOn: 'severe' }), done([moderate()]))).toEqual(plan);
+    });
+
+    it('needs you for a moderate finding the rework did not fix, without saying severe', () => {
+      const rework = { count: 1, findings: [moderate()] };
+      const plan = planTransition(reviewCtx('s', { rework, reworkOn: 'moderate' }), done([moderate({ repeat: true })]));
+      expect(plan).toMatchObject({ add: [label.stage('pr-review')], openPr: true, rework: null, flagged: true });
+      expect(plan.reviewNotes).toContain("**The code review still found problems after Workshop's rework. Read them before approving.**");
+      const held = planTransition(reviewCtx('s', { rework, reworkOn: 'moderate', mergeWithoutReview: true }), done([moderate({ repeat: true })]));
+      expect(held.add).toEqual([label.stage('pr-review'), label.needsInfo]);
+      expect(held.comment).toContain("@damiante The code review still found problems after Workshop's rework, so it won't merge");
+    });
+
+    it('stops at MAX_REWORKS with a lower threshold too', () => {
+      const rework = { count: MAX_REWORKS, findings: [moderate()] };
+      const plan = planTransition(reviewCtx('s', { rework, reworkOn: 'minor' }), done([minor({ title: 'Another nit' })]));
+      expect(plan).toMatchObject({ add: [label.stage('pr-review')], openPr: true, flagged: true });
+    });
+
+    it('treats a severe or moderate finding without a consequence as minor', () => {
+      expect(effectiveFindings([moderate({ consequence: ' ' }), finding({ consequence: undefined }), minor()]).map((f) => f.severity)).toEqual(['minor', 'minor', 'minor']);
+      const vague = moderate({ consequence: '' });
+      const plan = planTransition(reviewCtx('s', { reworkOn: 'moderate' }), done([vague]));
+      expect(plan).toMatchObject({ add: [label.stage('pr-review')], openPr: true, followUps: null });
+      expect(plan.reviewNotes).toContain('- **Minor** (`src/a.ts:4`) No test for empty input');
+      const pushed = planTransition(reviewCtx('s', { reworkOn: 'moderate', pushToDefault: true, raiseTickets: true }), done([vague]));
+      expect(pushed).toMatchObject({ merge: true, followUps: null });
+    });
+
+    describe('pushing to the default branch', () => {
+      const pushCtx = (over: Partial<PlanContext> = {}) => reviewCtx('s', { pushToDefault: true, raiseTickets: true, reworkOn: 'moderate', ...over });
+
+      it('pushes a moderate finding left after MAX_REWORKS and keeps it for a follow-up', () => {
+        const rework = { count: MAX_REWORKS, findings: [moderate()] };
+        const plan = planTransition(pushCtx({ rework }), done([moderate(), minor()]));
+        expect(plan).toMatchObject({ add: [label.stage('merge')], merge: true, noPr: true, rework: null, followUps: [moderate()] });
+        expect(plan.add).not.toContain(label.needsInfo);
+        expect(plan.comment).toContain('Workshop opens a follow-up ticket for each problem at or above the rework threshold once this is pushed.');
+        expect(plan.comment).toContain('Rename y');
+      });
+
+      it('still waits for you on a severe finding left after rework, keeping the follow-ups', () => {
+        const rework = { count: 1, findings: [finding()] };
+        const plan = planTransition(pushCtx({ rework }), done([finding({ repeat: true }), moderate()]));
+        expect(plan.add).toEqual([label.stage('merge'), label.needsInfo]);
+        expect(plan.merge).toBeUndefined();
+        expect(plan.followUps).toEqual([finding({ repeat: true }), moderate()]);
+      });
+
+      it('lists minor findings below the threshold in the comment only', () => {
+        const plan = planTransition(pushCtx(), done([minor()]));
+        expect(plan).toMatchObject({ merge: true, followUps: null });
+        expect(plan.comment).toContain('Rename y');
+        expect(plan.comment).not.toContain('follow-up');
+      });
+
+      it("doesn't promise follow-ups on a raised ticket or with the setting off", () => {
+        const rework = { count: MAX_REWORKS, findings: [moderate()] };
+        const raised = planTransition(pushCtx({ rework, labels: [label.size('s'), label.stage('code-review'), label.raised] }), done([moderate()]));
+        expect(raised.followUps).toEqual([moderate()]);
+        expect(raised.comment).not.toContain('follow-up');
+        expect(planTransition(pushCtx({ rework, raiseTickets: false }), done([moderate()])).comment).not.toContain('follow-up');
+      });
+    });
+
+    it('writes a follow-up body that names the ticket, the place, the evidence and the commit', () => {
+      const body = followUpBody(moderate(), { number: 7 }, { sha: 'abcdef1234567', url: 'https://x/c' }, 'main');
+      expect(body).toContain('parse() throws on an empty string.');
+      expect(body).toContain('**What goes wrong:** Empty input crashes the page.');
+      expect(body).toContain('**Where:** `src/a.ts:4`');
+      expect(body).toContain('**Checked:** Ran npm test: 1 failed.');
+      expect(body).toContain('**Fix:** Return null for empty input.');
+      expect(body).toContain('found this in the work for #7, which was pushed to `main` as [`abcdef1`](https://x/c) without fixing it.');
+      expect(followUpBody(moderate({ file: undefined }), { number: 7 }, { sha: 'abc', url: 'u' }, 'main')).not.toContain('**Where:**');
+    });
+  });
+
   it('asks questions without publishing', () => {
     const plan = planTransition(reviewCtx(), { outcome: 'needs_info', summary: '', questions: ['Which?'] });
     expect(plan).toMatchObject({ add: [label.needsInfo], publish: false });
@@ -813,6 +927,11 @@ describe('code review', () => {
     expect(notes).not.toContain('a`b');
   });
 
+  it('requires a consequence for each finding in the schema given to Claude', () => {
+    expect(schemaFor('code-review')).toHaveProperty('properties.findings.items.required', expect.arrayContaining(['consequence']));
+    expect(JSON.stringify(schemaFor('code-review'))).toContain('When in doubt, choose the lower severity.');
+  });
+
   it('requires findings in the schema given to Claude', () => {
     expect(schemaFor('code-review')).toMatchObject({ required: ['outcome', 'summary', 'findings'] });
     expect(schemaFor('implement')).toMatchObject({ required: ['outcome', 'summary'] });
@@ -826,10 +945,12 @@ describe('code review', () => {
 
   describe('parseResult', () => {
     it('requires findings when done, and accepts an empty list', () => {
-      expect(parseResult('code-review', { outcome: 'done', summary: 's' })).toMatch(/^findings must be a list of \{ severity, cause, title, detail, evidence, fix \}/);
+      expect(parseResult('code-review', { outcome: 'done', summary: 's' })).toMatch(/^findings must be a list of \{ severity, cause, title, detail, evidence, fix, consequence \}/);
       expect(parseResult('code-review', done([]))).toMatchObject({ findings: [] });
       expect(parseResult('code-review', done([finding()]))).toMatchObject({ findings: [finding()] });
       expect(parseResult('code-review', done([finding({ file: undefined, line: undefined })]))).toMatchObject({ outcome: 'done' });
+      expect(parseResult('code-review', done([finding({ consequence: undefined })]))).toMatchObject({ outcome: 'done' });
+      expect(parseResult('code-review', done([finding({ consequence: 3 as unknown as string })]))).toMatch(/^findings must be/);
       expect(parseResult('code-review', { outcome: 'failed', summary: 's' })).toMatchObject({ outcome: 'failed' });
     });
     it('rejects a bad severity, cause, fix, evidence or line', () => {
@@ -885,9 +1006,29 @@ describe('code review', () => {
       expect(taskPrompt({ ...base, agent: 'merge', rework })).not.toContain('Code review findings');
     });
 
+    it('follows the rework threshold in the rework text', () => {
+      expect(taskPrompt({ ...base, agent: 'implement', rework })).toContain('Fix the severe code review findings above;');
+      expect(taskPrompt({ ...base, agent: 'implement', rework, reworkOn: 'moderate' })).toContain('Fix the code review findings above;');
+      expect(taskPrompt({ ...base, agent: 'code-review', rework, reworkOn: 'severe' })).toContain('## Severe findings from the previous code review');
+      expect(taskPrompt({ ...base, agent: 'code-review', rework, reworkOn: 'moderate' })).toContain('## Findings from the previous code review');
+    });
+
+    it('tells the reviewer the rubric and which findings send the ticket back, whatever its prompt', () => {
+      expect(protocolText({ branch: 'b', base: 'main' })).not.toContain('send the ticket back');
+      const text = (on: 'severe' | 'moderate' | 'minor') => protocolText({ branch: 'b', base: 'main', publishes: false, review: on });
+      for (const on of ['severe', 'moderate', 'minor'] as const) {
+        expect(text(on)).toContain('A severe or moderate finding with an empty "consequence" counts as minor.');
+        expect(text(on)).toContain('when in doubt choose the lower severity');
+      }
+      expect(text('severe')).toContain('Severe findings send the ticket back automatically; everything else goes to the owner.');
+      expect(text('moderate')).toContain('Severe and moderate findings send the ticket back automatically; minor ones go to the owner.');
+      expect(text('minor')).toContain('Every finding sends the ticket back automatically.');
+      expect(DEFAULT_PROMPTS['code-review']).not.toContain('send the ticket back automatically');
+    });
+
     it('no longer asks Implementation for its own adversarial review', () => {
       expect(DEFAULT_PROMPTS.implement).not.toMatch(/adversarial|subagent/);
-      expect(DEFAULT_PROMPTS['code-review']).toContain("When in doubt, it isn't severe");
+      expect(DEFAULT_PROMPTS['code-review']).toContain('When in doubt, choose the lower severity.');
     });
 
     it('tells every agent not to leave background commands running', () => {

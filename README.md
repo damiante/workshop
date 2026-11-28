@@ -28,7 +28,7 @@ Every few minutes Workshop reads open issues opened by you (or anyone else you l
 3. **Design review** (L and XL only). The Design adversary attacks the design and revises it.
 4. **Implement.** The Implementation agent writes the change and tests and pushes them.
 5. **Code review.** The Code reviewer reads the change and runs the tests, and reports what it finds. It changes nothing.
-   - Severe problems (the change doesn't do what the ticket asks, breaks something, loses data, opens a security hole) send the ticket back automatically: to design when the design is at fault and the ticket has one, otherwise to implementation. This happens once per review round. Severe problems that remain after that are flagged at the top of the pull request.
+   - Severe problems (the change doesn't do what the ticket asks, breaks something, loses data, opens a security hole) send the ticket back automatically: to design when the design is at fault and the ticket has one, otherwise to implementation. This happens up to 3 times per review round. Problems that remain after that are flagged at the top of the pull request. **Send back for rework on** (per repository) lowers the bar to moderate findings (verified problems with a concrete consequence) or to all findings.
    - Everything else goes into the pull request for you to decide on. Workshop then opens the pull request and asks for your review.
 6. **Your review.**
    - Approve, and Workshop merges the pull request (through GitHub, no tokens needed), closes the issue and deletes the branch. Only real merge conflicts need the Merge agent.
@@ -133,6 +133,7 @@ Once the App is installed, the **Repositories** list shows every repository it c
 - The commit message is the first line of the branch's first commit, so it follows the repository's own style, with the ticket number added (`… (#12)`); later commits are listed underneath.
 - If the default branch has moved on, Workshop merges it into the ticket's branch first; a conflict goes to the Merge agent.
 - Severe problems that survive a rework hold the ticket with `workshop/needs-info` and a comment listing them. Remove the label to push it as it is.
+- Other problems at or above the rework threshold that survive a rework don't hold it. With **Agents open tickets for what they notice** on, Workshop opens a follow-up ticket for each once the work is pushed. Findings below the threshold are only listed in the comment.
 - A ticket that already has a pull request keeps using it. A rule on the default branch that refuses the push raises an alert.
 
 ### 5. Settings

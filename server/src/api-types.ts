@@ -1,6 +1,6 @@
 // Types shared with the client (imported type-only). Keep this file free of runtime imports.
 
-export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media';
+export type Topic = 'runs' | 'tickets' | 'alerts' | 'connections' | 'settings' | 'allowance' | 'repos' | 'agents' | 'tokens' | 'media' | 'activity' | 'sync';
 
 export type Mode = 'paused' | 'scheduled' | 'always';
 
@@ -98,7 +98,12 @@ export interface RepoView {
   raiseTickets: boolean;
   /** Push reviewed work straight to the default branch as one commit, with no pull request and no review by you. */
   pushToDefault: boolean;
+  /** The lowest code review severity that sends a ticket back to design or implementation. */
+  reworkOn: ReworkOn;
 }
+
+/** The lowest code review severity that sends a ticket back for rework. */
+export type ReworkOn = 'severe' | 'moderate' | 'minor';
 
 export type AgentName = 'classifier' | 'design' | 'design-review' | 'implement' | 'code-review' | 'merge';
 export type Billing = 'subscription' | 'api';
@@ -117,6 +122,10 @@ export interface AgentClassView {
   prompt: string;
   defaultPrompt: string;
   customised: boolean;
+  /** The default the customisation was based on, when it differs from today's `defaultPrompt`. */
+  defaultBefore: string | null;
+  /** Customised before Workshop recorded which default it was based on, so it can't tell whether that changed. */
+  defaultUnknown: boolean;
   /** Fixed instructions Workshop appends; shown read-only. */
   protocol: string;
   maxTurns: number;
@@ -310,8 +319,44 @@ export interface AllowanceView {
   unknown: boolean;
   /** Tokens (input including cache, plus output) that runs on this connection used in the last 5 hours and 7 days. */
   tokens: { fiveHour: number; sevenDay: number };
-  /** No new agents start on this subscription above these, and its running agents pause. */
+  /** No new agents start on this subscription above these, and its running agents pause. With the burndown on, the weekly one applies as `min(limits.weekly, burndown.ceiling)`. */
   limits: Limits;
+  burndown: Burndown;
+}
+
+/** Which term of the burndown set its ceiling: the even share of the week, raised to catch up, held for your own use, or the target. */
+export type BurndownBound = 'linear' | 'catchUp' | 'userCap' | 'target';
+
+/** A subscription's weekly burndown: a weekly limit that rises to `target` by the reset. */
+export interface Burndown {
+  enabled: boolean;
+  /** Where weekly usage may reach now (percent); null without a weekly reading. Computed when off too. */
+  ceiling: number | null;
+  /** What it aims for at the reset: 100 minus a margin Workshop adjusts each week. */
+  target: number;
+  /** Weekly percentage points per hour: use that isn't Workshop's agents, and the agents' own while running (null until known). */
+  otherPerHour: number;
+  workshopPerHour: number | null;
+  /** Share of the time the 5-hour limit lets agents run, 0 to 1; null until known. */
+  duty: number | null;
+  /** Which term set the ceiling now; null with no ceiling. */
+  bound: BurndownBound | null;
+  /** Hours of readings behind otherPerHour and workshopPerHour. */
+  basis: { otherHours: number; workshopHours: number };
+}
+
+/** How one weekly window ended, and what it did to the burndown's margin. */
+export interface BurndownWeek {
+  resetsAt: number;
+  /** The burndown was on for most of the week's readings. */
+  enabled: boolean;
+  finalPct: number | null;
+  /** Hours the burndown held agents back. */
+  heldHours: number;
+  /** Claude reported a usage limit near the reset. */
+  blocked: boolean;
+  marginBefore: number;
+  marginAfter: number;
 }
 
 export interface HostView {
@@ -374,8 +419,18 @@ export interface Overview {
   /** Needs-you items you dismissed. */
   dismissed: TicketView[];
   queue: QueueItem[];
+  /** Every queued ticket; `queue` holds only the first few. */
+  queueTotal: number;
   hosts: HostView[];
   alerts: AlertView[];
+}
+
+export interface StatusSummary {
+  mode: Mode;
+  withinHours: boolean;
+  allowance: AllowanceView[];
+  /** Unacknowledged alerts. */
+  openAlerts: number;
 }
 
 export interface Usage {
@@ -486,8 +541,11 @@ export interface AllowanceHistory {
   connectionId: number;
   connectionName: string;
   limits: Limits;
-  /** Readings from the last 7 days, oldest first. */
-  samples: { ts: number; fiveHour: number | null; sevenDay: number | null }[];
+  burndown: Burndown;
+  /** Closed weeks, newest first, up to 8. */
+  weeks: BurndownWeek[];
+  /** Readings from the last 7 days, oldest first. `ceiling` is the burndown's at the reading, `burndown` whether it was on (null on older readings). */
+  samples: { ts: number; fiveHour: number | null; sevenDay: number | null; ceiling: number | null; burndown: boolean | null }[];
   sampledAt: number | null;
   blockedUntil: number | null;
   unknown: boolean;
@@ -518,7 +576,7 @@ export interface UsageHistory {
   byModel: SpendSeries[];
   byProject: SpendSeries[];
   byConnection: SpendSeries[];
-  /** The tickets that used the most in the range, by cost, highest first; at most 50. */
+  /** The tickets that used the most in the range, by cost, highest first; at most 500. */
   byTicket: TicketSpend[];
   allowance: AllowanceHistory[];
   projection: {
@@ -575,4 +633,21 @@ export interface LoginResponse {
   ok?: boolean;
   /** First sign-in: scan this with an authenticator app, then sign in again with a code. */
   enroll?: { secret: string; uri: string };
+}
+
+/** GET /api/sync: what the GitHub sync is doing (scheduled, Sync now or Refresh). In memory, so it resets on restart. */
+export interface SyncProgress {
+  /** requested: a click was received. waiting: queued behind the pass that's running. */
+  state: 'idle' | 'requested' | 'waiting' | 'running';
+  kind: 'sync' | 'refresh' | 'scheduled';
+  /** sync: done/total count repositories. usage (Refresh only): allowance checks. allocate (Refresh only): starting work. */
+  phase: 'sync' | 'usage' | 'allocate' | null;
+  /** The repository being synced. */
+  repo: string | null;
+  done: number;
+  total: number;
+  requestedAt: number | null;
+  lastFinishedAt: number | null;
+  /** The sync failures of the last pass, if any. */
+  lastError: string | null;
 }

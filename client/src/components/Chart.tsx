@@ -219,6 +219,8 @@ export interface LineSeries {
   color: string;
   /** [time, percentage], oldest first. */
   points: [number, number][];
+  /** Drawn dotted, like a limit that moves. */
+  dotted?: boolean;
 }
 
 /** Readings more than this far apart aren't joined, so idle time doesn't show as a slope. */
@@ -297,7 +299,7 @@ export function LineChart({ start, end, series, marks, label }: { start: number;
               </text>
             </g>
           ))}
-          {series.map((s) => paths(s.points).map((d, i) => <path key={`${s.name}-${i}`} d={d} className="chart-line" style={{ stroke: s.color }} />))}
+          {series.map((s) => paths(s.points).map((d, i) => <path key={`${s.name}-${i}`} d={d} className="chart-line" style={{ stroke: s.color, strokeDasharray: s.dotted ? '2 3' : undefined }} />))}
           {series.map((s) =>
             s.points
               .filter((p, i, all) => (i === 0 || p[0] - all[i - 1][0] > MAX_GAP) && (i === all.length - 1 || all[i + 1][0] - p[0] > MAX_GAP))
